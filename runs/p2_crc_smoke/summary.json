@@ -1,0 +1,100 @@
+{
+  "device": "cuda",
+  "n_cells": 768,
+  "n_bins8": 384,
+  "n_genes": 768,
+  "n_programs_prior": 5,
+  "n_programs_novo": 8,
+  "teacher_metrics": [
+    {
+      "epoch": 1,
+      "loss": 1.1651543378829956,
+      "loss_self": 0.6617395281791687,
+      "loss_nb": 0.7089820504188538,
+      "loss_edge": 0.7802560329437256
+    },
+    {
+      "epoch": 2,
+      "loss": 1.234494924545288,
+      "loss_self": 0.6413545608520508,
+      "loss_nb": 0.7408484220504761,
+      "loss_edge": 1.486313819885254
+    },
+    {
+      "epoch": 3,
+      "loss": 1.1122232675552368,
+      "loss_self": 0.623441219329834,
+      "loss_nb": 0.6854348182678223,
+      "loss_edge": 0.7752116918563843
+    }
+  ],
+  "student_metrics": {
+    "intrinsic": [
+      {
+        "epoch": 1,
+        "loss": 1.0681780576705933,
+        "rec": 0.897761881351471,
+        "kl": 1.6232950687408447,
+        "cls": 2.7590062618255615
+      },
+      {
+        "epoch": 2,
+        "loss": 1.0304614305496216,
+        "rec": 0.8582576513290405,
+        "kl": 1.8074005842208862,
+        "cls": 2.721116065979004
+      },
+      {
+        "epoch": 3,
+        "loss": 1.0027680397033691,
+        "rec": 0.8313842415809631,
+        "kl": 1.9159997701644897,
+        "cls": 2.6612749099731445
+      }
+    ],
+    "context": [
+      {
+        "epoch": 1,
+        "loss_intrinsic": 0.9823921918869019,
+        "loss_context": 1.9254651069641113,
+        "view_entropy": 1.7726625204086304
+      },
+      {
+        "epoch": 2,
+        "loss_intrinsic": 0.9643203616142273,
+        "loss_context": 1.8807692527770996,
+        "view_entropy": 1.773415446281433
+      },
+      {
+        "epoch": 3,
+        "loss_intrinsic": 0.9500759243965149,
+        "loss_context": 1.8744844198226929,
+        "view_entropy": 1.772815227508545
+      },
+      {
+        "epoch": 4,
+        "loss_intrinsic": 0.9367828965187073,
+        "loss_context": 1.8554354906082153,
+        "view_entropy": 1.7719533443450928
+      }
+    ]
+  },
+  "niche_counts": {
+    "0": 40,
+    "1": 86,
+    "2": 66,
+    "3": 230,
+    "4": 165,
+    "5": 49,
+    "6": 108,
+    "7": 24
+  },
+  "communication_skipped": false,
+  "communication_reason": null,
+  "communication_residual_r2": {
+    "ifng_response": -1.0682713045655396,
+    "tgfb_remodeling": -1.0768380151849146,
+    "spp1_interface": -0.9735816536202901,
+    "cxcl_chemotaxis": -1.0750004967863354
+  }
+}

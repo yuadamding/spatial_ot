@@ -1,0 +1,75 @@
+{
+  "paths": {
+    "cells_h5ad": "/storage/hackathon_2026/work/visium_hd_p2_crc/exports/visium_hd_h1_vm2jxxk_a1_sr410_current_methoddev_cells.h5ad",
+    "bins8_h5": "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_008um/filtered_feature_bc_matrix.h5",
+    "bins8_positions": "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_008um/spatial/tissue_positions.parquet",
+    "bins2_h5": "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_002um/filtered_feature_bc_matrix.h5",
+    "bins2_positions": "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_002um/spatial/tissue_positions.parquet",
+    "bins16_h5": "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_016um/filtered_feature_bc_matrix.h5",
+    "bins16_positions": "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_016um/spatial/tissue_positions.parquet",
+    "barcode_mappings": "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/barcode_mappings.parquet",
+    "programs_json": "/storage/hackathon_2026/spatial_ot/configs/crc_demo_programs.json",
+    "output_dir": "/storage/hackathon_2026/spatial_ot/runs/p2_crc_smoke"
+  },
+  "data": {
+    "seed": 1337,
+    "cell_subset": 768,
+    "bin_subset": 384,
+    "subset_strategy": "spatial_knn",
+    "cell_type_key": "coarse_cell_type",
+    "hvg_n": 512,
+    "encoder_gene_cap": 768,
+    "teacher_knn": 8,
+    "contact_knn": 8,
+    "context_knn": 24,
+    "ot_knn": 24,
+    "shell_bounds_um": [
+      12.0,
+      25.0,
+      50.0
+    ],
+    "top_program_features": 8,
+    "negative_edge_ratio": 1.0
+  },
+  "model": {
+    "hidden_dim": 192,
+    "z_dim": 16,
+    "teacher_dim": 16,
+    "de_novo_programs": 8,
+    "state_atoms": 12,
+    "niche_prototypes": 8,
+    "dropout": 0.1
+  },
+  "training": {
+    "device": "auto",
+    "teacher_epochs": 3,
+    "intrinsic_epochs": 3,
+    "context_epochs": 4,
+    "lr": 0.001,
+    "context_lr": 0.0007,
+    "weight_decay": 0.0001,
+    "grad_clip": 5.0,
+    "permutation_fraction": 0.1
+  },
+  "loss": {
+    "teacher_self": 1.0,
+    "teacher_nb": 0.6,
+    "teacher_edge": 0.1,
+    "intrinsic_rec": 1.0,
+    "kl_z": 0.02,
+    "context_self": 1.0,
+    "context_nb": 0.7,
+    "edge": 0.1,
+    "kl_s": 0.02,
+    "teacher_distill": 0.4,
+    "teacher_logits": 0.2,
+    "independence": 0.2,
+    "marker": 0.05,
+    "ot_hist": 1.0,
+    "ot_cov": 0.2,
+    "ot_shell": 0.4,
+    "ot_temperature": 0.4,
+    "comm_epsilon": 0.8,
+    "residual_ridge": 1.0
+  }
+}
