@@ -37,10 +37,19 @@ def aggregate_mean(features: torch.Tensor, edge_index: torch.Tensor) -> torch.Te
     src, dst = edge_index
     out = torch.zeros_like(features)
     deg = torch.zeros((features.size(0), 1), device=features.device, dtype=features.dtype)
-    out.index_add_(0, dst, features[src])
-    deg.index_add_(0, dst, torch.ones((dst.numel(), 1), device=features.device, dtype=features.dtype))
+    out.index_add_(0, src, features[dst])
+    deg.index_add_(0, src, torch.ones((dst.numel(), 1), device=features.device, dtype=features.dtype))
     deg = torch.clamp(deg, min=1.0)
     return out / deg
+
+
+def aggregate_sum(features: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    if edge_index.numel() == 0:
+        return torch.zeros_like(features)
+    src, dst = edge_index
+    out = torch.zeros_like(features)
+    out.index_add_(0, src, features[dst])
+    return out
 
 
 def cross_covariance_penalty(z: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
@@ -53,9 +62,22 @@ def cross_covariance_penalty(z: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
 def sample_negative_edges(n_nodes: int, positive_edge_index: torch.Tensor, ratio: float, generator: torch.Generator | None = None) -> torch.Tensor:
     n_positive = positive_edge_index.size(1)
     n_negative = max(1, int(math.ceil(n_positive * ratio)))
-    src = torch.randint(0, n_nodes, (n_negative,), generator=generator)
-    dst = torch.randint(0, n_nodes, (n_negative,), generator=generator)
-    return torch.stack([src, dst], dim=0).to(positive_edge_index.device)
+    positive = set((positive_edge_index[0] * n_nodes + positive_edge_index[1]).tolist())
+    negatives = []
+    while len(negatives) < n_negative:
+        src = torch.randint(0, n_nodes, (n_negative,), generator=generator)
+        dst = torch.randint(0, n_nodes, (n_negative,), generator=generator)
+        for s, d in zip(src.tolist(), dst.tolist()):
+            if s == d:
+                continue
+            key = s * n_nodes + d
+            if key in positive:
+                continue
+            negatives.append((s, d))
+            if len(negatives) >= n_negative:
+                break
+    neg = torch.as_tensor(negatives, dtype=torch.long, device=positive_edge_index.device)
+    return neg.T.contiguous()
 
 
 def edge_bce_loss(embedding: torch.Tensor, positive_edges: torch.Tensor, negative_edges: torch.Tensor) -> torch.Tensor:
@@ -129,11 +151,13 @@ class MaskedProgramDecoder(nn.Module):
         novo_dim: int,
         n_genes: int,
         mask: np.ndarray | None = None,
+        include_z: bool = True,
     ):
         super().__init__()
         self.prior_dim = prior_dim
         self.novo_dim = novo_dim
-        self.z_proj = nn.Linear(z_dim, n_genes)
+        self.include_z = include_z
+        self.z_proj = nn.Linear(z_dim, n_genes) if include_z else None
         self.bias = nn.Parameter(torch.zeros(n_genes))
         self.theta = nn.Parameter(torch.zeros(n_genes))
         if prior_dim > 0:
@@ -150,7 +174,9 @@ class MaskedProgramDecoder(nn.Module):
             self.novo_weight = None
 
     def forward(self, z: torch.Tensor, s_prior: torch.Tensor, s_novo: torch.Tensor, library: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = self.z_proj(z) + self.bias
+        logits = self.bias.unsqueeze(0).expand(z.size(0), -1)
+        if self.include_z:
+            logits = logits + self.z_proj(z)
         if self.prior_dim > 0:
             logits = logits + s_prior @ (self.prior_weight * self.prior_mask)
         if self.novo_dim > 0:
@@ -161,10 +187,9 @@ class MaskedProgramDecoder(nn.Module):
 
 
 class TeacherContextModel(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, teacher_dim: int, teacher_logit_dim: int, dropout: float = 0.1):
+    def __init__(self, input_dim: int, hidden_dim: int, teacher_dim: int, dropout: float = 0.1):
         super().__init__()
         self.encoder = MLP(input_dim * 2, hidden_dim, teacher_dim, dropout=dropout)
-        self.logit_head = nn.Linear(teacher_dim, teacher_logit_dim)
         self.self_decoder = NBDecoder(teacher_dim, hidden_dim, input_dim, dropout=dropout)
         self.nb_decoder = NBDecoder(teacher_dim, hidden_dim, input_dim, dropout=dropout)
 
@@ -180,7 +205,6 @@ class TeacherContextModel(nn.Module):
         mu_nb, theta_nb = self.nb_decoder(hidden, neighbor_library)
         return {
             "u": hidden,
-            "q": self.logit_head(hidden),
             "mu_self": mu_self,
             "theta_self": theta_self,
             "mu_nb": mu_nb,
@@ -234,8 +258,8 @@ class StudentSpatialModel(nn.Module):
         self.gate = nn.Sequential(nn.Linear(z_dim + max(prior_dim, 1), self.s_dim), nn.Sigmoid())
         self.teacher_proj = nn.Linear(self.s_dim, teacher_dim)
         self.teacher_logits = nn.Linear(self.s_dim, teacher_logit_dim)
-        self.self_program_decoder = MaskedProgramDecoder(z_dim, prior_dim, novo_dim, n_genes, mask=self_mask)
-        self.nb_program_decoder = MaskedProgramDecoder(z_dim, prior_dim, novo_dim, n_genes, mask=neighborhood_mask)
+        self.self_program_decoder = MaskedProgramDecoder(z_dim, prior_dim, novo_dim, n_genes, mask=self_mask, include_z=True)
+        self.nb_program_decoder = MaskedProgramDecoder(z_dim, prior_dim, novo_dim, n_genes, mask=neighborhood_mask, include_z=False)
         self.func_head = nn.Linear(z_dim, n_cell_types)
 
     def encode_intrinsic(self, x_log: torch.Tensor, aux: torch.Tensor, batch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.nn import functional as F
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.metrics import pairwise_distances
 
 from .communication import fit_communication_flows
 from .config import ExperimentConfig
@@ -16,7 +18,6 @@ from .nn import (
     StudentSpatialModel,
     TeacherContextModel,
     aggregate_mean,
-    cross_covariance_penalty,
     edge_bce_loss,
     kl_normal,
     nb_nll,
@@ -60,6 +61,25 @@ def _teacher_targets_to_cells(overlap: np.ndarray, teacher_u: np.ndarray, teache
     return overlap @ teacher_u, overlap @ teacher_q
 
 
+def _teacher_cluster_probs(teacher_u: np.ndarray, n_clusters: int, temperature: float, seed: int) -> np.ndarray:
+    kmeans = MiniBatchKMeans(n_clusters=n_clusters, random_state=seed, batch_size=min(2048, len(teacher_u)))
+    centers = kmeans.fit(teacher_u).cluster_centers_.astype(np.float32)
+    distances = pairwise_distances(teacher_u, centers, metric="euclidean").astype(np.float32)
+    scaled = -distances / max(temperature, 1e-4)
+    scaled = scaled - scaled.max(axis=1, keepdims=True)
+    probs = np.exp(scaled)
+    probs = probs / (probs.sum(axis=1, keepdims=True) + 1e-8)
+    return probs.astype(np.float32)
+
+
+def _novo_l1_penalty(model: StudentSpatialModel) -> torch.Tensor:
+    penalty = torch.tensor(0.0, device=next(model.parameters()).device)
+    for decoder in [model.self_program_decoder, model.nb_program_decoder]:
+        if decoder.novo_weight is not None:
+            penalty = penalty + decoder.novo_weight.abs().mean()
+    return penalty
+
+
 def _build_student(
     data: PreparedSpatialOTData,
     config: ExperimentConfig,
@@ -88,7 +108,6 @@ def train_teacher(data: PreparedSpatialOTData, config: ExperimentConfig, device:
         input_dim=data.n_genes,
         hidden_dim=config.model.hidden_dim,
         teacher_dim=config.model.teacher_dim,
-        teacher_logit_dim=config.model.niche_prototypes,
         dropout=config.model.dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=config.training.weight_decay)
@@ -132,7 +151,14 @@ def train_teacher(data: PreparedSpatialOTData, config: ExperimentConfig, device:
     model.eval()
     with torch.no_grad():
         out = model(x, x_nb_log, library, nb_library)
-    return out["u"].cpu().numpy(), out["q"].cpu().numpy(), metrics
+    teacher_u = out["u"].cpu().numpy()
+    teacher_q = _teacher_cluster_probs(
+        teacher_u=teacher_u,
+        n_clusters=config.model.niche_prototypes,
+        temperature=config.loss.teacher_temperature,
+        seed=config.data.seed,
+    )
+    return teacher_u, teacher_q, metrics
 
 
 def train_student(
@@ -203,9 +229,12 @@ def train_student(
         marker_view = aggregate_mean(marker_scores, context_edge) if marker_scores.size(1) > 0 else marker_scores
         s, _, _, _ = model.encode_context(z, short_view, mid_view, comp_view, marker_view, teacher_u_cell, aux)
         mu_x, theta_x = model.decode_intrinsic(z, library)
-        dep = cross_covariance_penalty(z, s.detach())
         cls = F.cross_entropy(model.func_head(z), cell_type)
-        loss_intr = config.loss.intrinsic_rec * nb_nll(x_counts, mu_x, theta_x) + config.loss.kl_z * kl_normal(mu_z, logvar_z) + config.loss.independence * dep + config.loss.marker * cls
+        loss_intr = (
+            config.loss.intrinsic_rec * nb_nll(x_counts, mu_x, theta_x)
+            + config.loss.kl_z * kl_normal(mu_z, logvar_z)
+            + config.loss.marker * cls
+        )
         loss_intr.backward()
         torch.nn.utils.clip_grad_norm_(intrinsic_params, config.training.grad_clip)
         intrinsic_optimizer.step()
@@ -222,12 +251,18 @@ def train_student(
         teach_emb, teach_logits = model.teacher_targets(s)
         emb = model.embedding(z_detached, s)
         neg_edge = sample_negative_edges(data.n_cells, context_edge, config.data.negative_edge_ratio)
+        teacher_q_target = torch.clamp(teacher_q_cell, min=1e-8)
+        teacher_q_target = teacher_q_target / teacher_q_target.sum(dim=1, keepdim=True)
+        kl_teacher = F.kl_div(F.log_softmax(teach_logits, dim=1), teacher_q_target, reduction="batchmean")
+        independence = torch.mean((z_detached.T @ s) ** 2) / max(z_detached.size(0) - 1, 1)
         loss_ctx = (
             config.loss.context_self * nb_nll(x_counts, dec["mu_self"], dec["theta_self"])
             + config.loss.context_nb * nb_nll(x_nb_counts, dec["mu_nb"], dec["theta_nb"])
             + config.loss.kl_s * kl_normal(mu_s, logvar_s)
             + config.loss.teacher_distill * F.mse_loss(teach_emb, teacher_u_cell)
-            + config.loss.teacher_logits * F.mse_loss(teach_logits, teacher_q_cell)
+            + config.loss.teacher_logits * kl_teacher
+            + config.loss.independence * independence
+            + config.loss.sparsity * _novo_l1_penalty(model)
             + config.loss.edge * edge_bce_loss(emb, context_edge, neg_edge)
         )
         loss_ctx.backward()

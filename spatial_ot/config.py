@@ -77,10 +77,14 @@ class LossConfig:
     teacher_logits: float = 0.2
     independence: float = 0.25
     marker: float = 0.05
+    sparsity: float = 1e-4
     ot_hist: float = 1.0
     ot_cov: float = 0.25
     ot_shell: float = 0.5
     ot_temperature: float = 0.35
+    state_temperature: float = 0.5
+    niche_temperature: float = 0.35
+    teacher_temperature: float = 0.5
     comm_epsilon: float = 0.8
     residual_ridge: float = 1.0
 

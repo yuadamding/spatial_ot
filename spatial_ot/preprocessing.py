@@ -10,6 +10,7 @@ import pandas as pd
 import scanpy as sc
 from scipy import sparse
 from sklearn.neighbors import NearestNeighbors
+import torch
 
 from .config import ExperimentConfig
 from .programs import ProgramLibrary, build_program_library, collect_program_genes, load_programs, score_programs
@@ -62,6 +63,9 @@ class PreparedSpatialOTData:
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _counts_matrix(adata: ad.AnnData):
@@ -245,10 +249,19 @@ def aggregate_mean_numpy(values: np.ndarray, edge_index: np.ndarray) -> np.ndarr
     src, dst = edge_index
     out = np.zeros_like(values, dtype=np.float32)
     deg = np.zeros((values.shape[0], 1), dtype=np.float32)
-    np.add.at(out, dst, values[src])
-    np.add.at(deg, dst, 1.0)
+    np.add.at(out, src, values[dst])
+    np.add.at(deg, src, 1.0)
     deg[deg == 0] = 1.0
     return out / deg
+
+
+def aggregate_sum_numpy(values: np.ndarray, edge_index: np.ndarray) -> np.ndarray:
+    if edge_index.size == 0:
+        return np.zeros_like(values)
+    src, dst = edge_index
+    out = np.zeros_like(values, dtype=np.float32)
+    np.add.at(out, src, values[dst])
+    return out
 
 
 def _extract_cell_aux(adata: ad.AnnData) -> np.ndarray:
@@ -277,8 +290,11 @@ def _extract_batches(obs: pd.DataFrame) -> np.ndarray:
 
 
 def _extract_cell_types(obs: pd.DataFrame, key: str) -> tuple[np.ndarray, list[str], np.ndarray]:
+    if not key:
+        raise ValueError("A non-empty cell_type_key is required for the current scaffold.")
     if key not in obs:
-        key = "cell_type" if "cell_type" in obs else obs.columns[0]
+        available = ", ".join(map(str, obs.columns[:20]))
+        raise KeyError(f"Requested cell_type_key '{key}' was not found in obs. Available columns include: {available}")
     values = obs[key].astype(str).replace({"nan": "unknown", "None": "unknown"})
     categorical = pd.Categorical(values)
     labels = categorical.codes.astype(np.int64)
@@ -293,8 +309,14 @@ def prepare_data(config: ExperimentConfig) -> PreparedSpatialOTData:
     cell_adata = ad.read_h5ad(config.paths.cells_h5ad)
     raw_coords = np.asarray(cell_adata.obsm["spatial"], dtype=np.float32)
     if config.data.subset_strategy == "stratified":
+        if config.data.cell_type_key not in cell_adata.obs:
+            available = ", ".join(map(str, cell_adata.obs.columns[:20]))
+            raise KeyError(
+                f"Requested cell_type_key '{config.data.cell_type_key}' was not found in obs for stratified subsetting. "
+                f"Available columns include: {available}"
+            )
         subset_idx = _stratified_subset(
-            cell_adata.obs.get(config.data.cell_type_key, cell_adata.obs.iloc[:, 0]),
+            cell_adata.obs[config.data.cell_type_key],
             config.data.cell_subset,
             config.data.seed,
         )
@@ -367,8 +389,8 @@ def prepare_data(config: ExperimentConfig) -> PreparedSpatialOTData:
         shell_bounds=tuple(config.data.shell_bounds_um),
     )
 
-    bin_neighbor_target = aggregate_mean_numpy(bin_counts, teacher_edge_index)
-    cell_neighbor_target = aggregate_mean_numpy(cell_counts, context_edge_index)
+    bin_neighbor_target = aggregate_sum_numpy(bin_counts, teacher_edge_index)
+    cell_neighbor_target = aggregate_sum_numpy(cell_counts, context_edge_index)
     cell_aux = _extract_cell_aux(cell_adata)
     batch_onehot = _extract_batches(cell_adata.obs)
     cell_type_labels, cell_type_names, cell_type_onehot = _extract_cell_types(cell_adata.obs, config.data.cell_type_key)

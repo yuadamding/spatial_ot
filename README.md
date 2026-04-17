@@ -1,6 +1,6 @@
 # spatial_ot
 
-`spatial_ot` is a concrete implementation scaffold for the teacher-student spatial niche model described for segmented Visium HD CRC.
+`spatial_ot` is a concrete research scaffold for a teacher-student spatial niche model on segmented Visium HD CRC.
 
 The package currently realizes:
 
@@ -19,7 +19,13 @@ The implementation is intentionally stage-wise:
 4. OT niche fitting on frozen latents
 5. communication-flow fitting and residual attribution
 
-This is a faithful realization of the proposed stack, but not a claim that the exact combined method is already a published benchmarked model.
+This is a staged approximation of the proposed stack, not a claim that the exact combined method is already a published or fully benchmarked model.
+
+Current active-path notes:
+
+- the active teacher branch consumes the `8 µm` bins
+- `bins2_h5`, `bins16_h5`, and `contact_knn` are reserved config hooks and are not yet wired into the core training path
+- the smoke and pilot configs are subset-based development runs, not full-sample production runs
 
 ## Layout
 

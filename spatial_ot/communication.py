@@ -41,6 +41,57 @@ def _normalize_mass(x: np.ndarray) -> np.ndarray:
     return x / x.sum()
 
 
+def _masked_sinkhorn(
+    a: np.ndarray,
+    b: np.ndarray,
+    cost: np.ndarray,
+    mask: np.ndarray,
+    reg: float,
+    num_iter: int = 500,
+) -> np.ndarray:
+    active_rows = np.flatnonzero(mask.any(axis=1) & (a > 0))
+    active_cols = np.flatnonzero(mask.any(axis=0) & (b > 0))
+    if active_rows.size == 0 or active_cols.size == 0:
+        return np.zeros_like(cost, dtype=np.float32)
+
+    while True:
+        mask_sub = mask[np.ix_(active_rows, active_cols)]
+        keep_rows = mask_sub.any(axis=1)
+        keep_cols = mask_sub.any(axis=0)
+        if keep_rows.all() and keep_cols.all():
+            break
+        active_rows = active_rows[keep_rows]
+        active_cols = active_cols[keep_cols]
+        if active_rows.size == 0 or active_cols.size == 0:
+            return np.zeros_like(cost, dtype=np.float32)
+
+    a_sub = _normalize_mass(a[active_rows])
+    b_sub = _normalize_mass(b[active_cols])
+    cost_sub = cost[np.ix_(active_rows, active_cols)].astype(np.float64)
+    mask_sub = mask[np.ix_(active_rows, active_cols)]
+    kernel = np.exp(-cost_sub / max(reg, 1e-6)).astype(np.float64)
+    kernel[~mask_sub] = 0.0
+    if not np.any(kernel > 0):
+        return np.zeros_like(cost, dtype=np.float32)
+    kernel[kernel > 0] = np.maximum(kernel[kernel > 0], 1e-16)
+
+    u = np.ones_like(a_sub, dtype=np.float64)
+    v = np.ones_like(b_sub, dtype=np.float64)
+    for _ in range(num_iter):
+        Kv = kernel @ v
+        Kv[Kv <= 1e-16] = 1e-16
+        u = a_sub / Kv
+        KTu = kernel.T @ u
+        KTu[KTu <= 1e-16] = 1e-16
+        v = b_sub / KTu
+
+    transport_sub = (u[:, None] * kernel) * v[None, :]
+    transport_sub[~mask_sub] = 0.0
+    transport = np.zeros_like(cost, dtype=np.float32)
+    transport[np.ix_(active_rows, active_cols)] = transport_sub.astype(np.float32)
+    return transport
+
+
 def fit_communication_flows(
     data: PreparedSpatialOTData,
     intrinsic_mu: np.ndarray,
@@ -66,9 +117,8 @@ def fit_communication_flows(
     within_radius = distances <= max(config.data.shell_bounds_um)
     np.fill_diagonal(within_radius, False)
     costs = distances / (distances[within_radius].max() + 1e-6)
-    costs[~within_radius] = 25.0
+    costs[~within_radius] = 0.0
 
-    hard_niche = niche_probs.argmax(axis=1)
     incoming_columns: list[np.ndarray] = []
     outgoing_columns: list[np.ndarray] = []
     active_program_names: list[str] = []
@@ -93,16 +143,15 @@ def fit_communication_flows(
             continue
         a = _normalize_mass(source_mass)
         b = _normalize_mass(receiver_mass)
-        transport = ot.sinkhorn(
-            a,
-            b,
-            costs,
+        transport = _masked_sinkhorn(
+            a=a,
+            b=b,
+            cost=costs,
+            mask=within_radius,
             reg=config.loss.comm_epsilon,
-            numItermax=500,
-            warn=False,
+            num_iter=500,
         ).astype(np.float32)
         transport *= total_mass
-        transport[~within_radius] = 0.0
         outgoing_columns.append(transport.sum(axis=1).astype(np.float32))
         incoming_columns.append(transport.sum(axis=0).astype(np.float32))
         active_program_names.append(program.name)
@@ -111,16 +160,15 @@ def fit_communication_flows(
         _, r2 = _ridge_fit(incoming_columns[-1], residual, alpha=config.loss.residual_ridge)
         residual_scores[program.name] = r2
 
-        for sender_niche in np.unique(hard_niche):
-            sender_mask = hard_niche == sender_niche
-            for receiver_niche in np.unique(hard_niche):
-                receiver_mask_niche = hard_niche == receiver_niche
+        niche_flow = niche_probs.T @ transport @ niche_probs
+        for sender_niche in range(niche_flow.shape[0]):
+            for receiver_niche in range(niche_flow.shape[1]):
                 niche_rows.append(
                     {
                         "program": program.name,
                         "sender_niche": int(sender_niche),
                         "receiver_niche": int(receiver_niche),
-                        "flow": float(transport[np.ix_(sender_mask, receiver_mask_niche)].sum()),
+                        "flow": float(niche_flow[sender_niche, receiver_niche]),
                     }
                 )
 
