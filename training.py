@@ -18,6 +18,7 @@ from .nn import (
     StudentSpatialModel,
     TeacherContextModel,
     aggregate_mean,
+    cross_covariance_penalty,
     edge_bce_loss,
     kl_normal,
     nb_nll,
@@ -103,6 +104,28 @@ def _build_student(
     return model.to(device)
 
 
+def _validate_prepared_data(data: PreparedSpatialOTData, config: ExperimentConfig) -> None:
+    if data.n_cells < 2:
+        raise ValueError("Prepared dataset must contain at least 2 cells.")
+    if data.n_bins < 1:
+        raise ValueError("Prepared dataset must contain at least 1 teacher bin.")
+    if data.n_cells < config.model.state_atoms:
+        raise ValueError(
+            f"Prepared dataset has {data.n_cells} cells, but state_atoms={config.model.state_atoms}. "
+            "Reduce state_atoms or increase the cell subset."
+        )
+    if data.n_cells < config.model.niche_prototypes:
+        raise ValueError(
+            f"Prepared dataset has {data.n_cells} cells, but niche_prototypes={config.model.niche_prototypes}. "
+            "Reduce niche_prototypes or increase the cell subset."
+        )
+    if data.n_bins < config.model.niche_prototypes:
+        raise ValueError(
+            f"Prepared dataset has {data.n_bins} teacher bins, but niche_prototypes={config.model.niche_prototypes}. "
+            "Reduce niche_prototypes or increase the bin subset."
+        )
+
+
 def train_teacher(data: PreparedSpatialOTData, config: ExperimentConfig, device: torch.device, checkpoint_dir: Path) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     model = TeacherContextModel(
         input_dim=data.n_genes,
@@ -115,7 +138,7 @@ def train_teacher(data: PreparedSpatialOTData, config: ExperimentConfig, device:
     x_counts = _tensor(data.bin_counts, device)
     x_nb_counts = _tensor(data.bin_neighbor_target, device)
     x_nb_log = torch.log1p(x_nb_counts)
-    library = _tensor(data.bin_library, device)
+    library = _tensor(data.bin_library_panel, device)
     nb_library = x_nb_counts.sum(dim=1, keepdim=True) + 1e-4
     edge_index = torch.as_tensor(data.teacher_edge_index, dtype=torch.long, device=device)
     metrics = []
@@ -173,7 +196,7 @@ def train_student(
     x_log = _tensor(data.cell_log_counts, device)
     x_counts = _tensor(data.cell_counts, device)
     x_nb_counts = _tensor(data.cell_neighbor_target, device)
-    library = _tensor(data.cell_library, device)
+    library = _tensor(data.cell_library_panel, device)
     nb_library = x_nb_counts.sum(dim=1, keepdim=True) + 1e-4
     aux = _tensor(data.cell_aux, device)
     batch = _tensor(data.batch_onehot, device)
@@ -223,11 +246,6 @@ def train_student(
         intrinsic_optimizer.zero_grad()
         x_input = _permute_features(x_log, config.training.permutation_fraction)
         z, mu_z, logvar_z = model.encode_intrinsic(x_input, aux, batch)
-        short_view = _stack_shells(shells, 0, 1, data.n_cells, z)
-        mid_view = _stack_shells(shells, 1, len(shells), data.n_cells, z)
-        comp_view = aggregate_mean(composition, context_edge)
-        marker_view = aggregate_mean(marker_scores, context_edge) if marker_scores.size(1) > 0 else marker_scores
-        s, _, _, _ = model.encode_context(z, short_view, mid_view, comp_view, marker_view, teacher_u_cell, aux)
         mu_x, theta_x = model.decode_intrinsic(z, library)
         cls = F.cross_entropy(model.func_head(z), cell_type)
         loss_intr = (
@@ -254,7 +272,7 @@ def train_student(
         teacher_q_target = torch.clamp(teacher_q_cell, min=1e-8)
         teacher_q_target = teacher_q_target / teacher_q_target.sum(dim=1, keepdim=True)
         kl_teacher = F.kl_div(F.log_softmax(teach_logits, dim=1), teacher_q_target, reduction="batchmean")
-        independence = torch.mean((z_detached.T @ s) ** 2) / max(z_detached.size(0) - 1, 1)
+        independence = cross_covariance_penalty(z_detached, s)
         loss_ctx = (
             config.loss.context_self * nb_nll(x_counts, dec["mu_self"], dec["theta_self"])
             + config.loss.context_nb * nb_nll(x_nb_counts, dec["mu_nb"], dec["theta_nb"])
@@ -291,7 +309,7 @@ def _final_student_outputs(
 ) -> dict[str, np.ndarray]:
     model.eval()
     x_log = _tensor(data.cell_log_counts, device)
-    library = _tensor(data.cell_library, device)
+    library = _tensor(data.cell_library_panel, device)
     nb_counts = _tensor(data.cell_neighbor_target, device)
     nb_library = nb_counts.sum(dim=1, keepdim=True) + 1e-4
     aux = _tensor(data.cell_aux, device)
@@ -305,12 +323,14 @@ def _final_student_outputs(
     teacher_q_cell = _tensor(teacher_q_cell, device)
 
     with torch.no_grad():
-        z, mu_z, logvar_z = model.encode_intrinsic(x_log, aux, batch)
+        _, mu_z, logvar_z = model.encode_intrinsic(x_log, aux, batch)
+        z = mu_z
         short_view = _stack_shells(shells, 0, 1, data.n_cells, z)
         mid_view = _stack_shells(shells, 1, len(shells), data.n_cells, z)
         comp_view = aggregate_mean(composition, context_edge)
         marker_view = aggregate_mean(marker_scores, context_edge) if marker_scores.size(1) > 0 else marker_scores
-        s, mu_s, logvar_s, view_weights = model.encode_context(z, short_view, mid_view, comp_view, marker_view, teacher_u_cell, aux)
+        _, mu_s, logvar_s, view_weights = model.encode_context(z, short_view, mid_view, comp_view, marker_view, teacher_u_cell, aux)
+        s = mu_s
         intrinsic_mu, _ = model.decode_intrinsic(z, library)
         program_mu = model.decode_programs(z, s, library, nb_library)
         teacher_proj, teacher_logits = model.teacher_targets(s)
@@ -360,6 +380,17 @@ def _save_outputs(
     cells_out.uns["spatial_ot"] = {
         "summary_json": json.dumps(summary),
         "program_names": [str(name) for name in communication_result.program_names],
+        "view_names": [
+            "short_shell",
+            "mid_shells",
+            "annotation_composition",
+            "program_score_view",
+            "teacher_context",
+            "aux_features",
+        ],
+        "gene_panel_report_json": json.dumps(data.gene_panel_report),
+        "teacher_overlap_report_json": json.dumps(data.teacher_overlap_report),
+        "graph_report_json": json.dumps(data.graph_report),
     }
     cells_out.write_h5ad(output_dir / "cells_output.h5ad")
 
@@ -392,6 +423,7 @@ def run_experiment(config: ExperimentConfig) -> dict:
     device = _device_from_config(config)
     print(f"[spatial_ot] preparing data on {device}", flush=True)
     data = prepare_data(config)
+    _validate_prepared_data(data, config)
     checkpoint_dir = output_dir / "checkpoints"
 
     print("[spatial_ot] stage A: teacher pretraining", flush=True)
@@ -416,6 +448,19 @@ def run_experiment(config: ExperimentConfig) -> dict:
         "n_cells": data.n_cells,
         "n_bins8": data.n_bins,
         "n_genes": data.n_genes,
+        "count_sources": {
+            "cells": data.cell_count_source,
+            "bins8": data.bin_count_source,
+            "library_semantics": {
+                "cell_library_panel": "sum over selected gene panel",
+                "bin_library_panel": "sum over selected gene panel",
+                "cell_library_full": "sum over validated raw-count matrix before gene-panel restriction",
+                "bin_library_full": "sum over validated raw-count matrix before gene-panel restriction",
+            },
+        },
+        "gene_panel_report": data.gene_panel_report,
+        "teacher_overlap_report": data.teacher_overlap_report,
+        "graph_report": data.graph_report,
         "n_programs_prior": data.program_library.n_programs,
         "n_programs_novo": config.model.de_novo_programs,
         "teacher_metrics": teacher_metrics,

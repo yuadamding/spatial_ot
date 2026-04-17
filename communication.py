@@ -116,6 +116,17 @@ def fit_communication_flows(
     distances = pairwise_distances(data.cell_coords, metric="euclidean").astype(np.float32)
     within_radius = distances <= max(config.data.shell_bounds_um)
     np.fill_diagonal(within_radius, False)
+    if not np.any(within_radius):
+        return CommunicationResult(
+            program_names=[],
+            incoming=np.zeros((data.n_cells, 0), dtype=np.float32),
+            outgoing=np.zeros((data.n_cells, 0), dtype=np.float32),
+            niche_flow_table=pd.DataFrame(),
+            top_edges=pd.DataFrame(),
+            residual_r2={},
+            skipped=True,
+            skip_reason="No cell-cell pairs fell within the configured communication radius.",
+        )
     costs = distances / (distances[within_radius].max() + 1e-6)
     costs[~within_radius] = 0.0
 
@@ -172,29 +183,42 @@ def fit_communication_flows(
                     }
                 )
 
-        top_indices = np.argwhere(transport > np.quantile(transport[transport > 0], 0.995) if np.any(transport > 0) else np.inf)
-        for sender_idx, receiver_idx in top_indices[:200]:
-            edge_rows.append(
-                {
-                    "program": program.name,
-                    "sender_id": data.cell_ids[sender_idx],
-                    "receiver_id": data.cell_ids[receiver_idx],
-                    "sender_index": int(sender_idx),
-                    "receiver_index": int(receiver_idx),
-                    "distance_um": float(distances[sender_idx, receiver_idx]),
-                    "flow": float(transport[sender_idx, receiver_idx]),
-                }
-            )
+        if np.any(transport > 0):
+            threshold = np.quantile(transport[transport > 0], 0.995)
+            sender_idx, receiver_idx = np.nonzero(transport > threshold)
+            flow_values = transport[sender_idx, receiver_idx]
+            order = np.argsort(-flow_values)
+            for edge_idx in order[:200]:
+                s_idx = int(sender_idx[edge_idx])
+                r_idx = int(receiver_idx[edge_idx])
+                edge_rows.append(
+                    {
+                        "program": program.name,
+                        "sender_id": data.cell_ids[s_idx],
+                        "receiver_id": data.cell_ids[r_idx],
+                        "sender_index": s_idx,
+                        "receiver_index": r_idx,
+                        "distance_um": float(distances[s_idx, r_idx]),
+                        "flow": float(transport[s_idx, r_idx]),
+                    }
+                )
 
     incoming = np.column_stack(incoming_columns).astype(np.float32) if incoming_columns else np.zeros((data.n_cells, 0), dtype=np.float32)
     outgoing = np.column_stack(outgoing_columns).astype(np.float32) if outgoing_columns else np.zeros((data.n_cells, 0), dtype=np.float32)
     skipped = len(active_program_names) == 0
+    top_edges = pd.DataFrame(edge_rows)
+    if not top_edges.empty:
+        top_edges = top_edges.sort_values(
+            by=["flow", "program", "sender_index", "receiver_index"],
+            ascending=[False, True, True, True],
+            kind="mergesort",
+        ).reset_index(drop=True)
     return CommunicationResult(
         program_names=active_program_names,
         incoming=incoming,
         outgoing=outgoing,
         niche_flow_table=pd.DataFrame(niche_rows),
-        top_edges=pd.DataFrame(edge_rows),
+        top_edges=top_edges,
         residual_r2=residual_scores,
         skipped=skipped,
         skip_reason="No active communication programs after gene-panel filtering." if skipped else None,

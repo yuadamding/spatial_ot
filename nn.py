@@ -63,20 +63,21 @@ def sample_negative_edges(n_nodes: int, positive_edge_index: torch.Tensor, ratio
     n_positive = positive_edge_index.size(1)
     n_negative = max(1, int(math.ceil(n_positive * ratio)))
     positive = set((positive_edge_index[0] * n_nodes + positive_edge_index[1]).tolist())
-    negatives = []
+    negatives: set[tuple[int, int]] = set()
+    draw_size = max(n_negative * 2, 1024)
     while len(negatives) < n_negative:
-        src = torch.randint(0, n_nodes, (n_negative,), generator=generator)
-        dst = torch.randint(0, n_nodes, (n_negative,), generator=generator)
+        src = torch.randint(0, n_nodes, (draw_size,), generator=generator)
+        dst = torch.randint(0, n_nodes, (draw_size,), generator=generator)
         for s, d in zip(src.tolist(), dst.tolist()):
             if s == d:
                 continue
             key = s * n_nodes + d
             if key in positive:
                 continue
-            negatives.append((s, d))
+            negatives.add((s, d))
             if len(negatives) >= n_negative:
                 break
-    neg = torch.as_tensor(negatives, dtype=torch.long, device=positive_edge_index.device)
+    neg = torch.as_tensor(sorted(negatives)[:n_negative], dtype=torch.long, device=positive_edge_index.device)
     return neg.T.contiguous()
 
 
