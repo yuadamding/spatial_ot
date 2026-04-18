@@ -11,7 +11,7 @@ from .visualization import plot_preprocessed_inputs, plot_result_bundle
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the Spatial OT teacher-student niche model.")
+    parser = argparse.ArgumentParser(description="Run spatial_ot multilevel OT utilities and legacy scaffold commands.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     train = sub.add_parser("train", help="Run a staged training experiment.")
@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     multilevel = sub.add_parser(
         "multilevel-ot",
-        help="Run cluster-specific shared-support multilevel OT on subregions built from cell-level features.",
+        help="Run shape-normalized cluster-specific semi-relaxed Wasserstein clustering on subregions built from cell-level features.",
     )
     multilevel.add_argument("--input-h5ad", required=True, help="Input cell-level H5AD.")
     multilevel.add_argument("--output-dir", required=True, help="Output directory for multilevel OT artifacts.")

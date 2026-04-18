@@ -5,7 +5,7 @@ cd /storage/hackathon_2026/spatial_ot
 
 conda run -n ml1 python -m spatial_ot multilevel-ot \
   --input-h5ad /storage/hackathon_2026/work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad \
-  --output-dir /storage/hackathon_2026/spatial_ot/runs/p2_crc_multilevel_umap \
+  --output-dir /storage/hackathon_2026/work/spatial_ot_runs/p2_crc_multilevel_umap \
   --feature-obsm-key X_umap_marker_genes_3d \
   --spatial-x-key cell_x \
   --spatial-y-key cell_y \

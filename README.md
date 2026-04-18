@@ -1,8 +1,17 @@
 # spatial_ot
 
-`spatial_ot` is a concrete research scaffold for a teacher-student spatial niche model on segmented Visium HD CRC.
+`spatial_ot` is a compact research package for multilevel, shape-normalized semi-relaxed Wasserstein clustering on spatial subregions.
 
-The package currently realizes:
+The current primary path realizes:
+
+- geometry-only OT normalization of each subregion into a shared reference domain
+- compressed empirical measures over canonical coordinates plus local features
+- cluster-specific shared heterogeneity atoms with subregion-specific mixture weights
+- semi-relaxed unbalanced OT matching with residual similarity alignment
+- shape-leakage diagnostics so boundary geometry can be checked explicitly
+- cell-level projection and visualization from the fitted subregion clusters
+
+The package also still contains the earlier teacher-student Visium HD scaffold for legacy experiments:
 
 - an `8 µm` teacher branch trained on binned Visium HD counts
 - an intrinsic cell branch that learns `z`
@@ -21,19 +30,19 @@ The implementation is intentionally stage-wise:
 
 This is a staged approximation of the proposed stack, not a claim that the exact combined method is already a published or fully benchmarked model.
 
-Current active-path notes:
+Current notes:
 
-- the active teacher branch consumes the `8 µm` bins
-- the smoke and pilot configs are subset-based development runs, not full-sample production runs
-- count validation expects integer-like raw counts and keeps both full-library and panel-library summaries internally
+- the recommended active path is `multilevel-ot`
+- the legacy `train` path is still available, but it is not the main model surface anymore
+- outputs should be written outside the package directory to keep the package compact
 
 ## Layout
 
 - `spatial_ot/`: package code
-- `configs/`: runnable config files and demo prior programs
-- `runs/`: experiment outputs
+- `configs/`: config files and demo prior programs
+- `tests/`: regression and multilevel OT tests
 
-## Smoke run
+## Legacy train path
 
 The smoke config points at the already-prepared `P2 CRC` Visium HD sample in this workspace and keeps the subset/epoch sizes intentionally small.
 
@@ -42,18 +51,7 @@ cd /storage/hackathon_2026/spatial_ot
 conda run -n ml1 python -m spatial_ot train --config configs/p2_crc_smoke.toml
 ```
 
-Expected outputs land under:
-
-`/storage/hackathon_2026/spatial_ot/runs/p2_crc_smoke/`
-
-Key artifacts:
-
-- `cells_output.h5ad`
-- `teacher_bins_output.h5ad`
-- `summary.json`
-- `niche_flows.csv`
-- `top_flow_edges.parquet`
-- stage checkpoints under `checkpoints/`
+Use an output path outside `/storage/hackathon_2026/spatial_ot` if you want to keep the package directory clean.
 
 ## Input visualization
 
@@ -86,7 +84,7 @@ Example on the `P2 CRC` cell-level marker-gene UMAP object:
 cd /storage/hackathon_2026/spatial_ot
 conda run -n ml1 python -m spatial_ot multilevel-ot \
   --input-h5ad /storage/hackathon_2026/work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad \
-  --output-dir /storage/hackathon_2026/spatial_ot/runs/p2_crc_multilevel_umap \
+  --output-dir /storage/hackathon_2026/work/spatial_ot_runs/p2_crc_multilevel_umap \
   --feature-obsm-key X_umap_marker_genes_3d \
   --spatial-x-key cell_x \
   --spatial-y-key cell_y \
@@ -120,7 +118,7 @@ Key artifacts from this path:
 ## Config notes
 
 - `subset_strategy` should currently be `spatial_grid` or `stratified`
-- the public config surface currently exposes only the active `8 µm` teacher path
+- the public TOML config surface currently applies to the legacy `train` path
 - overlap fallback from cells to the nearest `8 µm` bin is controlled by `allow_nearest_overlap_fallback`
 
 ## Pilot config
