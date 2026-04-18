@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import anndata as ad
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
+from sklearn.decomposition import PCA
 
 from .config import ExperimentConfig
 from .preprocessing import PreparedSpatialOTData, prepare_data
@@ -355,3 +357,208 @@ def plot_preprocessed_inputs(
     fig.savefig(output_path, dpi=250, bbox_inches="tight")
     plt.close(fig)
     return output_path
+
+
+def _sorted_niche_labels(labels: np.ndarray) -> list[str]:
+    unique = np.unique(labels.astype(str))
+    try:
+        return sorted(unique, key=lambda x: int(x))
+    except ValueError:
+        return sorted(unique.tolist())
+
+
+def _label_color_mapping(labels: np.ndarray) -> dict[str, tuple[float, float, float, float]]:
+    ordered = _sorted_niche_labels(labels)
+    cmap = plt.get_cmap("tab20", max(len(ordered), 2))
+    return {label: cmap(i) for i, label in enumerate(ordered)}
+
+
+def _compute_latent_embedding(features: np.ndarray, random_state: int = 1337) -> tuple[np.ndarray, str]:
+    try:
+        import umap.umap_ as umap  # type: ignore
+
+        reducer = umap.UMAP(
+            n_components=2,
+            n_neighbors=min(30, max(5, features.shape[0] - 1)),
+            min_dist=0.25,
+            metric="euclidean",
+            random_state=random_state,
+        )
+        return reducer.fit_transform(features).astype(np.float32), "UMAP"
+    except Exception:
+        pca = PCA(n_components=2, random_state=random_state)
+        return pca.fit_transform(features).astype(np.float32), "PCA"
+
+
+def _render_flow_heatmap(ax: plt.Axes, matrix: np.ndarray, title: str, xticks: list[str], yticks: list[str]) -> None:
+    vmax = float(np.max(matrix)) if matrix.size else 1.0
+    im = ax.imshow(matrix, aspect="auto", cmap="magma", vmin=0.0, vmax=vmax if vmax > 0 else 1.0)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel("Receiver niche")
+    ax.set_ylabel("Sender niche")
+    ax.set_xticks(np.arange(len(xticks)))
+    ax.set_xticklabels(xticks, rotation=90, fontsize=8)
+    ax.set_yticks(np.arange(len(yticks)))
+    ax.set_yticklabels(yticks, fontsize=8)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Flow")
+
+
+def plot_result_bundle(run_dir: str | Path, output_dir: str | Path | None = None) -> dict[str, str]:
+    run_dir = Path(run_dir)
+    if output_dir is None:
+        output_dir = run_dir / "figures"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cells_path = run_dir / "cells_output.h5ad"
+    flows_path = run_dir / "niche_flows.csv"
+    summary_path = run_dir / "summary.json"
+
+    cells = ad.read_h5ad(cells_path)
+    flows = pd.read_csv(flows_path) if flows_path.exists() else pd.DataFrame(columns=["program", "sender_niche", "receiver_niche", "flow"])
+    summary = {}
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text())
+
+    labels = cells.obs["niche_label"].astype(str).to_numpy()
+    niche_order = _sorted_niche_labels(labels)
+    color_map = _label_color_mapping(labels)
+    coords = np.asarray(cells.obsm["spatial"], dtype=np.float32)
+    marker_size = _marker_size(cells.n_obs, low=2.0, high=18.0)
+
+    spatial_map_path = output_dir / "niche_spatial_map.png"
+    fig, ax = plt.subplots(figsize=(10, 9), constrained_layout=True)
+    for label in niche_order:
+        mask = labels == label
+        ax.scatter(
+            coords[mask, 0],
+            coords[mask, 1],
+            s=marker_size,
+            color=color_map[label],
+            linewidths=0,
+            alpha=0.9,
+            label=f"N{label} ({int(mask.sum())})",
+            rasterized=cells.n_obs > 20000,
+        )
+    _format_spatial_axis(ax, "spatial_ot pilot niches in tissue space")
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True, fontsize=8, ncol=1)
+    fig.savefig(spatial_map_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+
+    latent = np.concatenate(
+        [
+            np.asarray(cells.obsm["z_intrinsic"], dtype=np.float32),
+            np.asarray(cells.obsm["s_program"], dtype=np.float32),
+        ],
+        axis=1,
+    )
+    latent_2d, embedding_method = _compute_latent_embedding(latent)
+    latent_path = output_dir / "niche_latent_umap.png"
+    fig, ax = plt.subplots(figsize=(9, 8), constrained_layout=True)
+    for label in niche_order:
+        mask = labels == label
+        ax.scatter(
+            latent_2d[mask, 0],
+            latent_2d[mask, 1],
+            s=12.0,
+            color=color_map[label],
+            linewidths=0,
+            alpha=0.85,
+            label=f"N{label}",
+            rasterized=cells.n_obs > 20000,
+        )
+    ax.set_title(f"spatial_ot latent {embedding_method} colored by niche")
+    ax.set_xlabel(f"{embedding_method} 1")
+    ax.set_ylabel(f"{embedding_method} 2")
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True, fontsize=8)
+    fig.savefig(latent_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+
+    niche_sizes = pd.Series(labels).value_counts().reindex(niche_order, fill_value=0)
+    size_path = output_dir / "niche_size_barplot.png"
+    fig, ax = plt.subplots(figsize=(10, 4.8), constrained_layout=True)
+    ax.bar([f"N{x}" for x in niche_order], niche_sizes.to_numpy(), color=[color_map[x] for x in niche_order], edgecolor="black", linewidth=0.3)
+    ax.set_title("Cell counts per niche")
+    ax.set_xlabel("Niche")
+    ax.set_ylabel("Cells")
+    ax.tick_params(axis="x", rotation=45)
+    fig.savefig(size_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+
+    composition_path = output_dir / "niche_composition_heatmap.png"
+    composition_key = None
+    for candidate in ["broad_cell_type", "coarse_cell_type", "cell_type"]:
+        if candidate in cells.obs:
+            composition_key = candidate
+            break
+    if composition_key is not None:
+        composition = pd.crosstab(cells.obs["niche_label"].astype(str), cells.obs[composition_key].astype(str), normalize="index")
+        top_cols = composition.mean(axis=0).sort_values(ascending=False).head(12).index.tolist()
+        composition = composition.reindex(index=niche_order, fill_value=0.0)[top_cols]
+        fig, ax = plt.subplots(figsize=(11, max(4.0, 0.38 * len(niche_order) + 2.0)), constrained_layout=True)
+        im = ax.imshow(composition.to_numpy(), aspect="auto", cmap="viridis", vmin=0.0, vmax=float(composition.to_numpy().max()) if composition.size else 1.0)
+        ax.set_title(f"Niche composition by {composition_key}")
+        ax.set_xlabel(composition_key)
+        ax.set_ylabel("Niche")
+        ax.set_xticks(np.arange(len(top_cols)))
+        ax.set_xticklabels(top_cols, rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(np.arange(len(niche_order)))
+        ax.set_yticklabels([f"N{x}" for x in niche_order], fontsize=8)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Fraction")
+        fig.savefig(composition_path, dpi=250, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        composition_path = None
+
+    flow_path = output_dir / "niche_flow_heatmaps.png"
+    if not flows.empty:
+        programs = sorted(flows["program"].astype(str).unique().tolist())
+        ncols = min(2, len(programs) + 1)
+        nrows = int(np.ceil((len(programs) + 1) / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(6.8 * ncols, 5.4 * nrows), constrained_layout=True)
+        axes = np.atleast_1d(axes).ravel()
+
+        total = flows.groupby(["sender_niche", "receiver_niche"], as_index=False)["flow"].sum()
+        total_mat = (
+            total.assign(sender_niche=total["sender_niche"].astype(str), receiver_niche=total["receiver_niche"].astype(str))
+            .pivot(index="sender_niche", columns="receiver_niche", values="flow")
+            .reindex(index=niche_order, columns=niche_order, fill_value=0.0)
+            .to_numpy(dtype=np.float32)
+        )
+        _render_flow_heatmap(axes[0], total_mat, "All programs combined", [f"N{x}" for x in niche_order], [f"N{x}" for x in niche_order])
+
+        for ax, program in zip(axes[1:], programs):
+            sub = flows[flows["program"].astype(str) == program].copy()
+            sub["sender_niche"] = sub["sender_niche"].astype(str)
+            sub["receiver_niche"] = sub["receiver_niche"].astype(str)
+            mat = sub.pivot(index="sender_niche", columns="receiver_niche", values="flow").reindex(index=niche_order, columns=niche_order, fill_value=0.0).to_numpy(dtype=np.float32)
+            _render_flow_heatmap(ax, mat, program, [f"N{x}" for x in niche_order], [f"N{x}" for x in niche_order])
+
+        for ax in axes[len(programs) + 1 :]:
+            ax.axis("off")
+
+        fig.savefig(flow_path, dpi=250, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        flow_path = None
+
+    manifest = {
+        "run_dir": str(run_dir),
+        "n_cells": int(cells.n_obs),
+        "n_genes": int(cells.n_vars),
+        "n_niches": int(len(niche_order)),
+        "niche_order": niche_order,
+        "embedding_method": embedding_method,
+        "spatial_map": str(spatial_map_path),
+        "latent_plot": str(latent_path),
+        "size_plot": str(size_path),
+        "composition_plot": str(composition_path) if composition_path is not None else None,
+        "flow_plot": str(flow_path) if flow_path is not None else None,
+        "summary_json": str(summary_path) if summary_path.exists() else None,
+        "flow_programs": sorted(flows["program"].astype(str).unique().tolist()) if not flows.empty else [],
+        "summary_device": summary.get("device"),
+    }
+    manifest_path = output_dir / "visualization_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    manifest["manifest"] = str(manifest_path)
+    return manifest
