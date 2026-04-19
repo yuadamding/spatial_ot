@@ -1,29 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Validated-ish default helper for local development.
-# Prefer a metric-stable feature space such as X_pca and avoid
-# observed-hull geometry fallback unless you explicitly want an
-# exploratory local-pattern scan.
+# Exploratory helper for local development when the available feature space
+# is a UMAP embedding and observed-hull geometry fallback is acceptable.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-INPUT_H5AD="${INPUT_H5AD:-../data/cells.h5ad}"
-OUTPUT_DIR="${OUTPUT_DIR:-../work/spatial_ot_runs/p2_crc_multilevel_pca}"
-FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X_pca}"
+INPUT_H5AD="${INPUT_H5AD:-../work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad}"
+OUTPUT_DIR="${OUTPUT_DIR:-../work/spatial_ot_runs/p2_crc_multilevel_umap_exploratory}"
+FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X_umap_marker_genes_3d}"
 SPATIAL_X_KEY="${SPATIAL_X_KEY:-cell_x}"
 SPATIAL_Y_KEY="${SPATIAL_Y_KEY:-cell_y}"
 SPATIAL_SCALE="${SPATIAL_SCALE:-0.2737012522439323}"
 N_CLUSTERS="${N_CLUSTERS:-8}"
 ATOMS_PER_CLUSTER="${ATOMS_PER_CLUSTER:-8}"
 COMPUTE_DEVICE="${COMPUTE_DEVICE:-auto}"
-ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"
-
-EXTRA_FLAGS=()
-if [[ "$ALLOW_OBSERVED_HULL_GEOMETRY" == "1" ]]; then
-  EXTRA_FLAGS+=(--allow-observed-hull-geometry)
-fi
 
 conda run -n ml1 python -m spatial_ot multilevel-ot \
   --input-h5ad "$INPUT_H5AD" \
@@ -51,4 +43,4 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --max-iter 10 \
   --tol 1e-4 \
   --seed 1337 \
-  "${EXTRA_FLAGS[@]}"
+  --allow-observed-hull-geometry

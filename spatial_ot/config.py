@@ -152,18 +152,25 @@ class DeepFeatureConfig:
     layers: int = 2
     neighbor_k: int = 8
     radius_um: float | None = None
+    short_radius_um: float | None = None
+    mid_radius_um: float | None = None
+    graph_layers: int = 2
+    graph_aggr: str = "mean"
     epochs: int = 50
     batch_size: int = 4096
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     validation: str = "none"
+    validation_context_mode: str = "inductive"
     batch_key: str | None = None
     count_layer: str | None = None
     device: str = "auto"
     reconstruction_weight: float = 1.0
     context_weight: float = 0.5
+    contrastive_weight: float = 0.1
     variance_weight: float = 0.1
     decorrelation_weight: float = 0.01
+    output_embedding: str = "joint"
     early_stopping_patience: int = 10
     min_delta: float = 1e-4
     restore_best: bool = True
@@ -276,22 +283,42 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
     if not str(config.ot.compute_device).strip():
         raise ValueError("ot.compute_device must be a non-empty string")
 
-    valid_methods = {"none", "autoencoder"}
+    valid_methods = {"none", "autoencoder", "graph_autoencoder"}
     if config.deep.method not in valid_methods:
         raise ValueError(f"deep.method must be one of {sorted(valid_methods)}, got '{config.deep.method}'")
     valid_validation = {"none", "spatial_block", "sample_holdout"}
     if config.deep.validation not in valid_validation:
         raise ValueError(f"deep.validation must be one of {sorted(valid_validation)}, got '{config.deep.validation}'")
+    valid_context_modes = {"inductive", "transductive"}
+    if config.deep.validation_context_mode not in valid_context_modes:
+        raise ValueError(
+            f"deep.validation_context_mode must be one of {sorted(valid_context_modes)}, got '{config.deep.validation_context_mode}'"
+        )
     if config.deep.latent_dim < 2:
         raise ValueError("deep.latent_dim must be at least 2")
     if config.deep.hidden_dim < 4:
         raise ValueError("deep.hidden_dim must be at least 4")
     if config.deep.layers < 1:
         raise ValueError("deep.layers must be at least 1")
+    if config.deep.graph_layers < 1:
+        raise ValueError("deep.graph_layers must be at least 1")
     if config.deep.neighbor_k < 1:
         raise ValueError("deep.neighbor_k must be at least 1")
     if config.deep.radius_um is not None and config.deep.radius_um <= 0:
         raise ValueError("deep.radius_um must be > 0 when set")
+    if config.deep.short_radius_um is not None and config.deep.short_radius_um <= 0:
+        raise ValueError("deep.short_radius_um must be > 0 when set")
+    if config.deep.mid_radius_um is not None and config.deep.mid_radius_um <= 0:
+        raise ValueError("deep.mid_radius_um must be > 0 when set")
+    if (
+        config.deep.short_radius_um is not None
+        and config.deep.mid_radius_um is not None
+        and config.deep.mid_radius_um < config.deep.short_radius_um
+    ):
+        raise ValueError("deep.mid_radius_um must be >= deep.short_radius_um when both are set")
+    valid_graph_aggr = {"mean"}
+    if config.deep.graph_aggr not in valid_graph_aggr:
+        raise ValueError(f"deep.graph_aggr must be one of {sorted(valid_graph_aggr)}, got '{config.deep.graph_aggr}'")
     if config.deep.epochs < 1:
         raise ValueError("deep.epochs must be at least 1")
     if config.deep.batch_size < 1:
@@ -300,9 +327,12 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("deep.learning_rate must be > 0 and deep.weight_decay must be >= 0")
     if config.deep.count_layer is not None:
         raise NotImplementedError("deep.count_layer is configured but count reconstruction is not implemented yet.")
-    for name in ["reconstruction_weight", "context_weight", "variance_weight", "decorrelation_weight"]:
+    for name in ["reconstruction_weight", "context_weight", "contrastive_weight", "variance_weight", "decorrelation_weight"]:
         if getattr(config.deep, name) < 0:
             raise ValueError(f"deep.{name} must be >= 0")
+    valid_outputs = {"intrinsic", "context", "joint"}
+    if config.deep.output_embedding not in valid_outputs:
+        raise ValueError(f"deep.output_embedding must be one of {sorted(valid_outputs)}, got '{config.deep.output_embedding}'")
     if config.deep.early_stopping_patience < 1:
         raise ValueError("deep.early_stopping_patience must be at least 1")
     if config.deep.min_delta < 0:

@@ -74,10 +74,11 @@ By default this writes `input_2d_overview.png` under the configured output direc
 
 Prefer PCA, standardized marker expression, or another calibrated latent space for serious OT runs. UMAP can be useful for exploratory clustering and visualization, but its Euclidean geometry is not generally metric-preserving.
 
-The current deep feature adapter is a conservative Stage 1 component:
+The current deep feature adapter is still a research-stage component, but it is stronger than a plain denoising MLP:
 
 - `deep.method = "autoencoder"` learns a reusable feature adapter before OT
-- it is not yet a graph neural network
+- `deep.method = "graph_autoencoder"` adds native Torch multi-scale message passing over short/mid radius graphs before OT
+- `validation_context_mode = "inductive"` keeps train and validation neighborhood targets separated to reduce transductive leakage
 - `batch_key` currently supports validation/sample-holdout bookkeeping, not true batch correction
 - `count_layer` is reserved but not implemented for count reconstruction yet
 - the active multilevel OT path now has its own Torch compute device via `--compute-device` / `ot.compute_device`; `auto` uses CUDA when available for cost matrices, projection, and the semi-relaxed Sinkhorn solver
@@ -91,7 +92,7 @@ Without explicit masks or polygons, boundary-shape invariance is not guaranteed.
 
 This path:
 
-- can learn a reusable feature adapter before OT through `--deep-feature-method autoencoder`
+- can learn a reusable feature adapter before OT through `--deep-feature-method autoencoder` or `--deep-feature-method graph_autoencoder`
 - builds overlapping spatial subregions from cells
 - learns a geometry-only OT map that normalizes each subregion into a shared reference domain
 - compresses each subregion into a smaller empirical measure over canonical coordinates plus features
@@ -136,7 +137,7 @@ Exploratory variant when only a UMAP embedding is available:
 --feature-obsm-key X_umap_marker_genes_3d
 ```
 
-The active path now also supports a TOML config surface. A portable example lives at `configs/multilevel_deep_example.toml`, and you can run it with:
+The active path now also supports a TOML config surface. A portable example lives at `configs/multilevel_deep_example.toml`, and it now demonstrates the graph-aware encoder:
 
 ```bash
 cd spatial_ot
@@ -152,7 +153,7 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --input-h5ad ../data/cells.h5ad \
   --output-dir ../work/spatial_ot_runs/example_output \
   --feature-obsm-key X_pca \
-  --deep-feature-method autoencoder
+  --deep-feature-method graph_autoencoder
 ```
 
 Key artifacts from this path:
@@ -174,9 +175,15 @@ The saved summary now includes:
 - geometry-source counts and convex-hull fallback frequency
 - assigned OT fallback frequency and the effective entropy values actually used by the solver
 - the requested and resolved Torch compute device for the active multilevel path
+- package version, git SHA, and summary schema version for reproducibility
 - a `boundary_invariance_claim` field showing whether explicit geometry supported the run; when observed-hull fallback is used the claim is explicitly exploratory
 - random-fold and spatial-block shape-leakage diagnostics
 - canonical-normalizer radius / interpolation diagnostics
+
+Helper scripts:
+
+- `run_p2_crc_multilevel_ot.sh`: safer default helper using `X_pca`
+- `run_p2_crc_multilevel_ot_exploratory_umap.sh`: explicit exploratory helper when only a UMAP feature space is available
 
 ## Config notes
 

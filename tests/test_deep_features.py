@@ -39,6 +39,37 @@ def test_deep_feature_encoder_fit_save_load(tmp_path) -> None:
     assert np.allclose(embedding, loaded_embedding, atol=1e-5)
 
 
+def test_graph_deep_feature_encoder_fit_save_load(tmp_path) -> None:
+    rng = np.random.default_rng(456)
+    features = rng.normal(size=(40, 6)).astype(np.float32)
+    coords = rng.normal(size=(40, 2)).astype(np.float32)
+    config = DeepFeatureConfig(
+        method="graph_autoencoder",
+        latent_dim=4,
+        hidden_dim=24,
+        layers=2,
+        neighbor_k=4,
+        radius_um=0.8,
+        short_radius_um=0.6,
+        mid_radius_um=1.2,
+        graph_layers=1,
+        epochs=3,
+        batch_size=16,
+        validation="none",
+        save_model=True,
+    )
+    encoder = SpatialOTFeatureEncoder(config)
+    encoder.fit(features=features, coords_um=coords, seed=5)
+    embedding = encoder.transform(features=features, coords_um=coords)
+    assert embedding.shape == (40, 4)
+
+    model_path = tmp_path / "graph_deep_feature_model.pt"
+    encoder.save(model_path)
+    loaded = SpatialOTFeatureEncoder.load(model_path)
+    loaded_embedding = loaded.transform(features=features, coords_um=coords)
+    assert np.allclose(embedding, loaded_embedding, atol=1e-5)
+
+
 def test_deep_transform_batched_equals_default(tmp_path) -> None:
     rng = np.random.default_rng(55)
     features = rng.normal(size=(64, 6)).astype(np.float32)
@@ -131,16 +162,18 @@ atoms_per_cluster = 4
 compute_device = "cpu"
 
 [deep]
-method = "autoencoder"
+method = "graph_autoencoder"
 latent_dim = 5
 epochs = 4
+validation_context_mode = "inductive"
 """
     )
     config = load_multilevel_config(config_path)
     assert config.paths.feature_obsm_key == "X_pca"
     assert config.ot.n_clusters == 3
-    assert config.deep.method == "autoencoder"
+    assert config.deep.method == "graph_autoencoder"
     assert config.deep.latent_dim == 5
+    assert config.deep.validation_context_mode == "inductive"
 
 
 def test_count_layer_rejected_until_implemented(tmp_path) -> None:
@@ -210,11 +243,15 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
         seed=5,
         compute_device="cpu",
         deep_config=DeepFeatureConfig(
-            method="autoencoder",
+            method="graph_autoencoder",
             latent_dim=3,
             hidden_dim=16,
             layers=1,
             neighbor_k=3,
+            radius_um=1.0,
+            short_radius_um=0.75,
+            mid_radius_um=1.5,
+            graph_layers=1,
             epochs=2,
             batch_size=12,
             validation="none",
@@ -222,9 +259,11 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
         ),
     )
     assert summary["deep_features"]["enabled"] is True
-    assert summary["deep_features"]["method"] == "autoencoder"
+    assert summary["deep_features"]["method"] == "graph_autoencoder"
     assert "deep_feature_model" in summary["outputs"]
     assert "deep_feature_history" in summary["outputs"]
+    assert "deep_feature_model_meta" in summary["outputs"]
+    assert "deep_feature_scaler" in summary["outputs"]
     saved_summary = json.loads((output_dir / "summary.json").read_text())
     assert saved_summary["deep_features"]["enabled"] is True
     required_summary_keys = {
@@ -241,3 +280,5 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert saved_summary["boundary_invariance_claim"] == "not_supported_observed_hull_fallback"
     assert saved_summary["compute_device_requested"] == "cpu"
     assert saved_summary["compute_device_used"] == "cpu"
+    assert saved_summary["deep_features"]["validation_context_mode"] == "inductive"
+    assert saved_summary["summary_schema_version"] == "0.0.8"

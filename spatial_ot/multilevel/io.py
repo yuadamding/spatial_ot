@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+import subprocess
 import warnings
 
 import anndata as ad
@@ -14,7 +16,7 @@ from sklearn.metrics import silhouette_score
 import torch
 
 from ..config import DeepFeatureConfig, MultilevelExperimentConfig
-from ..deep_features import SpatialOTFeatureEncoder, fit_deep_features
+from ..deep.features import SpatialOTFeatureEncoder, fit_deep_features, save_deep_feature_history
 from .core import _resolve_compute_device, fit_multilevel_ot
 from .geometry import (
     _shape_descriptor_frame,
@@ -41,6 +43,33 @@ def _compute_subregion_embedding(weights: np.ndarray, seed: int) -> tuple[np.nda
     except Exception:
         pca = PCA(n_components=2, random_state=seed)
         return pca.fit_transform(weights).astype(np.float32), "PCA"
+
+
+def _package_version() -> str:
+    try:
+        return version("spatial-ot")
+    except PackageNotFoundError:
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        if pyproject.exists():
+            import tomllib
+
+            payload = tomllib.loads(pyproject.read_text())
+            return str(payload.get("project", {}).get("version", "unknown"))
+        return "unknown"
+
+
+def _git_sha() -> str | None:
+    repo_root = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return completed.stdout.strip() or None
+    return None
 
 
 def _cluster_palette(n_clusters: int) -> np.ndarray:
@@ -330,6 +359,7 @@ def run_multilevel_ot_on_h5ad(
         "method": "none",
     }
     if deep_config.method != "none":
+        active_deep_config = deep_config
         batch = None
         if deep_config.batch_key is not None:
             if deep_config.batch_key not in adata.obs:
@@ -337,9 +367,12 @@ def run_multilevel_ot_on_h5ad(
             batch = np.asarray(adata.obs[deep_config.batch_key].astype(str))
         if deep_config.pretrained_model is not None:
             encoder = SpatialOTFeatureEncoder.load(deep_config.pretrained_model)
+            active_deep_config = encoder.config
             deep_embedding = encoder.transform(features=features, coords_um=coords_um)
             history = list(encoder.history)
             model_path = str(Path(deep_config.pretrained_model))
+            validation_report = dict(getattr(encoder, "validation_report", {}))
+            feature_schema = dict(getattr(encoder, "feature_schema", {}))
         else:
             model_path = str(output_dir / "deep_feature_model.pt") if deep_config.save_model else None
             deep_result = fit_deep_features(
@@ -352,31 +385,45 @@ def run_multilevel_ot_on_h5ad(
             )
             deep_embedding = deep_result.embedding.astype(np.float32)
             history = list(deep_result.history)
+            validation_report = dict(deep_result.validation_report)
+            feature_schema = dict(deep_result.feature_schema)
         features = np.asarray(deep_embedding, dtype=np.float32)
-        feature_obsm_key_used = deep_config.output_obsm_key
+        feature_obsm_key_used = active_deep_config.output_obsm_key
         adata.obsm[feature_obsm_key_used] = features.astype(np.float32)
         history_path = output_dir / "deep_feature_history.csv"
-        pd.DataFrame(history).to_csv(history_path, index=False)
+        save_deep_feature_history(history, history_path)
         config_path = output_dir / "deep_feature_config.json"
-        config_path.write_text(json.dumps(asdict(deep_config), indent=2))
+        config_path.write_text(json.dumps(asdict(active_deep_config), indent=2))
         deep_outputs["deep_feature_history"] = str(history_path)
         deep_outputs["deep_feature_config"] = str(config_path)
         if model_path is not None:
             deep_outputs["deep_feature_model"] = str(model_path)
+            meta_path = Path(model_path).with_suffix(Path(model_path).suffix + ".meta.json")
+            scaler_path = Path(model_path).with_suffix(Path(model_path).suffix + ".scaler.npz")
+            if meta_path.exists():
+                deep_outputs["deep_feature_model_meta"] = str(meta_path)
+            if scaler_path.exists():
+                deep_outputs["deep_feature_scaler"] = str(scaler_path)
         final_train_loss = history[-1].get("train_loss") if history else None
         final_val_loss = history[-1].get("val_loss") if history and "val_loss" in history[-1] else None
         deep_summary = {
             "enabled": True,
-            "method": deep_config.method,
+            "method": active_deep_config.method,
             "input_feature_obsm_key": feature_obsm_key,
             "output_feature_obsm_key": feature_obsm_key_used,
             "latent_dim": int(features.shape[1]),
-            "epochs": int(deep_config.epochs),
-            "batch_key": deep_config.batch_key,
-            "neighbor_k": int(deep_config.neighbor_k),
-            "radius_um": float(deep_config.radius_um) if deep_config.radius_um is not None else None,
-            "validation": deep_config.validation,
+            "epochs": int(active_deep_config.epochs),
+            "batch_key": active_deep_config.batch_key,
+            "neighbor_k": int(active_deep_config.neighbor_k),
+            "radius_um": float(active_deep_config.radius_um) if active_deep_config.radius_um is not None else None,
+            "short_radius_um": float(active_deep_config.short_radius_um) if active_deep_config.short_radius_um is not None else None,
+            "mid_radius_um": float(active_deep_config.mid_radius_um) if active_deep_config.mid_radius_um is not None else None,
+            "graph_layers": int(active_deep_config.graph_layers),
+            "graph_aggr": active_deep_config.graph_aggr,
+            "validation": active_deep_config.validation,
+            "validation_context_mode": active_deep_config.validation_context_mode,
             "uses_coordinate_input": False,
+            "output_embedding": active_deep_config.output_embedding,
             "final_train_loss": float(final_train_loss) if final_train_loss is not None else None,
             "final_val_loss": float(final_val_loss) if final_val_loss is not None else None,
             "model_path": model_path,
@@ -384,6 +431,8 @@ def run_multilevel_ot_on_h5ad(
             "count_reconstruction": "not_implemented",
             "pretrained_model_loaded": bool(deep_config.pretrained_model is not None),
             "validation_used_for_early_stopping": bool(deep_config.validation != "none"),
+            "feature_schema": feature_schema,
+            "validation_report": validation_report,
         }
     region_geometries = None
     subregion_members = None
@@ -467,7 +516,9 @@ def run_multilevel_ot_on_h5ad(
     if sorted_costs.shape[1] >= 2:
         margin = float(np.mean(sorted_costs[:, 1] - sorted_costs[:, 0]))
     summary = {
-        "summary_schema_version": "0.0.7",
+        "summary_schema_version": "0.0.8",
+        "spatial_ot_version": _package_version(),
+        "git_sha": _git_sha(),
         "input_h5ad": str(input_h5ad),
         "output_dir": str(output_dir),
         "feature_obsm_key": feature_obsm_key_used,

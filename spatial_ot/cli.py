@@ -70,12 +70,16 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--tol", type=float, default=None, help="Support-shift tolerance for early stopping.")
     multilevel.add_argument("--seed", type=int, default=None, help="Random seed.")
     multilevel.add_argument("--compute-device", default=None, help="Torch compute device for the active multilevel OT path, or 'auto' to use CUDA when available.")
-    multilevel.add_argument("--deep-feature-method", default=None, choices=["none", "autoencoder"], help="Optional learned feature adapter before OT.")
+    multilevel.add_argument("--deep-feature-method", default=None, choices=["none", "autoencoder", "graph_autoencoder"], help="Optional learned feature adapter before OT.")
     multilevel.add_argument("--deep-latent-dim", type=int, default=None, help="Latent dimension for the deep feature adapter.")
     multilevel.add_argument("--deep-hidden-dim", type=int, default=None, help="Hidden width for the deep feature adapter.")
     multilevel.add_argument("--deep-layers", type=int, default=None, help="Number of MLP layers in the deep feature adapter.")
     multilevel.add_argument("--deep-neighbor-k", type=int, default=None, help="k for neighborhood-summary self-supervision in the deep feature adapter.")
     multilevel.add_argument("--deep-radius-um", type=float, default=None, help="Optional radius for neighborhood-summary self-supervision. Overrides kNN if set.")
+    multilevel.add_argument("--deep-short-radius-um", type=float, default=None, help="Short-range graph radius for graph_autoencoder.")
+    multilevel.add_argument("--deep-mid-radius-um", type=float, default=None, help="Mid-range graph radius for graph_autoencoder.")
+    multilevel.add_argument("--deep-graph-layers", type=int, default=None, help="Number of graph message-passing layers per scale for graph_autoencoder.")
+    multilevel.add_argument("--deep-validation-context-mode", default=None, choices=["inductive", "transductive"], help="Whether validation context targets are built from held-out cells only or from the full dataset.")
     multilevel.add_argument("--deep-epochs", type=int, default=None, help="Training epochs for the deep feature adapter.")
     multilevel.add_argument("--deep-batch-size", type=int, default=None, help="Batch size for the deep feature adapter.")
     multilevel.add_argument("--deep-lr", type=float, default=None, help="Learning rate for the deep feature adapter.")
@@ -85,8 +89,10 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--deep-device", default=None, help="Torch device for the deep feature adapter, or 'auto'.")
     multilevel.add_argument("--deep-reconstruction-weight", type=float, default=None, help="Reconstruction loss weight for the deep feature adapter.")
     multilevel.add_argument("--deep-context-weight", type=float, default=None, help="Neighborhood-context prediction loss weight for the deep feature adapter.")
+    multilevel.add_argument("--deep-contrastive-weight", type=float, default=None, help="Short-range graph contrastive loss weight for graph_autoencoder.")
     multilevel.add_argument("--deep-variance-weight", type=float, default=None, help="Variance regularization weight for the deep feature adapter.")
     multilevel.add_argument("--deep-decorrelation-weight", type=float, default=None, help="Decorrelation regularization weight for the deep feature adapter.")
+    multilevel.add_argument("--deep-output-embedding", default=None, choices=["intrinsic", "context", "joint"], help="Which learned embedding to expose to the OT layer.")
     multilevel.add_argument("--deep-save-model", action=argparse.BooleanOptionalAction, default=None, help="Save the fitted deep feature model under the output directory.")
     multilevel.add_argument("--pretrained-deep-model", default=None, help="Path to a previously saved deep feature model for transform-only runs.")
     multilevel.add_argument("--deep-output-obsm-key", default=None, help="obsm key used to store the learned deep embedding.")
@@ -146,6 +152,10 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_layers": "layers",
         "deep_neighbor_k": "neighbor_k",
         "deep_radius_um": "radius_um",
+        "deep_short_radius_um": "short_radius_um",
+        "deep_mid_radius_um": "mid_radius_um",
+        "deep_graph_layers": "graph_layers",
+        "deep_validation_context_mode": "validation_context_mode",
         "deep_epochs": "epochs",
         "deep_batch_size": "batch_size",
         "deep_lr": "learning_rate",
@@ -155,8 +165,10 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_device": "device",
         "deep_reconstruction_weight": "reconstruction_weight",
         "deep_context_weight": "context_weight",
+        "deep_contrastive_weight": "contrastive_weight",
         "deep_variance_weight": "variance_weight",
         "deep_decorrelation_weight": "decorrelation_weight",
+        "deep_output_embedding": "output_embedding",
         "deep_save_model": "save_model",
         "pretrained_deep_model": "pretrained_model",
         "deep_output_obsm_key": "output_obsm_key",

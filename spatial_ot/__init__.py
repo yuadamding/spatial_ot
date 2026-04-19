@@ -47,9 +47,9 @@ def __getattr__(name: str):
         "run_multilevel_ot_with_config",
     }:
         if name in {"DeepFeatureResult", "SpatialOTFeatureEncoder", "fit_deep_features"}:
-            from . import deep_features
+            from . import deep
 
-            return getattr(deep_features, name)
+            return getattr(deep, name)
         from . import multilevel
 
         return getattr(multilevel, name)
