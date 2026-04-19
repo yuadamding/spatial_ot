@@ -68,6 +68,8 @@ By default this writes `input_2d_overview.png` under the configured output direc
 
 `spatial_ot` now also exposes a redesigned multilevel OT path for cases where the core input is already a cell-level feature embedding, such as UMAP coordinates.
 
+Prefer PCA, standardized marker expression, or another calibrated latent space for serious OT runs. UMAP can be useful for exploratory clustering and visualization, but its Euclidean geometry is not generally metric-preserving.
+
 This path:
 
 - builds overlapping spatial subregions from cells
@@ -102,7 +104,8 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --rho 0.5 \
   --geometry-samples 192 \
   --compressed-support-size 96 \
-  --align-iters 4
+  --align-iters 4 \
+  --n-init 5
 ```
 
 Key artifacts from this path:
@@ -114,6 +117,13 @@ Key artifacts from this path:
 - `multilevel_ot_subregion_embedding.png`
 - `multilevel_ot_atom_layouts.png`
 - `summary.json`
+
+The saved summary now includes:
+
+- restart summaries and the selected restart
+- geometry-source counts and convex-hull fallback frequency
+- random-fold and spatial-block shape-leakage diagnostics
+- canonical-normalizer radius / interpolation diagnostics
 
 ## Config notes
 

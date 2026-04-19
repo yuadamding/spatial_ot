@@ -4,9 +4,18 @@ import numpy as np
 from sklearn.metrics import adjusted_rand_score
 
 from spatial_ot.multilevel_ot import (
+    RegionGeometry,
+    ShapeNormalizer,
+    ShapeNormalizerDiagnostics,
+    SubregionMeasure,
+    _build_subregion_measures,
+    _compute_assignment_costs,
+    _initialize_cluster_atoms,
     _project_cells_from_subregions,
     _shape_descriptor_frame,
     _shape_leakage_balanced_accuracy,
+    _standardize_features,
+    sample_geometry_points,
     build_subregions,
     fit_multilevel_ot,
     fit_ot_shape_normalizer,
@@ -129,8 +138,8 @@ def test_shape_normalizer_reduces_boundary_shape_difference() -> None:
     ellipse = circle.copy()
     ellipse[:, 0] *= 2.5
 
-    phi_circle = fit_ot_shape_normalizer(circle, q, w, eps_geom=0.03)
-    phi_ellipse = fit_ot_shape_normalizer(ellipse, q, w, eps_geom=0.03)
+    phi_circle, _ = fit_ot_shape_normalizer(circle, q, w, eps_geom=0.03)
+    phi_ellipse, _ = fit_ot_shape_normalizer(ellipse, q, w, eps_geom=0.03)
 
     mapped_circle = phi_circle.transform(circle)
     mapped_ellipse = phi_ellipse.transform(ellipse)
@@ -176,11 +185,18 @@ def test_cell_projection_boundary_uses_latent_geometry_not_subregion_centers() -
         ],
         dtype=np.float32,
     )
-    subregion_members = [np.array([0, 1], dtype=np.int32), np.array([0, 1], dtype=np.int32)]
-    supports = np.array(
+    coords = np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32)
+    atom_features = np.array(
         [
             [[0.0, 0.0], [0.1, -0.1]],
             [[10.0, 10.0], [9.9, 10.1]],
+        ],
+        dtype=np.float32,
+    )
+    atom_coords = np.array(
+        [
+            [[0.0, 0.0], [0.1, 0.0]],
+            [[1.0, 1.0], [1.1, 1.0]],
         ],
         dtype=np.float32,
     )
@@ -191,6 +207,53 @@ def test_cell_projection_boundary_uses_latent_geometry_not_subregion_centers() -
         ],
         dtype=np.float32,
     )
+    measures = [
+        SubregionMeasure(
+            subregion_id=0,
+            center_um=np.array([0.5, 0.5], dtype=np.float32),
+            members=np.array([0, 1], dtype=np.int32),
+            canonical_coords=np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32),
+            features=features.copy(),
+            weights=np.array([0.5, 0.5], dtype=np.float32),
+            geometry_point_count=2,
+            compressed_point_count=2,
+            normalizer=ShapeNormalizer(center=np.zeros((1, 2)), scale=1.0, interpolator=None),
+            normalizer_diagnostics=ShapeNormalizerDiagnostics(
+                geometry_source="test",
+                used_fallback=False,
+                ot_cost=None,
+                sinkhorn_converged=None,
+                mapped_radius_p95=None,
+                mapped_radius_max=None,
+                interpolation_residual=None,
+            ),
+        ),
+        SubregionMeasure(
+            subregion_id=1,
+            center_um=np.array([0.5, 0.5], dtype=np.float32),
+            members=np.array([0, 1], dtype=np.int32),
+            canonical_coords=np.array([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32),
+            features=features.copy(),
+            weights=np.array([0.5, 0.5], dtype=np.float32),
+            geometry_point_count=2,
+            compressed_point_count=2,
+            normalizer=ShapeNormalizer(center=np.zeros((1, 2)), scale=1.0, interpolator=None),
+            normalizer_diagnostics=ShapeNormalizerDiagnostics(
+                geometry_source="test",
+                used_fallback=False,
+                ot_cost=None,
+                sinkhorn_converged=None,
+                mapped_radius_p95=None,
+                mapped_radius_max=None,
+                interpolation_residual=None,
+            ),
+        ),
+    ]
+    subregion_labels = np.array([0, 1], dtype=np.int32)
+    transforms = [
+        {"R": np.eye(2), "scale": 1.0, "t": np.zeros(2)},
+        {"R": np.eye(2), "scale": 1.0, "t": np.zeros(2)},
+    ]
     # Both cells are covered by the same two subregions, so the context alone is symmetric.
     subregion_cluster_costs = np.array(
         [
@@ -202,10 +265,18 @@ def test_cell_projection_boundary_uses_latent_geometry_not_subregion_centers() -
 
     labels, combined, feature_probs, context_probs = _project_cells_from_subregions(
         features=features,
-        subregion_members=subregion_members,
-        supports=supports,
+        coords_um=coords,
+        measures=measures,
+        subregion_labels=subregion_labels,
+        atom_coords=atom_coords,
+        atom_features=atom_features,
         prototype_weights=prototype_weights,
+        assigned_transforms=transforms,
         subregion_cluster_costs=subregion_cluster_costs,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        cost_scale_x=1.0,
+        cost_scale_y=1.0,
         assignment_temperature=0.35,
         context_weight=0.5,
     )
@@ -217,3 +288,165 @@ def test_cell_projection_boundary_uses_latent_geometry_not_subregion_centers() -
     assert feature_probs[0, 0] > feature_probs[0, 1]
     assert feature_probs[1, 1] > feature_probs[1, 0]
     assert np.allclose(combined.sum(axis=1), 1.0)
+
+
+def test_initialize_cluster_atoms_respects_lambda_scaling() -> None:
+    coords = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [10.0, 10.0],
+            [10.1, 10.0],
+        ],
+        dtype=np.float32,
+    )
+    features = np.array(
+        [
+            [1.0, 1.0],
+            [1.2, 1.0],
+            [50.0, 50.0],
+            [49.8, 50.1],
+        ],
+        dtype=np.float32,
+    )
+    centers = np.array([[0.0, 0.0]], dtype=np.float32)
+    regions = [RegionGeometry(region_id="r0", members=np.arange(coords.shape[0], dtype=np.int32))]
+    q, w = make_reference_points_unit_disk(64)
+    measures = _build_subregion_measures(
+        features=features,
+        coords_um=coords,
+        centers_um=centers,
+        region_geometries=regions,
+        geometry_reference_points=q,
+        geometry_reference_weights=w,
+        geometry_eps=0.03,
+        geometry_samples=64,
+        compressed_support_size=4,
+        lambda_x=0.25,
+        lambda_y=4.0,
+        seed=0,
+        allow_convex_hull_fallback=True,
+    )
+    atom_coords, atom_features, betas = _initialize_cluster_atoms(
+        measures=measures,
+        labels=np.array([0], dtype=np.int32),
+        n_clusters=1,
+        atoms_per_cluster=2,
+        lambda_x=0.25,
+        lambda_y=4.0,
+        random_state=0,
+    )
+    assert atom_coords.shape == (1, 2, 2)
+    assert atom_features.shape == (1, 2, 2)
+    assert np.max(np.abs(atom_coords[0])) < 5.0
+    assert np.max(atom_features[0]) > 10.0
+    assert np.allclose(betas.sum(axis=1), 1.0)
+
+
+def test_sample_geometry_points_prefers_explicit_polygon_geometry() -> None:
+    region = RegionGeometry(
+        region_id="poly",
+        members=np.arange(10, dtype=np.int32),
+        polygon_vertices=np.array(
+            [
+                [0.0, 0.0],
+                [4.0, 0.0],
+                [4.0, 4.0],
+                [0.0, 4.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    observed = np.column_stack([np.linspace(0.0, 0.5, 10), np.linspace(0.0, 0.5, 10)]).astype(np.float32)
+    pts, source, used_fallback = sample_geometry_points(
+        region,
+        observed_coords=observed,
+        n_points=256,
+        seed=11,
+        allow_convex_hull_fallback=True,
+    )
+    assert source == "polygon"
+    assert not used_fallback
+    assert pts[:, 0].max() > 3.0
+    assert pts[:, 1].max() > 3.0
+
+
+def test_returned_costs_match_returned_atoms() -> None:
+    rng = np.random.default_rng(7)
+    coords = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0], scale=0.6, size=(40, 2)),
+            rng.normal(loc=[15.0, 0.0], scale=0.6, size=(40, 2)),
+            rng.normal(loc=[0.0, 15.0], scale=0.6, size=(40, 2)),
+        ]
+    ).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0, 0.0], scale=0.15, size=(40, 3)),
+            rng.normal(loc=[4.0, 4.0, 4.0], scale=0.15, size=(40, 3)),
+            rng.normal(loc=[0.0, 4.0, 2.0], scale=0.15, size=(40, 3)),
+        ]
+    ).astype(np.float32)
+
+    result = fit_multilevel_ot(
+        features=features,
+        coords_um=coords,
+        n_clusters=3,
+        atoms_per_cluster=3,
+        radius_um=10.0,
+        stride_um=12.0,
+        min_cells=15,
+        max_subregions=20,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=64,
+        compressed_support_size=16,
+        align_iters=2,
+        allow_reflection=False,
+        allow_scale=False,
+        max_iter=3,
+        tol=1e-4,
+        seed=7,
+    )
+    q, w = make_reference_points_unit_disk(64)
+    regions = [RegionGeometry(region_id=f"r{i}", members=m) for i, m in enumerate(result.subregion_members)]
+    measures = _build_subregion_measures(
+        features=_standardize_features(features),
+        coords_um=coords,
+        centers_um=result.subregion_centers_um,
+        region_geometries=regions,
+        geometry_reference_points=q,
+        geometry_reference_weights=w,
+        geometry_eps=0.03,
+        geometry_samples=64,
+        compressed_support_size=16,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        seed=7,
+        allow_convex_hull_fallback=True,
+    )
+    recomputed = _compute_assignment_costs(
+        measures=measures,
+        atom_coords=result.cluster_atom_coords,
+        atom_features=result.cluster_atom_features,
+        betas=result.cluster_prototype_weights,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        eps=0.03,
+        rho=0.5,
+        align_iters=2,
+        allow_reflection=False,
+        allow_scale=False,
+        cost_scale_x=result.cost_scale_x,
+        cost_scale_y=result.cost_scale_y,
+        min_scale=0.75,
+        max_scale=1.33,
+        scale_penalty=0.05,
+        shift_penalty=0.05,
+    )
+    assert recomputed.shape == result.subregion_cluster_costs.shape
+    assert np.array_equal(result.subregion_cluster_labels, result.subregion_cluster_costs.argmin(axis=1))
+    assert np.allclose(recomputed, result.subregion_cluster_costs, atol=1e-4)

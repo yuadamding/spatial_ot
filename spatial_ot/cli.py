@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--align-iters", type=int, default=4, help="Number of residual similarity-alignment updates per subregion-cluster match.")
     multilevel.add_argument("--no-reflection", action="store_true", help="Disallow reflections in the residual similarity alignment.")
     multilevel.add_argument("--no-scale", action="store_true", help="Disallow scaling in the residual similarity alignment.")
+    multilevel.add_argument("--min-scale", type=float, default=0.75, help="Lower bound on residual similarity scale when scaling is enabled.")
+    multilevel.add_argument("--max-scale", type=float, default=1.33, help="Upper bound on residual similarity scale when scaling is enabled.")
+    multilevel.add_argument("--scale-penalty", type=float, default=0.05, help="Penalty on residual scale drift from 1.0.")
+    multilevel.add_argument("--shift-penalty", type=float, default=0.05, help="Penalty on residual translation magnitude in canonical space.")
+    multilevel.add_argument("--n-init", type=int, default=5, help="Number of random restarts for the nonconvex multilevel OT fit.")
+    multilevel.add_argument("--disallow-convex-hull-fallback", action="store_true", help="Fail instead of using the convex hull of observed coordinates when explicit region geometry is unavailable.")
     multilevel.add_argument("--max-iter", type=int, default=10, help="Maximum alternating-optimization iterations.")
     multilevel.add_argument("--tol", type=float, default=1e-4, help="Support-shift tolerance for early stopping.")
     multilevel.add_argument("--seed", type=int, default=1337, help="Random seed.")
@@ -102,6 +108,12 @@ def main() -> None:
             align_iters=args.align_iters,
             allow_reflection=not args.no_reflection,
             allow_scale=not args.no_scale,
+            min_scale=args.min_scale,
+            max_scale=args.max_scale,
+            scale_penalty=args.scale_penalty,
+            shift_penalty=args.shift_penalty,
+            n_init=args.n_init,
+            allow_convex_hull_fallback=not args.disallow_convex_hull_fallback,
             max_iter=args.max_iter,
             tol=args.tol,
             seed=args.seed,
