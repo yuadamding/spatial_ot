@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import anndata as ad
 import numpy as np
 import pytest
 
 from spatial_ot.config import DeepFeatureConfig, load_multilevel_config
-from spatial_ot.deep_features import SpatialOTFeatureEncoder, _split_validation, fit_deep_features
+from spatial_ot.deep.graph import build_neighbor_graph
+from spatial_ot.deep_features import (
+    SpatialOTFeatureEncoder,
+    _split_validation,
+    fit_deep_features,
+    fit_deep_features_on_h5ad,
+    transform_h5ad_with_deep_model,
+)
 from spatial_ot.multilevel_ot import run_multilevel_ot_on_h5ad
 
 
@@ -136,6 +144,25 @@ def test_seed_reproducibility_includes_weight_initialization() -> None:
     assert np.allclose(z_a, z_b, atol=1e-6)
 
 
+def test_build_neighbor_graph_respects_max_neighbors() -> None:
+    coords = np.stack(
+        [
+            np.linspace(0.0, 1.0, 12, dtype=np.float32),
+            np.zeros(12, dtype=np.float32),
+        ],
+        axis=1,
+    )
+    edge_index = build_neighbor_graph(
+        coords,
+        neighbor_k=8,
+        radius_um=10.0,
+        max_neighbors=3,
+    )
+    if edge_index.shape[1] > 0:
+        max_degree = np.bincount(edge_index[1], minlength=coords.shape[0]).max()
+        assert int(max_degree) <= 3
+
+
 def test_deep_transform_batched_equals_default(tmp_path) -> None:
     rng = np.random.default_rng(55)
     features = rng.normal(size=(64, 6)).astype(np.float32)
@@ -211,6 +238,158 @@ def test_fit_deep_features_helper_returns_result(tmp_path) -> None:
     assert result.embedding.shape == (36, 3)
     assert result.model_path is not None
     assert len(result.history) == 2
+
+
+def test_fit_deep_features_on_h5ad_outputs_artifacts(tmp_path) -> None:
+    rng = np.random.default_rng(77)
+    features = rng.normal(size=(32, 5)).astype(np.float32)
+    coords = rng.normal(size=(32, 2)).astype(np.float32)
+    adata = ad.AnnData(X=features.copy())
+    adata.obsm["X_pca"] = features.copy()
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    input_h5ad = tmp_path / "input_fit.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    summary = fit_deep_features_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=tmp_path / "deep_fit_out",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        config=DeepFeatureConfig(
+            method="graph_autoencoder",
+            latent_dim=3,
+            hidden_dim=16,
+            layers=1,
+            neighbor_k=3,
+            radius_um=1.0,
+            short_radius_um=0.75,
+            mid_radius_um=1.5,
+            graph_layers=1,
+            graph_max_neighbors=5,
+            epochs=2,
+            batch_size=16,
+            validation="none",
+            save_model=True,
+        ),
+        seed=13,
+    )
+
+    assert summary["deep_features"]["method"] == "graph_autoencoder"
+    assert summary["deep_features"]["graph_max_neighbors"] == 5
+    assert Path(summary["outputs"]["embedded_h5ad"]).exists()
+    assert Path(summary["outputs"]["deep_feature_model"]).exists()
+    saved = ad.read_h5ad(summary["outputs"]["embedded_h5ad"])
+    assert "X_spatial_ot_deep" in saved.obsm
+    assert saved.obsm["X_spatial_ot_deep"].shape == (32, 3)
+
+
+def test_transform_h5ad_with_deep_model_writes_embedding(tmp_path) -> None:
+    rng = np.random.default_rng(78)
+    features_train = rng.normal(size=(24, 4)).astype(np.float32)
+    coords_train = rng.normal(size=(24, 2)).astype(np.float32)
+    train = ad.AnnData(X=features_train.copy())
+    train.obsm["X_pca"] = features_train.copy()
+    train.obs["cell_x"] = coords_train[:, 0]
+    train.obs["cell_y"] = coords_train[:, 1]
+    train_h5ad = tmp_path / "train.h5ad"
+    train.write_h5ad(train_h5ad)
+
+    fit_summary = fit_deep_features_on_h5ad(
+        input_h5ad=train_h5ad,
+        output_dir=tmp_path / "deep_model",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=3,
+            hidden_dim=12,
+            layers=1,
+            neighbor_k=3,
+            epochs=2,
+            batch_size=8,
+            validation="none",
+            save_model=True,
+        ),
+        seed=9,
+    )
+
+    features_new = rng.normal(size=(18, 4)).astype(np.float32)
+    coords_new = rng.normal(size=(18, 2)).astype(np.float32)
+    new = ad.AnnData(X=features_new.copy())
+    new.obsm["X_pca"] = features_new.copy()
+    new.obs["cell_x"] = coords_new[:, 0]
+    new.obs["cell_y"] = coords_new[:, 1]
+    new_h5ad = tmp_path / "new.h5ad"
+    new.write_h5ad(new_h5ad)
+
+    summary = transform_h5ad_with_deep_model(
+        model_path=fit_summary["outputs"]["deep_feature_model"],
+        input_h5ad=new_h5ad,
+        output_h5ad=tmp_path / "new_embedded.h5ad",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        output_obsm_key="X_deep_test",
+        batch_size=5,
+    )
+
+    assert summary["deep_features"]["pretrained_model_loaded"] is True
+    assert summary["deep_features"]["graph_inference_mode"] == "batched"
+    transformed = ad.read_h5ad(summary["outputs"]["embedded_h5ad"])
+    assert "X_deep_test" in transformed.obsm
+    assert transformed.obsm["X_deep_test"].shape == (18, 3)
+
+
+def test_transform_h5ad_with_deep_model_rejects_mismatched_input_obsm_key(tmp_path) -> None:
+    rng = np.random.default_rng(79)
+    features = rng.normal(size=(20, 4)).astype(np.float32)
+    coords = rng.normal(size=(20, 2)).astype(np.float32)
+    train = ad.AnnData(X=features.copy())
+    train.obsm["X_pca"] = features.copy()
+    train.obs["cell_x"] = coords[:, 0]
+    train.obs["cell_y"] = coords[:, 1]
+    train_h5ad = tmp_path / "train_schema.h5ad"
+    train.write_h5ad(train_h5ad)
+
+    fit_summary = fit_deep_features_on_h5ad(
+        input_h5ad=train_h5ad,
+        output_dir=tmp_path / "deep_model_schema",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=3,
+            hidden_dim=12,
+            layers=1,
+            neighbor_k=3,
+            epochs=2,
+            batch_size=8,
+            validation="none",
+            save_model=True,
+        ),
+        seed=9,
+    )
+
+    new = ad.AnnData(X=features.copy())
+    new.obsm["X_other"] = features.copy()
+    new.obs["cell_x"] = coords[:, 0]
+    new.obs["cell_y"] = coords[:, 1]
+    new_h5ad = tmp_path / "new_schema.h5ad"
+    new.write_h5ad(new_h5ad)
+
+    with pytest.raises(ValueError, match="Input obsm key mismatch"):
+        transform_h5ad_with_deep_model(
+            model_path=fit_summary["outputs"]["deep_feature_model"],
+            input_h5ad=new_h5ad,
+            output_h5ad=tmp_path / "new_schema_embedded.h5ad",
+            feature_obsm_key="X_other",
+            spatial_x_key="cell_x",
+            spatial_y_key="cell_y",
+        )
 
 
 def test_load_multilevel_config_active_path(tmp_path) -> None:

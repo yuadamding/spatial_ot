@@ -40,6 +40,7 @@ short_radius_um = 40.0
 mid_radius_um = 120.0
 graph_layers = 2
 graph_aggr = "mean"
+graph_max_neighbors = 64
 epochs = 50
 batch_size = 4096
 learning_rate = 0.001

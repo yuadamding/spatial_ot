@@ -7,11 +7,14 @@ from .deep.features import (
     fit_deep_features,
     save_deep_feature_history,
 )
+from .deep.io import fit_deep_features_on_h5ad, transform_h5ad_with_deep_model
 
 __all__ = [
     "DeepFeatureResult",
     "SpatialOTFeatureEncoder",
     "_split_validation",
     "fit_deep_features",
+    "fit_deep_features_on_h5ad",
     "save_deep_feature_history",
+    "transform_h5ad_with_deep_model",
 ]

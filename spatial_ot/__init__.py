@@ -12,6 +12,7 @@ __all__ = [
     "RegionGeometry",
     "SpatialOTFeatureEncoder",
     "fit_deep_features",
+    "fit_deep_features_on_h5ad",
     "fit_multilevel_ot",
     "fit_ot_shape_normalizer",
     "load_config",
@@ -19,6 +20,7 @@ __all__ = [
     "make_reference_points_unit_disk",
     "run_multilevel_ot_on_h5ad",
     "run_multilevel_ot_with_config",
+    "transform_h5ad_with_deep_model",
 ]
 
 
@@ -40,13 +42,21 @@ def __getattr__(name: str):
         "RegionGeometry",
         "SpatialOTFeatureEncoder",
         "fit_deep_features",
+        "fit_deep_features_on_h5ad",
         "fit_multilevel_ot",
         "fit_ot_shape_normalizer",
         "make_reference_points_unit_disk",
         "run_multilevel_ot_on_h5ad",
         "run_multilevel_ot_with_config",
+        "transform_h5ad_with_deep_model",
     }:
-        if name in {"DeepFeatureResult", "SpatialOTFeatureEncoder", "fit_deep_features"}:
+        if name in {
+            "DeepFeatureResult",
+            "SpatialOTFeatureEncoder",
+            "fit_deep_features",
+            "fit_deep_features_on_h5ad",
+            "transform_h5ad_with_deep_model",
+        }:
             from . import deep
 
             return getattr(deep, name)

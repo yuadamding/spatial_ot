@@ -83,6 +83,20 @@ The current deep feature adapter is still a research-stage component, but it is 
 - `count_layer` is reserved but not implemented for count reconstruction yet
 - the active multilevel OT path now has its own Torch compute device via `--compute-device` / `ot.compute_device`; `auto` uses CUDA when available for cost matrices, projection, and the semi-relaxed Sinkhorn solver
 
+Current deep-path capability snapshot:
+
+| Capability | Status |
+| --- | --- |
+| `autoencoder` | implemented |
+| `graph_autoencoder` | implemented |
+| graph density cap via `graph_max_neighbors` | implemented |
+| deep-only `fit` / `transform` lifecycle | implemented |
+| mini-batch graph training | not implemented |
+| count reconstruction | not implemented |
+| batch adversarial correction | not implemented |
+| OT-aware fine-tuning | not implemented |
+| multilevel OT prediction bundle for new samples | not implemented |
+
 Two multilevel OT modes are supported:
 
 - grid-window discovery: `spatial_ot` builds overlapping radius windows from cells for exploratory local pattern discovery
@@ -171,6 +185,38 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --deep-feature-method graph_autoencoder
 ```
 
+You can now also run the deep encoder as its own reusable stage:
+
+```bash
+cd spatial_ot
+conda run -n ml1 python -m spatial_ot deep-fit \
+  --config configs/multilevel_deep_example.toml \
+  --input-h5ad ../data/cells.h5ad \
+  --output-dir ../work/spatial_ot_runs/deep_encoder_only \
+  --feature-obsm-key X_pca
+```
+
+That writes:
+
+- `cells_deep_features.h5ad`
+- `deep_feature_model.pt`
+- `deep_feature_history.csv`
+- `deep_feature_config.json`
+- `summary.json`
+
+You can then reuse the saved encoder on a new H5AD:
+
+```bash
+cd spatial_ot
+conda run -n ml1 python -m spatial_ot deep-transform \
+  --model ../work/spatial_ot_runs/deep_encoder_only/deep_feature_model.pt \
+  --input-h5ad ../data/new_cells.h5ad \
+  --output-h5ad ../work/spatial_ot_runs/deep_encoder_only/new_cells_embedded.h5ad \
+  --feature-obsm-key X_pca \
+  --spatial-x-key cell_x \
+  --spatial-y-key cell_y
+```
+
 Key artifacts from this path:
 
 - `cells_multilevel_ot.h5ad`
@@ -192,6 +238,7 @@ The saved summary now includes:
 - the requested and resolved Torch compute device for the active multilevel path
 - package version, git SHA, and summary schema version for reproducibility
 - graph usage metadata such as whether the deep encoder used a spatial graph and its training-graph degree statistics
+- graph density controls such as `graph_max_neighbors`, so radius graphs can be capped instead of growing without bound in dense tissue
 - a `boundary_invariance_claim` field showing whether explicit geometry supported the run; when observed-hull fallback is used the claim is explicitly exploratory
 - random-fold and spatial-block shape-leakage diagnostics
 - canonical-normalizer radius / interpolation diagnostics

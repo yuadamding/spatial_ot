@@ -11,6 +11,7 @@ def build_neighbor_graph(
     *,
     neighbor_k: int,
     radius_um: float | None,
+    max_neighbors: int | None = None,
 ) -> np.ndarray:
     coords = np.asarray(coords_um, dtype=np.float32)
     n = coords.shape[0]
@@ -20,18 +21,24 @@ def build_neighbor_graph(
     if radius_um is not None:
         nn_model = NearestNeighbors(radius=float(radius_um), metric="euclidean")
         nn_model.fit(coords)
-        neighborhoods = nn_model.radius_neighbors(coords, return_distance=False)
+        distances, neighborhoods = nn_model.radius_neighbors(coords, return_distance=True)
     else:
         n_neighbors = min(max(int(neighbor_k) + 1, 2), n)
         nn_model = NearestNeighbors(n_neighbors=n_neighbors, metric="euclidean")
         nn_model.fit(coords)
-        neighborhoods = nn_model.kneighbors(coords, return_distance=False)
+        distances, neighborhoods = nn_model.kneighbors(coords, return_distance=True)
 
     src_index: list[int] = []
     dst_index: list[int] = []
-    for center_idx, neighbors in enumerate(neighborhoods):
+    for center_idx, (neighbors, neighbor_dist) in enumerate(zip(neighborhoods, distances, strict=False)):
         neigh = np.asarray(neighbors, dtype=np.int64)
-        neigh = neigh[neigh != center_idx]
+        dist = np.asarray(neighbor_dist, dtype=np.float32)
+        keep = neigh != center_idx
+        neigh = neigh[keep]
+        dist = dist[keep]
+        if max_neighbors is not None and neigh.size > int(max_neighbors):
+            order = np.argsort(dist, kind="stable")[: int(max_neighbors)]
+            neigh = neigh[order]
         if neigh.size == 0:
             continue
         src_index.extend(neigh.tolist())
@@ -53,6 +60,7 @@ def build_multiscale_graphs(
     base_radius_um: float | None,
     short_radius_um: float | None,
     mid_radius_um: float | None,
+    max_neighbors: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     short_radius = short_radius_um if short_radius_um is not None else base_radius_um
     mid_radius = mid_radius_um
@@ -62,11 +70,13 @@ def build_multiscale_graphs(
         coords_um,
         neighbor_k=neighbor_k,
         radius_um=short_radius,
+        max_neighbors=max_neighbors,
     )
     mid_graph = build_neighbor_graph(
         coords_um,
         neighbor_k=max(int(neighbor_k) * 2, int(neighbor_k) + 2),
         radius_um=mid_radius,
+        max_neighbors=max_neighbors,
     )
     return short_graph, mid_graph
 
@@ -97,6 +107,7 @@ def build_context_distribution_targets(
     base_radius_um: float | None,
     short_radius_um: float | None,
     mid_radius_um: float | None,
+    max_neighbors: int | None = None,
     device: torch.device | None = None,
 ) -> np.ndarray:
     feats = np.asarray(features_std, dtype=np.float32)
@@ -108,6 +119,7 @@ def build_context_distribution_targets(
         base_radius_um=base_radius_um,
         short_radius_um=short_radius_um,
         mid_radius_um=mid_radius_um,
+        max_neighbors=max_neighbors,
     )
     target_device = device or torch.device("cpu")
     feats_t = torch.as_tensor(feats, dtype=torch.float32, device=target_device)

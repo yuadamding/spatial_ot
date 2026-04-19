@@ -420,6 +420,7 @@ def run_multilevel_ot_on_h5ad(
             "mid_radius_um": float(active_deep_config.mid_radius_um) if active_deep_config.mid_radius_um is not None else None,
             "graph_layers": int(active_deep_config.graph_layers),
             "graph_aggr": active_deep_config.graph_aggr,
+            "graph_max_neighbors": int(active_deep_config.graph_max_neighbors),
             "validation": active_deep_config.validation,
             "validation_context_mode": active_deep_config.validation_context_mode,
             "uses_absolute_coordinate_features": False,

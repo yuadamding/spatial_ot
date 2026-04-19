@@ -97,6 +97,7 @@ def _build_context_targets(
         base_radius_um=config.radius_um,
         short_radius_um=short_radius,
         mid_radius_um=mid_radius,
+        max_neighbors=config.graph_max_neighbors,
         device=device,
     )
 
@@ -278,6 +279,7 @@ def _tensor_graphs(
         base_radius_um=config.radius_um,
         short_radius_um=short_radius,
         mid_radius_um=mid_radius,
+        max_neighbors=config.graph_max_neighbors,
     )
     return (
         torch.as_tensor(short_graph, dtype=torch.long, device=device),
@@ -356,6 +358,7 @@ class SpatialOTFeatureEncoder:
         *,
         batch: np.ndarray | None = None,
         seed: int = 1337,
+        feature_schema_extra: dict | None = None,
     ) -> "SpatialOTFeatureEncoder":
         if self.config.method == "none":
             raise ValueError("SpatialOTFeatureEncoder.fit requires an active deep feature method, not 'none'.")
@@ -398,8 +401,11 @@ class SpatialOTFeatureEncoder:
                 "radius_um": float(self.config.radius_um) if self.config.radius_um is not None else None,
                 "short_radius_um": float(self.config.short_radius_um) if self.config.short_radius_um is not None else None,
                 "mid_radius_um": float(self.config.mid_radius_um) if self.config.mid_radius_um is not None else None,
+                "graph_max_neighbors": int(self.config.graph_max_neighbors),
             },
         }
+        if feature_schema_extra:
+            self.feature_schema.update(dict(feature_schema_extra))
         self.validation_report = {
             "mode": self.config.validation,
             "context_mode": self.config.validation_context_mode,
@@ -570,8 +576,19 @@ class SpatialOTFeatureEncoder:
             self.model.load_state_dict(best_state)
         return self
 
+    def _validate_transform_schema(self, *, input_obsm_key: str | None = None) -> None:
+        expected_dim = self.feature_schema.get("input_dim")
+        if expected_dim is not None and self.input_dim is not None and int(expected_dim) != int(self.input_dim):
+            raise ValueError("Saved feature schema is inconsistent with the loaded encoder input dimension.")
+        expected_key = self.feature_schema.get("input_obsm_key")
+        if expected_key is not None and input_obsm_key is not None and str(expected_key) != str(input_obsm_key):
+            raise ValueError(
+                f"Input obsm key mismatch: encoder expects '{expected_key}', got '{input_obsm_key}'."
+            )
+
     def transform(self, features: np.ndarray, coords_um: np.ndarray | None = None, batch_size: int | None = None) -> np.ndarray:
         self._check_fitted()
+        self._validate_transform_schema()
         assert self.feature_mean is not None and self.feature_std is not None and self.model is not None and self.input_dim is not None
         x_std = _apply_standardization(features, self.feature_mean, self.feature_std)
         if x_std.shape[1] != self.input_dim:
@@ -607,8 +624,15 @@ class SpatialOTFeatureEncoder:
         *,
         batch: np.ndarray | None = None,
         seed: int = 1337,
+        feature_schema_extra: dict | None = None,
     ) -> DeepFeatureResult:
-        self.fit(features=features, coords_um=coords_um, batch=batch, seed=seed)
+        self.fit(
+            features=features,
+            coords_um=coords_um,
+            batch=batch,
+            seed=seed,
+            feature_schema_extra=feature_schema_extra,
+        )
         embedding = self.transform(features, coords_um=coords_um)
         return DeepFeatureResult(
             embedding=embedding,
@@ -664,9 +688,16 @@ def fit_deep_features(
     batch: np.ndarray | None = None,
     seed: int = 1337,
     save_path: str | Path | None = None,
+    feature_schema_extra: dict | None = None,
 ) -> DeepFeatureResult:
     encoder = SpatialOTFeatureEncoder(config=config)
-    result = encoder.fit_transform(features=features, coords_um=coords_um, batch=batch, seed=seed)
+    result = encoder.fit_transform(
+        features=features,
+        coords_um=coords_um,
+        batch=batch,
+        seed=seed,
+        feature_schema_extra=feature_schema_extra,
+    )
     if save_path is not None:
         encoder.save(save_path)
         result.model_path = str(Path(save_path))

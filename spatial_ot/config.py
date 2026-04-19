@@ -156,6 +156,7 @@ class DeepFeatureConfig:
     mid_radius_um: float | None = None
     graph_layers: int = 2
     graph_aggr: str = "mean"
+    graph_max_neighbors: int = 64
     epochs: int = 50
     batch_size: int = 4096
     learning_rate: float = 1e-3
@@ -302,6 +303,8 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("deep.layers must be at least 1")
     if config.deep.graph_layers < 1:
         raise ValueError("deep.graph_layers must be at least 1")
+    if config.deep.graph_max_neighbors < 1:
+        raise ValueError("deep.graph_max_neighbors must be at least 1")
     if config.deep.neighbor_k < 1:
         raise ValueError("deep.neighbor_k must be at least 1")
     if config.deep.radius_um is not None and config.deep.radius_um <= 0:

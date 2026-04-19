@@ -10,9 +10,40 @@ from .config import (
     load_multilevel_config,
     validate_multilevel_config,
 )
+from .deep import fit_deep_features_on_h5ad, transform_h5ad_with_deep_model
 from .legacy.training import run_experiment
 from .legacy.visualization import plot_preprocessed_inputs, plot_result_bundle
 from .multilevel import run_multilevel_ot_with_config
+
+
+def _add_deep_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--deep-feature-method", default=None, choices=["none", "autoencoder", "graph_autoencoder"], help="Optional learned feature adapter before OT.")
+    parser.add_argument("--deep-latent-dim", type=int, default=None, help="Latent dimension for the deep feature adapter.")
+    parser.add_argument("--deep-hidden-dim", type=int, default=None, help="Hidden width for the deep feature adapter.")
+    parser.add_argument("--deep-layers", type=int, default=None, help="Number of MLP layers in the deep feature adapter.")
+    parser.add_argument("--deep-neighbor-k", type=int, default=None, help="k for neighborhood-summary self-supervision in the deep feature adapter.")
+    parser.add_argument("--deep-radius-um", type=float, default=None, help="Optional radius for neighborhood-summary self-supervision. Overrides kNN if set.")
+    parser.add_argument("--deep-short-radius-um", type=float, default=None, help="Short-range graph radius for graph_autoencoder.")
+    parser.add_argument("--deep-mid-radius-um", type=float, default=None, help="Mid-range graph radius for graph_autoencoder.")
+    parser.add_argument("--deep-graph-layers", type=int, default=None, help="Number of graph message-passing layers per scale for graph_autoencoder.")
+    parser.add_argument("--deep-graph-max-neighbors", type=int, default=None, help="Maximum neighbors retained per node when building radius graphs for graph_autoencoder.")
+    parser.add_argument("--deep-validation-context-mode", default=None, choices=["inductive", "transductive"], help="Whether validation context targets are built from held-out cells only or from the full dataset.")
+    parser.add_argument("--deep-epochs", type=int, default=None, help="Training epochs for the deep feature adapter.")
+    parser.add_argument("--deep-batch-size", type=int, default=None, help="Batch size for the deep feature adapter.")
+    parser.add_argument("--deep-lr", type=float, default=None, help="Learning rate for the deep feature adapter.")
+    parser.add_argument("--deep-weight-decay", type=float, default=None, help="Weight decay for the deep feature adapter.")
+    parser.add_argument("--deep-validation", default=None, choices=["none", "spatial_block", "sample_holdout"], help="Validation split mode for the deep feature adapter.")
+    parser.add_argument("--deep-batch-key", default=None, help="Optional obs key used for sample-holdout validation and batch-aware metadata.")
+    parser.add_argument("--deep-device", default=None, help="Torch device for the deep feature adapter, or 'auto'.")
+    parser.add_argument("--deep-reconstruction-weight", type=float, default=None, help="Reconstruction loss weight for the deep feature adapter.")
+    parser.add_argument("--deep-context-weight", type=float, default=None, help="Neighborhood-context prediction loss weight for the deep feature adapter.")
+    parser.add_argument("--deep-contrastive-weight", type=float, default=None, help="Short-range graph contrastive loss weight for graph_autoencoder.")
+    parser.add_argument("--deep-variance-weight", type=float, default=None, help="Variance regularization weight for the deep feature adapter.")
+    parser.add_argument("--deep-decorrelation-weight", type=float, default=None, help="Decorrelation regularization weight for the deep feature adapter.")
+    parser.add_argument("--deep-output-embedding", default=None, choices=["intrinsic", "context", "joint"], help="Which learned embedding to expose to the OT layer.")
+    parser.add_argument("--deep-save-model", action=argparse.BooleanOptionalAction, default=None, help="Save the fitted deep feature model under the output directory.")
+    parser.add_argument("--pretrained-deep-model", default=None, help="Path to a previously saved deep feature model for transform-only runs.")
+    parser.add_argument("--deep-output-obsm-key", default=None, help="obsm key used to store the learned deep embedding.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +62,32 @@ def build_parser() -> argparse.ArgumentParser:
     plot_results = sub.add_parser("plot-results", help="Render a visualization bundle from a finished run directory.")
     plot_results.add_argument("--run-dir", required=True, help="Path to a spatial_ot run directory with saved outputs.")
     plot_results.add_argument("--output-dir", help="Optional output directory for the figures.")
+
+    deep_fit = sub.add_parser(
+        "deep-fit",
+        help="Fit the active deep feature encoder on an H5AD and write an embedded H5AD plus saved model bundle.",
+    )
+    deep_fit.add_argument("--config", help="Optional TOML config for the active multilevel/deep path.")
+    deep_fit.add_argument("--input-h5ad", help="Input cell-level H5AD.")
+    deep_fit.add_argument("--output-dir", help="Output directory for deep feature artifacts.")
+    deep_fit.add_argument("--feature-obsm-key", help="obsm key containing the feature embedding used as input to the deep encoder.")
+    deep_fit.add_argument("--spatial-x-key", default=None, help="obs key for the x coordinate.")
+    deep_fit.add_argument("--spatial-y-key", default=None, help="obs key for the y coordinate.")
+    deep_fit.add_argument("--seed", type=int, default=None, help="Random seed.")
+    _add_deep_args(deep_fit)
+
+    deep_transform = sub.add_parser(
+        "deep-transform",
+        help="Apply a saved deep feature encoder bundle to a new H5AD and write an embedded H5AD.",
+    )
+    deep_transform.add_argument("--model", required=True, help="Path to a saved deep feature model bundle.")
+    deep_transform.add_argument("--input-h5ad", required=True, help="Input cell-level H5AD.")
+    deep_transform.add_argument("--output-h5ad", required=True, help="Output H5AD with the transformed embedding.")
+    deep_transform.add_argument("--feature-obsm-key", required=True, help="obsm key containing the input feature embedding.")
+    deep_transform.add_argument("--spatial-x-key", default="cell_x", help="obs key for the x coordinate.")
+    deep_transform.add_argument("--spatial-y-key", default="cell_y", help="obs key for the y coordinate.")
+    deep_transform.add_argument("--output-obsm-key", default=None, help="Optional obsm key for the transformed embedding.")
+    deep_transform.add_argument("--batch-size", type=int, default=None, help="Optional transform batch size for non-graph encoders.")
 
     multilevel = sub.add_parser(
         "multilevel-ot",
@@ -70,32 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--tol", type=float, default=None, help="Support-shift tolerance for early stopping.")
     multilevel.add_argument("--seed", type=int, default=None, help="Random seed.")
     multilevel.add_argument("--compute-device", default=None, help="Torch compute device for the active multilevel OT path, or 'auto' to use CUDA when available.")
-    multilevel.add_argument("--deep-feature-method", default=None, choices=["none", "autoencoder", "graph_autoencoder"], help="Optional learned feature adapter before OT.")
-    multilevel.add_argument("--deep-latent-dim", type=int, default=None, help="Latent dimension for the deep feature adapter.")
-    multilevel.add_argument("--deep-hidden-dim", type=int, default=None, help="Hidden width for the deep feature adapter.")
-    multilevel.add_argument("--deep-layers", type=int, default=None, help="Number of MLP layers in the deep feature adapter.")
-    multilevel.add_argument("--deep-neighbor-k", type=int, default=None, help="k for neighborhood-summary self-supervision in the deep feature adapter.")
-    multilevel.add_argument("--deep-radius-um", type=float, default=None, help="Optional radius for neighborhood-summary self-supervision. Overrides kNN if set.")
-    multilevel.add_argument("--deep-short-radius-um", type=float, default=None, help="Short-range graph radius for graph_autoencoder.")
-    multilevel.add_argument("--deep-mid-radius-um", type=float, default=None, help="Mid-range graph radius for graph_autoencoder.")
-    multilevel.add_argument("--deep-graph-layers", type=int, default=None, help="Number of graph message-passing layers per scale for graph_autoencoder.")
-    multilevel.add_argument("--deep-validation-context-mode", default=None, choices=["inductive", "transductive"], help="Whether validation context targets are built from held-out cells only or from the full dataset.")
-    multilevel.add_argument("--deep-epochs", type=int, default=None, help="Training epochs for the deep feature adapter.")
-    multilevel.add_argument("--deep-batch-size", type=int, default=None, help="Batch size for the deep feature adapter.")
-    multilevel.add_argument("--deep-lr", type=float, default=None, help="Learning rate for the deep feature adapter.")
-    multilevel.add_argument("--deep-weight-decay", type=float, default=None, help="Weight decay for the deep feature adapter.")
-    multilevel.add_argument("--deep-validation", default=None, choices=["none", "spatial_block", "sample_holdout"], help="Validation split mode for the deep feature adapter.")
-    multilevel.add_argument("--deep-batch-key", default=None, help="Optional obs key used for sample-holdout validation and batch-aware metadata.")
-    multilevel.add_argument("--deep-device", default=None, help="Torch device for the deep feature adapter, or 'auto'.")
-    multilevel.add_argument("--deep-reconstruction-weight", type=float, default=None, help="Reconstruction loss weight for the deep feature adapter.")
-    multilevel.add_argument("--deep-context-weight", type=float, default=None, help="Neighborhood-context prediction loss weight for the deep feature adapter.")
-    multilevel.add_argument("--deep-contrastive-weight", type=float, default=None, help="Short-range graph contrastive loss weight for graph_autoencoder.")
-    multilevel.add_argument("--deep-variance-weight", type=float, default=None, help="Variance regularization weight for the deep feature adapter.")
-    multilevel.add_argument("--deep-decorrelation-weight", type=float, default=None, help="Decorrelation regularization weight for the deep feature adapter.")
-    multilevel.add_argument("--deep-output-embedding", default=None, choices=["intrinsic", "context", "joint"], help="Which learned embedding to expose to the OT layer.")
-    multilevel.add_argument("--deep-save-model", action=argparse.BooleanOptionalAction, default=None, help="Save the fitted deep feature model under the output directory.")
-    multilevel.add_argument("--pretrained-deep-model", default=None, help="Path to a previously saved deep feature model for transform-only runs.")
-    multilevel.add_argument("--deep-output-obsm-key", default=None, help="obsm key used to store the learned deep embedding.")
+    _add_deep_args(multilevel)
     return parser
 
 
@@ -155,6 +187,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_short_radius_um": "short_radius_um",
         "deep_mid_radius_um": "mid_radius_um",
         "deep_graph_layers": "graph_layers",
+        "deep_graph_max_neighbors": "graph_max_neighbors",
         "deep_validation_context_mode": "validation_context_mode",
         "deep_epochs": "epochs",
         "deep_batch_size": "batch_size",
@@ -178,6 +211,50 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
     return validate_multilevel_config(config)
 
 
+def _resolve_deep_fit_config_from_args(args: argparse.Namespace) -> tuple[MultilevelExperimentConfig, int]:
+    config = load_multilevel_config(args.config) if args.config else MultilevelExperimentConfig()
+    _set_if_not_none(config.paths, "input_h5ad", args.input_h5ad)
+    _set_if_not_none(config.paths, "output_dir", args.output_dir)
+    _set_if_not_none(config.paths, "feature_obsm_key", args.feature_obsm_key)
+    _set_if_not_none(config.paths, "spatial_x_key", args.spatial_x_key)
+    _set_if_not_none(config.paths, "spatial_y_key", args.spatial_y_key)
+
+    deep_mapping = {
+        "deep_feature_method": "method",
+        "deep_latent_dim": "latent_dim",
+        "deep_hidden_dim": "hidden_dim",
+        "deep_layers": "layers",
+        "deep_neighbor_k": "neighbor_k",
+        "deep_radius_um": "radius_um",
+        "deep_short_radius_um": "short_radius_um",
+        "deep_mid_radius_um": "mid_radius_um",
+        "deep_graph_layers": "graph_layers",
+        "deep_graph_max_neighbors": "graph_max_neighbors",
+        "deep_validation_context_mode": "validation_context_mode",
+        "deep_epochs": "epochs",
+        "deep_batch_size": "batch_size",
+        "deep_lr": "learning_rate",
+        "deep_weight_decay": "weight_decay",
+        "deep_validation": "validation",
+        "deep_batch_key": "batch_key",
+        "deep_device": "device",
+        "deep_reconstruction_weight": "reconstruction_weight",
+        "deep_context_weight": "context_weight",
+        "deep_contrastive_weight": "contrastive_weight",
+        "deep_variance_weight": "variance_weight",
+        "deep_decorrelation_weight": "decorrelation_weight",
+        "deep_output_embedding": "output_embedding",
+        "deep_save_model": "save_model",
+        "pretrained_deep_model": "pretrained_model",
+        "deep_output_obsm_key": "output_obsm_key",
+    }
+    for arg_name, cfg_name in deep_mapping.items():
+        _set_if_not_none(config.deep, cfg_name, getattr(args, arg_name))
+    config = validate_multilevel_config(config)
+    resolved_seed = int(args.seed if args.seed is not None else config.ot.seed)
+    return config, resolved_seed
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -197,6 +274,30 @@ def main() -> None:
     elif args.command == "plot-results":
         manifest = plot_result_bundle(run_dir=Path(args.run_dir), output_dir=Path(args.output_dir) if args.output_dir else None)
         print(json.dumps(manifest, indent=2))
+    elif args.command == "deep-fit":
+        config, seed = _resolve_deep_fit_config_from_args(args)
+        summary = fit_deep_features_on_h5ad(
+            input_h5ad=config.paths.input_h5ad,
+            output_dir=config.paths.output_dir,
+            feature_obsm_key=config.paths.feature_obsm_key,
+            spatial_x_key=config.paths.spatial_x_key,
+            spatial_y_key=config.paths.spatial_y_key,
+            config=config.deep,
+            seed=seed,
+        )
+        print(json.dumps(summary, indent=2))
+    elif args.command == "deep-transform":
+        summary = transform_h5ad_with_deep_model(
+            model_path=args.model,
+            input_h5ad=args.input_h5ad,
+            output_h5ad=args.output_h5ad,
+            feature_obsm_key=args.feature_obsm_key,
+            spatial_x_key=args.spatial_x_key,
+            spatial_y_key=args.spatial_y_key,
+            output_obsm_key=args.output_obsm_key,
+            batch_size=args.batch_size,
+        )
+        print(json.dumps(summary, indent=2))
     elif args.command == "multilevel-ot":
         config = _resolve_multilevel_config_from_args(args)
         summary = run_multilevel_ot_with_config(config)
