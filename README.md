@@ -101,17 +101,17 @@ This path:
 - projects the learned labels back to cells for visualization
 - reports shape-leakage diagnostics so we can check whether boundary geometry is still driving cluster labels
 
-Example CLI shape. For validated runs, point `--feature-obsm-key` at a metric-stable embedding such as `X_pca`. If you only have a UMAP embedding available, treat the run as exploratory:
+Validated PCA-style run:
 
 ```bash
 cd spatial_ot
 conda run -n ml1 python -m spatial_ot multilevel-ot \
-  --input-h5ad ../work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad \
-  --output-dir ../work/spatial_ot_runs/p2_crc_multilevel_umap \
+  --input-h5ad ../data/cells.h5ad \
+  --output-dir ../work/spatial_ot_runs/p2_crc_multilevel_pca \
   --feature-obsm-key X_pca \
   --spatial-x-key cell_x \
   --spatial-y-key cell_y \
-  --spatial-scale 0.2737012522439323 \
+  --spatial-scale 1.0 \
   --compute-device auto \
   --n-clusters 8 \
   --atoms-per-cluster 8 \
@@ -128,13 +128,28 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --compressed-support-size 96 \
   --align-iters 4 \
   --n-init 5 \
-  --allow-observed-hull-geometry
+  --deep-feature-method graph_autoencoder
 ```
 
-Exploratory variant when only a UMAP embedding is available:
+Exploratory UMAP run when only a UMAP embedding is available:
 
 ```bash
---feature-obsm-key X_umap_marker_genes_3d
+cd spatial_ot
+conda run -n ml1 python -m spatial_ot multilevel-ot \
+  --input-h5ad ../work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad \
+  --output-dir ../work/spatial_ot_runs/p2_crc_multilevel_umap_exploratory \
+  --feature-obsm-key X_umap_marker_genes_3d \
+  --spatial-x-key cell_x \
+  --spatial-y-key cell_y \
+  --spatial-scale 0.2737012522439323 \
+  --compute-device auto \
+  --n-clusters 8 \
+  --atoms-per-cluster 8 \
+  --radius-um 100 \
+  --stride-um 150 \
+  --min-cells 20 \
+  --max-subregions 2000 \
+  --allow-observed-hull-geometry
 ```
 
 The active path now also supports a TOML config surface. A portable example lives at `configs/multilevel_deep_example.toml`, and it now demonstrates the graph-aware encoder:
@@ -176,6 +191,7 @@ The saved summary now includes:
 - assigned OT fallback frequency and the effective entropy values actually used by the solver
 - the requested and resolved Torch compute device for the active multilevel path
 - package version, git SHA, and summary schema version for reproducibility
+- graph usage metadata such as whether the deep encoder used a spatial graph and its training-graph degree statistics
 - a `boundary_invariance_claim` field showing whether explicit geometry supported the run; when observed-hull fallback is used the claim is explicitly exploratory
 - random-fold and spatial-block shape-leakage diagnostics
 - canonical-normalizer radius / interpolation diagnostics

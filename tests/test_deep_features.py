@@ -70,6 +70,72 @@ def test_graph_deep_feature_encoder_fit_save_load(tmp_path) -> None:
     assert np.allclose(embedding, loaded_embedding, atol=1e-5)
 
 
+def test_no_validation_restores_latest_epoch_not_epoch_one() -> None:
+    rng = np.random.default_rng(1)
+    features = rng.normal(size=(64, 8)).astype(np.float32)
+    coords = rng.normal(size=(64, 2)).astype(np.float32)
+
+    config_epoch1 = DeepFeatureConfig(
+        method="autoencoder",
+        latent_dim=4,
+        hidden_dim=20,
+        layers=2,
+        neighbor_k=4,
+        epochs=1,
+        batch_size=16,
+        validation="none",
+        restore_best=True,
+    )
+    config_epoch5 = DeepFeatureConfig(
+        method="autoencoder",
+        latent_dim=4,
+        hidden_dim=20,
+        layers=2,
+        neighbor_k=4,
+        epochs=5,
+        batch_size=16,
+        validation="none",
+        restore_best=True,
+    )
+
+    enc1 = SpatialOTFeatureEncoder(config_epoch1).fit(features=features, coords_um=coords, seed=11)
+    enc5 = SpatialOTFeatureEncoder(config_epoch5).fit(features=features, coords_um=coords, seed=11)
+
+    z1 = enc1.transform(features=features, coords_um=coords)
+    z5 = enc5.transform(features=features, coords_um=coords)
+
+    assert not np.allclose(z1, z5)
+
+
+def test_seed_reproducibility_includes_weight_initialization() -> None:
+    rng = np.random.default_rng(17)
+    features = rng.normal(size=(48, 6)).astype(np.float32)
+    coords = rng.normal(size=(48, 2)).astype(np.float32)
+    config = DeepFeatureConfig(
+        method="graph_autoencoder",
+        latent_dim=4,
+        hidden_dim=24,
+        layers=2,
+        neighbor_k=4,
+        radius_um=0.8,
+        short_radius_um=0.6,
+        mid_radius_um=1.2,
+        graph_layers=1,
+        epochs=3,
+        batch_size=16,
+        validation="none",
+        restore_best=True,
+    )
+
+    enc_a = SpatialOTFeatureEncoder(config).fit(features=features, coords_um=coords, seed=23)
+    enc_b = SpatialOTFeatureEncoder(config).fit(features=features, coords_um=coords, seed=23)
+
+    z_a = enc_a.transform(features=features, coords_um=coords)
+    z_b = enc_b.transform(features=features, coords_um=coords)
+
+    assert np.allclose(z_a, z_b, atol=1e-6)
+
+
 def test_deep_transform_batched_equals_default(tmp_path) -> None:
     rng = np.random.default_rng(55)
     features = rng.normal(size=(64, 6)).astype(np.float32)
@@ -281,4 +347,12 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert saved_summary["compute_device_requested"] == "cpu"
     assert saved_summary["compute_device_used"] == "cpu"
     assert saved_summary["deep_features"]["validation_context_mode"] == "inductive"
-    assert saved_summary["summary_schema_version"] == "0.0.8"
+    assert saved_summary["summary_schema_version"] == "1"
+    assert saved_summary["deep_features"]["uses_absolute_coordinate_features"] is False
+    assert saved_summary["deep_features"]["uses_spatial_graph"] is True
+    feature_schema = saved_summary["deep_features"]["feature_schema"]
+    assert feature_schema["uses_absolute_coordinate_features"] is False
+    assert feature_schema["uses_spatial_graph"] is True
+    assert feature_schema["graph_training_mode"] == "full_batch"
+    assert feature_schema["short_graph"]["edges"] >= 0
+    assert feature_schema["mid_graph"]["edges"] >= 0

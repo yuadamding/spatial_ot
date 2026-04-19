@@ -422,7 +422,8 @@ def run_multilevel_ot_on_h5ad(
             "graph_aggr": active_deep_config.graph_aggr,
             "validation": active_deep_config.validation,
             "validation_context_mode": active_deep_config.validation_context_mode,
-            "uses_coordinate_input": False,
+            "uses_absolute_coordinate_features": False,
+            "uses_spatial_graph": bool(active_deep_config.method == "graph_autoencoder"),
             "output_embedding": active_deep_config.output_embedding,
             "final_train_loss": float(final_train_loss) if final_train_loss is not None else None,
             "final_val_loss": float(final_val_loss) if final_val_loss is not None else None,
@@ -516,7 +517,7 @@ def run_multilevel_ot_on_h5ad(
     if sorted_costs.shape[1] >= 2:
         margin = float(np.mean(sorted_costs[:, 1] - sorted_costs[:, 0]))
     summary = {
-        "summary_schema_version": "0.0.8",
+        "summary_schema_version": "1",
         "spatial_ot_version": _package_version(),
         "git_sha": _git_sha(),
         "input_h5ad": str(input_h5ad),

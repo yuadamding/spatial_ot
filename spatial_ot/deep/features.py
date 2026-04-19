@@ -40,6 +40,13 @@ def _iter_batches(array: np.ndarray, batch_size: int):
         yield array[start : start + batch_size]
 
 
+def _seed_everything(seed: int) -> None:
+    np.random.seed(int(seed))
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
+
+
 def _split_validation(
     coords_um: np.ndarray,
     batch: np.ndarray | None,
@@ -278,6 +285,31 @@ def _tensor_graphs(
     )
 
 
+def _graph_summary(edge_index: torch.Tensor, n_nodes: int) -> dict[str, float | int]:
+    if n_nodes <= 0:
+        return {
+            "edges": 0,
+            "mean_degree": 0.0,
+            "max_degree": 0,
+            "isolated_fraction": 0.0,
+        }
+    if edge_index.numel() == 0:
+        return {
+            "edges": 0,
+            "mean_degree": 0.0,
+            "max_degree": 0,
+            "isolated_fraction": 1.0,
+        }
+    dst = edge_index[1]
+    deg = torch.bincount(dst, minlength=n_nodes)
+    return {
+        "edges": int(dst.numel()),
+        "mean_degree": float(deg.float().mean().detach().cpu()),
+        "max_degree": int(deg.max().detach().cpu()),
+        "isolated_fraction": float((deg == 0).float().mean().detach().cpu()),
+    }
+
+
 @dataclass
 class DeepFeatureResult:
     embedding: np.ndarray
@@ -359,7 +391,14 @@ class SpatialOTFeatureEncoder:
             "context_dim": self.context_dim,
             "method": self.config.method,
             "output_embedding": self.config.output_embedding,
-            "uses_coordinate_input": False,
+            "uses_absolute_coordinate_features": False,
+            "uses_spatial_graph": bool(self.config.method == "graph_autoencoder"),
+            "spatial_graph_construction": {
+                "neighbor_k": int(self.config.neighbor_k),
+                "radius_um": float(self.config.radius_um) if self.config.radius_um is not None else None,
+                "short_radius_um": float(self.config.short_radius_um) if self.config.short_radius_um is not None else None,
+                "mid_radius_um": float(self.config.mid_radius_um) if self.config.mid_radius_um is not None else None,
+            },
         }
         self.validation_report = {
             "mode": self.config.validation,
@@ -369,6 +408,7 @@ class SpatialOTFeatureEncoder:
             "held_out_batches": sorted(np.unique(batch_array[val_mask]).tolist()) if (batch_array is not None and np.any(val_mask)) else [],
         }
 
+        _seed_everything(seed)
         self.model = _make_model(input_dim=self.input_dim, context_dim=self.context_dim, config=self.config).to(self.device)
         optimizer = torch.optim.Adam(
             self.model.parameters(),
@@ -376,7 +416,6 @@ class SpatialOTFeatureEncoder:
             weight_decay=float(self.config.weight_decay),
         )
         self.history = []
-        torch.manual_seed(int(seed))
         best_state = None
         best_val = float("inf")
         patience_left = int(self.config.early_stopping_patience)
@@ -391,6 +430,9 @@ class SpatialOTFeatureEncoder:
                 short_val, mid_val = _tensor_graphs(coords_um[val_mask], config=self.config, device=self.device)
             else:
                 short_val = mid_val = None
+            self.feature_schema["graph_training_mode"] = "full_batch"
+            self.feature_schema["short_graph"] = _graph_summary(short_train, int(x_train.shape[0]))
+            self.feature_schema["mid_graph"] = _graph_summary(mid_train, int(x_train.shape[0]))
 
             for epoch in range(int(self.config.epochs)):
                 assert self.model is not None
@@ -434,8 +476,7 @@ class SpatialOTFeatureEncoder:
                         epoch_row["val_loss"] = current_val
                 self.history.append(epoch_row)
                 if current_val is None:
-                    if best_state is None:
-                        best_state = copy.deepcopy(self.model.state_dict())
+                    best_state = copy.deepcopy(self.model.state_dict())
                 elif current_val < best_val - float(self.config.min_delta):
                     best_val = current_val
                     best_state = copy.deepcopy(self.model.state_dict())
@@ -514,8 +555,7 @@ class SpatialOTFeatureEncoder:
                     epoch_row["val_loss"] = current_val
                 self.history.append(epoch_row)
                 if current_val is None:
-                    if best_state is None:
-                        best_state = copy.deepcopy(self.model.state_dict())
+                    best_state = copy.deepcopy(self.model.state_dict())
                 elif current_val < best_val - float(self.config.min_delta):
                     best_val = current_val
                     best_state = copy.deepcopy(self.model.state_dict())
