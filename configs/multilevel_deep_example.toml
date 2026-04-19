@@ -27,6 +27,7 @@ allow_convex_hull_fallback = false
 max_iter = 10
 tol = 1e-4
 seed = 1337
+compute_device = "auto"
 
 [deep]
 method = "autoencoder"

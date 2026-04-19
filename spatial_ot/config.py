@@ -141,6 +141,7 @@ class MultilevelOTConfig:
     max_iter: int = 10
     tol: float = 1e-4
     seed: int = 1337
+    compute_device: str = "auto"
 
 
 @dataclass
@@ -163,6 +164,9 @@ class DeepFeatureConfig:
     context_weight: float = 0.5
     variance_weight: float = 0.1
     decorrelation_weight: float = 0.01
+    early_stopping_patience: int = 10
+    min_delta: float = 1e-4
+    restore_best: bool = True
     save_model: bool = True
     pretrained_model: str | None = None
     output_obsm_key: str = "X_spatial_ot_deep"
@@ -269,6 +273,8 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.tol must be > 0")
     if config.ot.min_scale <= 0 or config.ot.max_scale <= 0 or config.ot.min_scale > config.ot.max_scale:
         raise ValueError("ot.min_scale and ot.max_scale must be positive and min_scale <= max_scale")
+    if not str(config.ot.compute_device).strip():
+        raise ValueError("ot.compute_device must be a non-empty string")
 
     valid_methods = {"none", "autoencoder"}
     if config.deep.method not in valid_methods:
@@ -292,9 +298,15 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("deep.batch_size must be at least 1")
     if config.deep.learning_rate <= 0 or config.deep.weight_decay < 0:
         raise ValueError("deep.learning_rate must be > 0 and deep.weight_decay must be >= 0")
+    if config.deep.count_layer is not None:
+        raise NotImplementedError("deep.count_layer is configured but count reconstruction is not implemented yet.")
     for name in ["reconstruction_weight", "context_weight", "variance_weight", "decorrelation_weight"]:
         if getattr(config.deep, name) < 0:
             raise ValueError(f"deep.{name} must be >= 0")
+    if config.deep.early_stopping_patience < 1:
+        raise ValueError("deep.early_stopping_patience must be at least 1")
+    if config.deep.min_delta < 0:
+        raise ValueError("deep.min_delta must be >= 0")
     if config.deep.pretrained_model and config.deep.method == "none":
         raise ValueError("deep.pretrained_model requires deep.method to be an active encoder method")
     return config

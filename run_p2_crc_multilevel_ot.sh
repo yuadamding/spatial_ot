@@ -1,16 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /storage/hackathon_2026/spatial_ot
+# Exploratory helper for local development.
+# For validated runs, prefer a metric-stable feature space such as X_pca
+# and avoid observed-hull geometry fallback unless you explicitly want
+# an exploratory local-pattern scan.
 
-INPUT_H5AD="${INPUT_H5AD:-/storage/hackathon_2026/work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad}"
-OUTPUT_DIR="${OUTPUT_DIR:-/storage/hackathon_2026/work/spatial_ot_runs/p2_crc_multilevel_umap}"
-FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X_umap_marker_genes_3d}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+INPUT_H5AD="${INPUT_H5AD:-../work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad}"
+OUTPUT_DIR="${OUTPUT_DIR:-../work/spatial_ot_runs/p2_crc_multilevel_exploratory}"
+FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X_pca}"
 SPATIAL_X_KEY="${SPATIAL_X_KEY:-cell_x}"
 SPATIAL_Y_KEY="${SPATIAL_Y_KEY:-cell_y}"
 SPATIAL_SCALE="${SPATIAL_SCALE:-0.2737012522439323}"
 N_CLUSTERS="${N_CLUSTERS:-8}"
 ATOMS_PER_CLUSTER="${ATOMS_PER_CLUSTER:-8}"
+COMPUTE_DEVICE="${COMPUTE_DEVICE:-auto}"
+ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"
+
+EXTRA_FLAGS=()
+if [[ "$ALLOW_OBSERVED_HULL_GEOMETRY" == "1" ]]; then
+  EXTRA_FLAGS+=(--allow-observed-hull-geometry)
+fi
 
 conda run -n ml1 python -m spatial_ot multilevel-ot \
   --input-h5ad "$INPUT_H5AD" \
@@ -19,6 +32,7 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --spatial-x-key "$SPATIAL_X_KEY" \
   --spatial-y-key "$SPATIAL_Y_KEY" \
   --spatial-scale "$SPATIAL_SCALE" \
+  --compute-device "$COMPUTE_DEVICE" \
   --n-clusters "$N_CLUSTERS" \
   --atoms-per-cluster "$ATOMS_PER_CLUSTER" \
   --radius-um 100 \
@@ -34,7 +48,7 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --compressed-support-size 96 \
   --align-iters 4 \
   --n-init 5 \
-  --allow-observed-hull-geometry \
   --max-iter 10 \
   --tol 1e-4 \
-  --seed 1337
+  --seed 1337 \
+  "${EXTRA_FLAGS[@]}"

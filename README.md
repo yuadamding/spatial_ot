@@ -39,7 +39,10 @@ Current notes:
 
 ## Layout
 
-- `spatial_ot/`: package code
+- `spatial_ot/multilevel/`: active multilevel OT path, split into a dedicated namespace
+- `spatial_ot/deep/`: reusable deep feature adapter namespace
+- `spatial_ot/legacy/`: earlier teacher-student scaffold, kept for backward-compatible legacy experiments
+- `spatial_ot/`: top-level compatibility shims and shared config/CLI entrypoints
 - `configs/`: config files and demo prior programs
 - `tests/`: regression and multilevel OT tests
 
@@ -48,18 +51,18 @@ Current notes:
 The smoke config points at the already-prepared `P2 CRC` Visium HD sample in this workspace and keeps the subset/epoch sizes intentionally small.
 
 ```bash
-cd /storage/hackathon_2026/spatial_ot
+cd spatial_ot
 conda run -n ml1 python -m spatial_ot train --config configs/p2_crc_smoke.toml
 ```
 
-Use an output path outside `/storage/hackathon_2026/spatial_ot` if you want to keep the package directory clean.
+Use an output path outside `spatial_ot` if you want to keep the package directory clean.
 
 ## Input visualization
 
 You can render a 2D overview of the preprocessed inputs used by a config with:
 
 ```bash
-cd /storage/hackathon_2026/spatial_ot
+cd spatial_ot
 conda run -n ml1 python -m spatial_ot plot-inputs --config configs/p2_crc_smoke.toml
 ```
 
@@ -70,6 +73,14 @@ By default this writes `input_2d_overview.png` under the configured output direc
 `spatial_ot` now also exposes a redesigned multilevel OT path for cases where the core input is already a cell-level feature embedding.
 
 Prefer PCA, standardized marker expression, or another calibrated latent space for serious OT runs. UMAP can be useful for exploratory clustering and visualization, but its Euclidean geometry is not generally metric-preserving.
+
+The current deep feature adapter is a conservative Stage 1 component:
+
+- `deep.method = "autoencoder"` learns a reusable feature adapter before OT
+- it is not yet a graph neural network
+- `batch_key` currently supports validation/sample-holdout bookkeeping, not true batch correction
+- `count_layer` is reserved but not implemented for count reconstruction yet
+- the active multilevel OT path now has its own Torch compute device via `--compute-device` / `ot.compute_device`; `auto` uses CUDA when available for cost matrices, projection, and the semi-relaxed Sinkhorn solver
 
 Two multilevel OT modes are supported:
 
@@ -92,14 +103,15 @@ This path:
 Example CLI shape. For validated runs, point `--feature-obsm-key` at a metric-stable embedding such as `X_pca`. If you only have a UMAP embedding available, treat the run as exploratory:
 
 ```bash
-cd /storage/hackathon_2026/spatial_ot
+cd spatial_ot
 conda run -n ml1 python -m spatial_ot multilevel-ot \
-  --input-h5ad /storage/hackathon_2026/work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad \
-  --output-dir /storage/hackathon_2026/work/spatial_ot_runs/p2_crc_multilevel_umap \
+  --input-h5ad ../work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad \
+  --output-dir ../work/spatial_ot_runs/p2_crc_multilevel_umap \
   --feature-obsm-key X_pca \
   --spatial-x-key cell_x \
   --spatial-y-key cell_y \
   --spatial-scale 0.2737012522439323 \
+  --compute-device auto \
   --n-clusters 8 \
   --atoms-per-cluster 8 \
   --radius-um 100 \
@@ -124,10 +136,10 @@ Exploratory variant when only a UMAP embedding is available:
 --feature-obsm-key X_umap_marker_genes_3d
 ```
 
-The active path now also supports a TOML config surface. A portable example lives at [configs/multilevel_deep_example.toml](/storage/hackathon_2026/spatial_ot/configs/multilevel_deep_example.toml:1), and you can run it with:
+The active path now also supports a TOML config surface. A portable example lives at `configs/multilevel_deep_example.toml`, and you can run it with:
 
 ```bash
-cd /storage/hackathon_2026/spatial_ot
+cd spatial_ot
 conda run -n ml1 python -m spatial_ot multilevel-ot \
   --config configs/multilevel_deep_example.toml
 ```
@@ -137,8 +149,8 @@ You can still override config values from the CLI, for example:
 ```bash
 conda run -n ml1 python -m spatial_ot multilevel-ot \
   --config configs/multilevel_deep_example.toml \
-  --input-h5ad /path/to/cells.h5ad \
-  --output-dir /path/to/output \
+  --input-h5ad ../data/cells.h5ad \
+  --output-dir ../work/spatial_ot_runs/example_output \
   --feature-obsm-key X_pca \
   --deep-feature-method autoencoder
 ```
@@ -161,7 +173,8 @@ The saved summary now includes:
 - restart summaries and the selected restart
 - geometry-source counts and convex-hull fallback frequency
 - assigned OT fallback frequency and the effective entropy values actually used by the solver
-- a `boundary_invariance_claim` field showing whether explicit geometry supported the run
+- the requested and resolved Torch compute device for the active multilevel path
+- a `boundary_invariance_claim` field showing whether explicit geometry supported the run; when observed-hull fallback is used the claim is explicitly exploratory
 - random-fold and spatial-block shape-leakage diagnostics
 - canonical-normalizer radius / interpolation diagnostics
 

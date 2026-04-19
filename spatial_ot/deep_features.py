@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import copy
 
 import numpy as np
 from sklearn.cluster import KMeans
@@ -30,6 +31,12 @@ def _standardize_features(features: np.ndarray) -> tuple[np.ndarray, np.ndarray,
 
 def _apply_standardization(features: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     return ((np.asarray(features, dtype=np.float32) - mean) / np.maximum(std, 1e-6)).astype(np.float32)
+
+
+def _iter_batches(array: np.ndarray, batch_size: int):
+    batch_size = max(int(batch_size), 1)
+    for start in range(0, array.shape[0], batch_size):
+        yield array[start : start + batch_size]
 
 
 def _off_diagonal(x: torch.Tensor) -> torch.Tensor:
@@ -60,6 +67,7 @@ def _build_context_targets(
     *,
     neighbor_k: int,
     radius_um: float | None,
+    device: torch.device | None = None,
 ) -> np.ndarray:
     coords = np.asarray(coords_um, dtype=np.float32)
     feats = np.asarray(features_std, dtype=np.float32)
@@ -76,15 +84,32 @@ def _build_context_targets(
         nn_model.fit(coords)
         neighborhoods = nn_model.kneighbors(coords, return_distance=False)
 
-    context = np.zeros_like(feats, dtype=np.float32)
+    src_index: list[int] = []
+    dst_index: list[int] = []
+    has_neighbors = np.zeros(coords.shape[0], dtype=bool)
     for idx, neighbors in enumerate(neighborhoods):
         neigh = np.asarray(neighbors, dtype=np.int64)
         neigh = neigh[neigh != idx]
         if neigh.size == 0:
-            context[idx] = feats[idx]
-        else:
-            context[idx] = feats[neigh].mean(axis=0)
-    return context
+            continue
+        has_neighbors[idx] = True
+        src_index.extend([idx] * int(neigh.size))
+        dst_index.extend(neigh.tolist())
+    if not src_index:
+        return feats.copy()
+
+    target_device = device or torch.device("cpu")
+    feats_t = torch.as_tensor(feats, dtype=torch.float32, device=target_device)
+    src_t = torch.as_tensor(src_index, dtype=torch.long, device=target_device)
+    dst_t = torch.as_tensor(dst_index, dtype=torch.long, device=target_device)
+    context_t = torch.zeros_like(feats_t)
+    deg_t = torch.zeros((feats_t.shape[0], 1), dtype=feats_t.dtype, device=target_device)
+    context_t.index_add_(0, src_t, feats_t[dst_t])
+    deg_t.index_add_(0, src_t, torch.ones((dst_t.numel(), 1), dtype=feats_t.dtype, device=target_device))
+    context_t = context_t / deg_t.clamp_min(1.0)
+    no_neighbor_mask = torch.as_tensor(~has_neighbors, dtype=torch.bool, device=target_device)
+    context_t[no_neighbor_mask] = feats_t[no_neighbor_mask]
+    return context_t.detach().cpu().numpy().astype(np.float32, copy=False)
 
 
 def _split_validation(
@@ -194,18 +219,25 @@ class SpatialOTFeatureEncoder:
     ) -> "SpatialOTFeatureEncoder":
         if self.config.method == "none":
             raise ValueError("SpatialOTFeatureEncoder.fit requires an active deep feature method, not 'none'.")
-        x_std, mean, std = _standardize_features(features)
+        if self.config.count_layer is not None:
+            raise NotImplementedError("deep.count_layer is configured but count reconstruction is not implemented yet.")
+        x = np.asarray(features, dtype=np.float32)
         context_targets = _build_context_targets(
             coords_um=coords_um,
-            features_std=x_std,
+            features_std=x,
             neighbor_k=self.config.neighbor_k,
             radius_um=self.config.radius_um,
+            device=self.device,
         )
         val_mask = _split_validation(coords_um=coords_um, batch=batch, config=self.config, seed=seed)
         train_mask = ~val_mask
         if not np.any(train_mask):
             train_mask[:] = True
             val_mask[:] = False
+
+        _, mean, std = _standardize_features(x[train_mask])
+        x_std = _apply_standardization(x, mean, std)
+        context_std = _apply_standardization(context_targets, mean, std)
 
         self.feature_mean = mean
         self.feature_std = std
@@ -216,7 +248,7 @@ class SpatialOTFeatureEncoder:
         generator.manual_seed(int(seed))
         train_dataset = TensorDataset(
             torch.from_numpy(x_std[train_mask]),
-            torch.from_numpy(context_targets[train_mask]),
+            torch.from_numpy(context_std[train_mask]),
         )
         train_loader = DataLoader(
             train_dataset,
@@ -226,8 +258,8 @@ class SpatialOTFeatureEncoder:
             generator=generator,
         )
 
-        x_val = torch.from_numpy(x_std[val_mask]).to(self.device) if np.any(val_mask) else None
-        c_val = torch.from_numpy(context_targets[val_mask]).to(self.device) if np.any(val_mask) else None
+        x_val = x_std[val_mask] if np.any(val_mask) else None
+        c_val = context_std[val_mask] if np.any(val_mask) else None
 
         optimizer = torch.optim.Adam(
             self.model.parameters(),
@@ -236,6 +268,9 @@ class SpatialOTFeatureEncoder:
         )
         self.history = []
         torch.manual_seed(int(seed))
+        best_state = None
+        best_val = float("inf")
+        patience_left = int(self.config.early_stopping_patience)
         for epoch in range(int(self.config.epochs)):
             self.model.train()
             loss_accum = 0.0
@@ -264,36 +299,63 @@ class SpatialOTFeatureEncoder:
                 "epoch": float(epoch + 1),
                 "train_loss": float(loss_accum / max(n_train, 1)),
             }
-            if x_val is not None and c_val is not None:
+            current_val = None
+            if x_val is not None and c_val is not None and x_val.shape[0] > 0:
                 self.model.eval()
+                val_loss_accum = 0.0
+                n_val = 0
                 with torch.no_grad():
-                    z_val, recon_val, pred_ctx_val = self.model(x_val)
-                    loss_recon = torch.mean((recon_val - x_val) ** 2)
-                    loss_ctx = torch.mean((pred_ctx_val - c_val) ** 2)
-                    loss_var = _variance_loss(z_val)
-                    loss_decorr = _decorrelation_loss(z_val)
-                    val_loss = (
-                        float(self.config.reconstruction_weight) * loss_recon
-                        + float(self.config.context_weight) * loss_ctx
-                        + float(self.config.variance_weight) * loss_var
-                        + float(self.config.decorrelation_weight) * loss_decorr
-                    )
-                epoch_row["val_loss"] = float(val_loss.detach().cpu())
+                    for x_batch_np, c_batch_np in zip(_iter_batches(x_val, self.config.batch_size), _iter_batches(c_val, self.config.batch_size), strict=False):
+                        x_batch = torch.from_numpy(x_batch_np).to(self.device)
+                        c_batch = torch.from_numpy(c_batch_np).to(self.device)
+                        z_val, recon_val, pred_ctx_val = self.model(x_batch)
+                        loss_recon = torch.mean((recon_val - x_batch) ** 2)
+                        loss_ctx = torch.mean((pred_ctx_val - c_batch) ** 2)
+                        loss_var = _variance_loss(z_val)
+                        loss_decorr = _decorrelation_loss(z_val)
+                        val_loss = (
+                            float(self.config.reconstruction_weight) * loss_recon
+                            + float(self.config.context_weight) * loss_ctx
+                            + float(self.config.variance_weight) * loss_var
+                            + float(self.config.decorrelation_weight) * loss_decorr
+                        )
+                        val_loss_accum += float(val_loss.detach().cpu()) * int(x_batch.shape[0])
+                        n_val += int(x_batch.shape[0])
+                current_val = float(val_loss_accum / max(n_val, 1))
+                epoch_row["val_loss"] = current_val
+                if current_val < best_val - float(self.config.min_delta):
+                    best_val = current_val
+                    best_state = copy.deepcopy(self.model.state_dict())
+                    patience_left = int(self.config.early_stopping_patience)
+                else:
+                    patience_left -= 1
             self.history.append(epoch_row)
+            if x_val is None or c_val is None or x_val.shape[0] == 0:
+                if best_state is None:
+                    best_state = copy.deepcopy(self.model.state_dict())
+                best_val = min(best_val, epoch_row["train_loss"])
+            elif patience_left <= 0:
+                break
+        if bool(self.config.restore_best) and best_state is not None:
+            self.model.load_state_dict(best_state)
         return self
 
-    def transform(self, features: np.ndarray, coords_um: np.ndarray | None = None) -> np.ndarray:
+    def transform(self, features: np.ndarray, coords_um: np.ndarray | None = None, batch_size: int | None = None) -> np.ndarray:
         del coords_um
         self._check_fitted()
         assert self.feature_mean is not None and self.feature_std is not None and self.model is not None and self.input_dim is not None
         x_std = _apply_standardization(features, self.feature_mean, self.feature_std)
         if x_std.shape[1] != self.input_dim:
             raise ValueError(f"Expected feature dimension {self.input_dim}, got {x_std.shape[1]}.")
-        x_tensor = torch.from_numpy(x_std).to(self.device)
+        batch_size = int(batch_size or self.config.batch_size)
         self.model.eval()
+        outputs: list[np.ndarray] = []
         with torch.no_grad():
-            z = self.model.encode(x_tensor).detach().cpu().numpy().astype(np.float32)
-        return z
+            for x_batch_np in _iter_batches(x_std, batch_size):
+                x_tensor = torch.from_numpy(x_batch_np).to(self.device)
+                z = self.model.encode(x_tensor).detach().cpu().numpy().astype(np.float32)
+                outputs.append(z)
+        return np.vstack(outputs) if outputs else np.zeros((0, int(self.config.latent_dim)), dtype=np.float32)
 
     def fit_transform(
         self,
@@ -319,29 +381,37 @@ class SpatialOTFeatureEncoder:
         assert self.model is not None and self.feature_mean is not None and self.feature_std is not None and self.input_dim is not None
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "config": asdict(self.config),
-                "state_dict": self.model.state_dict(),
-                "feature_mean": self.feature_mean,
-                "feature_std": self.feature_std,
-                "input_dim": int(self.input_dim),
-                "history": self.history,
-            },
-            destination,
+        torch.save(self.model.state_dict(), destination)
+        destination.with_suffix(destination.suffix + ".meta.json").write_text(
+            json.dumps(
+                {
+                    "config": asdict(self.config),
+                    "input_dim": int(self.input_dim),
+                    "history": self.history,
+                },
+                indent=2,
+            )
+        )
+        np.savez_compressed(
+            destination.with_suffix(destination.suffix + ".scaler.npz"),
+            feature_mean=self.feature_mean,
+            feature_std=self.feature_std,
         )
 
     @classmethod
     def load(cls, path: str | Path, *, map_location: str | None = None) -> "SpatialOTFeatureEncoder":
-        checkpoint = torch.load(Path(path), map_location=map_location or "cpu", weights_only=False)
-        config = DeepFeatureConfig(**checkpoint["config"])
+        path = Path(path)
+        meta = json.loads(path.with_suffix(path.suffix + ".meta.json").read_text())
+        scaler = np.load(path.with_suffix(path.suffix + ".scaler.npz"))
+        config = DeepFeatureConfig(**meta["config"])
         encoder = cls(config=config)
-        encoder.feature_mean = np.asarray(checkpoint["feature_mean"], dtype=np.float32)
-        encoder.feature_std = np.asarray(checkpoint["feature_std"], dtype=np.float32)
-        encoder.input_dim = int(checkpoint["input_dim"])
+        encoder.feature_mean = np.asarray(scaler["feature_mean"], dtype=np.float32)
+        encoder.feature_std = np.asarray(scaler["feature_std"], dtype=np.float32)
+        encoder.input_dim = int(meta["input_dim"])
         encoder.model = _DeepFeatureNet(input_dim=encoder.input_dim, config=config).to(encoder.device)
-        encoder.model.load_state_dict(checkpoint["state_dict"])
-        encoder.history = list(checkpoint.get("history", []))
+        state_dict = torch.load(path, map_location=map_location or "cpu", weights_only=True)
+        encoder.model.load_state_dict(state_dict)
+        encoder.history = list(meta.get("history", []))
         return encoder
 
 
@@ -365,4 +435,9 @@ def fit_deep_features(
 def save_deep_feature_history(history: list[dict[str, float]], path: str | Path) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(history, indent=2))
+    if destination.suffix.lower() == ".json":
+        destination.write_text(json.dumps(history, indent=2))
+        return
+    import pandas as pd
+
+    pd.DataFrame(history).to_csv(destination, index=False)

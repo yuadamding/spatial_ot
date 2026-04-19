@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from sklearn.metrics import adjusted_rand_score
+import torch
 
 from spatial_ot.multilevel_ot import (
     RegionGeometry,
@@ -109,6 +110,7 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
         max_iter=8,
         tol=1e-4,
         seed=1337,
+        compute_device="cpu",
     )
 
     subregion_truth = []
@@ -416,6 +418,7 @@ def test_returned_costs_match_returned_atoms() -> None:
         max_iter=3,
         tol=1e-4,
         seed=7,
+        compute_device="cpu",
     )
     q, w = make_reference_points_unit_disk(64)
     regions = [RegionGeometry(region_id=f"r{i}", members=m) for i, m in enumerate(result.subregion_members)]
@@ -452,6 +455,7 @@ def test_returned_costs_match_returned_atoms() -> None:
         max_scale=1.33,
         scale_penalty=0.05,
         shift_penalty=0.05,
+        compute_device=torch.device("cpu"),
     )
     assert recomputed.shape == result.subregion_cluster_costs.shape
     assert np.array_equal(result.subregion_cluster_labels, result.subregion_cluster_costs.argmin(axis=1))
@@ -506,11 +510,64 @@ def test_fit_requires_explicit_fallback_flag_for_observed_hull_geometry() -> Non
             max_iter=1,
             tol=1e-4,
             seed=0,
+            compute_device="cpu",
         )
     except ValueError:
         pass
     else:
         raise AssertionError("Expected fit_multilevel_ot to require an explicit hull-fallback opt-in")
+
+
+def test_multilevel_ot_cuda_smoke_if_available() -> None:
+    if not torch.cuda.is_available():
+        return
+    rng = np.random.default_rng(21)
+    coords = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0], scale=0.3, size=(12, 2)),
+            rng.normal(loc=[5.0, 5.0], scale=0.3, size=(12, 2)),
+        ]
+    ).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0], scale=0.1, size=(12, 2)),
+            rng.normal(loc=[3.0, 3.0], scale=0.1, size=(12, 2)),
+        ]
+    ).astype(np.float32)
+    subregion_members = [
+        np.arange(0, 12, dtype=np.int32),
+        np.arange(12, 24, dtype=np.int32),
+    ]
+    subregion_centers = np.vstack([coords[m].mean(axis=0) for m in subregion_members]).astype(np.float32)
+    result = fit_multilevel_ot(
+        features=features,
+        coords_um=coords,
+        subregion_members=subregion_members,
+        subregion_centers_um=subregion_centers,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=2.0,
+        stride_um=4.0,
+        min_cells=6,
+        max_subregions=6,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=6,
+        align_iters=1,
+        allow_reflection=False,
+        allow_scale=False,
+        allow_convex_hull_fallback=True,
+        max_iter=2,
+        tol=1e-4,
+        seed=21,
+        compute_device="cuda",
+    )
+    assert result.subregion_cluster_costs.shape[1] == 2
+    assert result.cell_cluster_probs.shape[1] == 2
 
 
 def test_weighted_similarity_fit_no_reflection_keeps_positive_determinant() -> None:

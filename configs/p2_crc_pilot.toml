@@ -1,10 +1,10 @@
 [paths]
-cells_h5ad = "/storage/hackathon_2026/work/visium_hd_p2_crc/method_runs/inputs/cells_standard_full.h5ad"
-bins8_h5 = "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_008um/filtered_feature_bc_matrix.h5"
-bins8_positions = "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_008um/spatial/tissue_positions.parquet"
-barcode_mappings = "/storage/hackathon_2026/work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/barcode_mappings.parquet"
-programs_json = "/storage/hackathon_2026/spatial_ot/configs/crc_demo_programs.json"
-output_dir = "/storage/hackathon_2026/spatial_ot/runs/p2_crc_pilot"
+cells_h5ad = "../work/visium_hd_p2_crc/method_runs/inputs/cells_standard_full.h5ad"
+bins8_h5 = "../work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_008um/filtered_feature_bc_matrix.h5"
+bins8_positions = "../work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/binned_outputs/square_008um/spatial/tissue_positions.parquet"
+barcode_mappings = "../work/visium_hd_p2_crc/runs/visium_hd_h1_vm2jxxk_a1_sr410_current/outs/barcode_mappings.parquet"
+programs_json = "configs/crc_demo_programs.json"
+output_dir = "../work/spatial_ot_runs/p2_crc_pilot"
 
 [data]
 seed = 1337

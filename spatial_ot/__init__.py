@@ -50,7 +50,7 @@ def __getattr__(name: str):
             from . import deep_features
 
             return getattr(deep_features, name)
-        from . import multilevel_ot
+        from . import multilevel
 
-        return getattr(multilevel_ot, name)
+        return getattr(multilevel, name)
     raise AttributeError(f"module 'spatial_ot' has no attribute {name!r}")

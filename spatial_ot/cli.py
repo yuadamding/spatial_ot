@@ -10,9 +10,9 @@ from .config import (
     load_multilevel_config,
     validate_multilevel_config,
 )
-from .multilevel_ot import run_multilevel_ot_with_config
-from .training import run_experiment
-from .visualization import plot_preprocessed_inputs, plot_result_bundle
+from .legacy.training import run_experiment
+from .legacy.visualization import plot_preprocessed_inputs, plot_result_bundle
+from .multilevel import run_multilevel_ot_with_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--max-iter", type=int, default=None, help="Maximum alternating-optimization iterations.")
     multilevel.add_argument("--tol", type=float, default=None, help="Support-shift tolerance for early stopping.")
     multilevel.add_argument("--seed", type=int, default=None, help="Random seed.")
+    multilevel.add_argument("--compute-device", default=None, help="Torch compute device for the active multilevel OT path, or 'auto' to use CUDA when available.")
     multilevel.add_argument("--deep-feature-method", default=None, choices=["none", "autoencoder"], help="Optional learned feature adapter before OT.")
     multilevel.add_argument("--deep-latent-dim", type=int, default=None, help="Latent dimension for the deep feature adapter.")
     multilevel.add_argument("--deep-hidden-dim", type=int, default=None, help="Hidden width for the deep feature adapter.")
@@ -133,6 +134,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "max_iter",
         "tol",
         "seed",
+        "compute_device",
     ]:
         attr = "allow_convex_hull_fallback" if name == "allow_observed_hull_geometry" else name
         _set_if_not_none(config.ot, attr, getattr(args, name))
