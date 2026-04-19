@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import warnings
 
 import anndata as ad
 import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 from matplotlib.path import Path as MplPath
 import numpy as np
 import ot
@@ -23,6 +19,9 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import pairwise_distances, silhouette_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.neighbors import NearestNeighbors
+
+from .config import DeepFeatureConfig, MultilevelExperimentConfig
+from .deep_features import SpatialOTFeatureEncoder, fit_deep_features
 
 
 @dataclass
@@ -48,6 +47,12 @@ class ShapeNormalizerDiagnostics:
     mapped_radius_p95: float | None
     mapped_radius_max: float | None
     interpolation_residual: float | None
+
+
+@dataclass
+class OTSolveDiagnostics:
+    effective_eps: float
+    used_fallback: bool
 
 
 @dataclass
@@ -78,6 +83,8 @@ class SubregionMeasure:
 class MultilevelOTResult:
     subregion_centers_um: np.ndarray
     subregion_members: list[np.ndarray]
+    subregion_argmin_labels: np.ndarray
+    subregion_forced_label_mask: np.ndarray
     subregion_geometry_point_counts: np.ndarray
     subregion_geometry_sources: list[str]
     subregion_geometry_used_fallback: np.ndarray
@@ -88,6 +95,8 @@ class MultilevelOTResult:
     subregion_cluster_probs: np.ndarray
     subregion_cluster_costs: np.ndarray
     subregion_atom_weights: np.ndarray
+    subregion_assigned_effective_eps: np.ndarray
+    subregion_assigned_used_ot_fallback: np.ndarray
     cluster_supports: np.ndarray
     cluster_atom_coords: np.ndarray
     cluster_atom_features: np.ndarray
@@ -273,13 +282,19 @@ def _sample_uniform_points_in_polygon_components(
         xmin, ymin = poly.min(axis=0)
         xmax, ymax = poly.max(axis=0)
         bboxes.append((xmin, xmax, ymin, ymax))
-        areas.append(max((xmax - xmin) * (ymax - ymin), 1e-12))
+        x = poly[:, 0]
+        y = poly[:, 1]
+        poly_area = 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+        areas.append(max(float(poly_area), 1e-12))
         paths.append(MplPath(poly))
     probs = np.asarray(areas, dtype=np.float64)
     probs = probs / probs.sum()
 
     points = []
-    while len(points) < n_points:
+    max_attempts = max(32, n_points // 8)
+    attempts = 0
+    while len(points) < n_points and attempts < max_attempts:
+        attempts += 1
         comp_idx = int(rng.choice(len(components), p=probs))
         xmin, xmax, ymin, ymax = bboxes[comp_idx]
         batch_n = max(128, 2 * (n_points - len(points)))
@@ -292,6 +307,8 @@ def _sample_uniform_points_in_polygon_components(
         inside = paths[comp_idx].contains_points(cand)
         if np.any(inside):
             points.extend(cand[inside].tolist())
+    if len(points) < n_points:
+        raise ValueError("Unable to sample enough points from polygon geometry.")
     return np.asarray(points[:n_points], dtype=np.float32)
 
 
@@ -324,27 +341,34 @@ def sample_geometry_points(
     n_points: int,
     seed: int,
     allow_convex_hull_fallback: bool = True,
+    warn_on_fallback: bool = True,
 ) -> tuple[np.ndarray, str, bool]:
     if region_geometry.mask is not None:
-        return _sample_uniform_points_in_mask(region_geometry.mask, n_points=n_points, seed=seed, affine=region_geometry.affine), "mask", False
+        pts = _sample_uniform_points_in_mask(region_geometry.mask, n_points=n_points, seed=seed, affine=region_geometry.affine)
+        if pts.shape[0] == 0:
+            raise ValueError(f"Region '{region_geometry.region_id}' provided an empty mask geometry.")
+        return pts, "mask", False
     if region_geometry.polygon_components:
         pts = _sample_uniform_points_in_polygon_components(region_geometry.polygon_components, n_points=n_points, seed=seed)
         if pts.shape[0] > 0:
             return pts, "polygon_components", False
+        raise ValueError(f"Region '{region_geometry.region_id}' provided polygon components but sampling produced no points.")
     if region_geometry.polygon_vertices is not None and np.asarray(region_geometry.polygon_vertices).shape[0] >= 3:
         pts = _sample_uniform_points_in_polygon_components([np.asarray(region_geometry.polygon_vertices)], n_points=n_points, seed=seed)
         if pts.shape[0] > 0:
             return pts, "polygon", False
+        raise ValueError(f"Region '{region_geometry.region_id}' provided polygon geometry but sampling produced no points.")
     if not allow_convex_hull_fallback:
         raise ValueError(
             f"Region '{region_geometry.region_id}' has no explicit geometry. "
             "Pass polygon/mask geometry or allow convex hull fallback explicitly."
         )
-    warnings.warn(
-        f"Region '{region_geometry.region_id}' has no explicit geometry; using convex hull of observed coordinates for shape normalization.",
-        RuntimeWarning,
-        stacklevel=2,
-    )
+    if warn_on_fallback:
+        warnings.warn(
+            f"Region '{region_geometry.region_id}' has no explicit geometry; using convex hull of observed coordinates for shape normalization.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return _sample_uniform_points_in_convex_hull(observed_coords, n_points=n_points, seed=seed), "convex_hull_fallback", True
 
 
@@ -414,11 +438,39 @@ def _subregion_shape_descriptors(coords: np.ndarray) -> dict[str, float]:
     }
 
 
-def _shape_descriptor_frame(subregion_members: list[np.ndarray], coords_um: np.ndarray) -> pd.DataFrame:
+def _shape_descriptor_frame(
+    subregion_members: list[np.ndarray],
+    coords_um: np.ndarray,
+    region_geometries: list[RegionGeometry] | None = None,
+) -> pd.DataFrame:
     rows = []
     for rid, members in enumerate(subregion_members):
-        desc = _subregion_shape_descriptors(coords_um[members])
+        source = "observed_coordinate_hull"
+        if region_geometries is not None:
+            region = region_geometries[rid]
+            if region.mask is not None:
+                geom = _sample_uniform_points_in_mask(region.mask, n_points=512, seed=rid, affine=region.affine)
+                if geom.shape[0] > 0:
+                    desc = _subregion_shape_descriptors(geom)
+                    source = "explicit_mask"
+                else:
+                    desc = _subregion_shape_descriptors(coords_um[members])
+            elif region.polygon_components:
+                pts = np.vstack([np.asarray(poly, dtype=np.float64) for poly in region.polygon_components if np.asarray(poly).shape[0] >= 3])
+                if pts.shape[0] > 0:
+                    desc = _subregion_shape_descriptors(pts)
+                    source = "explicit_polygon"
+                else:
+                    desc = _subregion_shape_descriptors(coords_um[members])
+            elif region.polygon_vertices is not None and np.asarray(region.polygon_vertices).shape[0] >= 3:
+                desc = _subregion_shape_descriptors(np.asarray(region.polygon_vertices, dtype=np.float64))
+                source = "explicit_polygon"
+            else:
+                desc = _subregion_shape_descriptors(coords_um[members])
+        else:
+            desc = _subregion_shape_descriptors(coords_um[members])
         desc["subregion_id"] = int(rid)
+        desc["shape_descriptor_source"] = source
         rows.append(desc)
     return pd.DataFrame(rows)
 
@@ -434,7 +486,8 @@ def _shape_leakage_balanced_accuracy(shape_df: pd.DataFrame, labels: np.ndarray,
     n_splits = min(5, int(counts.min()))
     if n_splits < 2:
         return None
-    x = shape_df.drop(columns=["subregion_id"], errors="ignore").to_numpy(dtype=np.float32)
+    numeric_cols = [c for c in shape_df.columns if c != "subregion_id" and np.issubdtype(shape_df[c].dtype, np.number)]
+    x = shape_df[numeric_cols].to_numpy(dtype=np.float32)
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     clf = RandomForestClassifier(n_estimators=300, random_state=seed)
     scores = cross_val_score(clf, x, y, cv=cv, scoring="balanced_accuracy")
@@ -462,7 +515,8 @@ def _shape_leakage_spatial_block_accuracy(
         return None
     block_km = KMeans(n_clusters=block_count, n_init=20, random_state=seed)
     blocks = block_km.fit_predict(centers)
-    x = shape_df.drop(columns=["subregion_id"], errors="ignore").to_numpy(dtype=np.float32)
+    numeric_cols = [c for c in shape_df.columns if c != "subregion_id" and np.issubdtype(shape_df[c].dtype, np.number)]
+    x = shape_df[numeric_cols].to_numpy(dtype=np.float32)
     clf = RandomForestClassifier(n_estimators=300, random_state=seed)
     scores: list[float] = []
     for block in np.unique(blocks):
@@ -610,6 +664,16 @@ def fit_ot_shape_normalizer(
 ) -> tuple[ShapeNormalizer, ShapeNormalizerDiagnostics]:
     g = np.asarray(geometry_points, dtype=np.float64)
     q = np.asarray(reference_points, dtype=np.float64)
+    if g.ndim != 2 or g.shape[1] != 2:
+        raise ValueError("geometry_points must have shape (n_points, 2).")
+    if q.ndim != 2 or q.shape[1] != 2:
+        raise ValueError("reference_points must have shape (n_points, 2).")
+    if g.shape[0] < 3:
+        raise ValueError("At least 3 geometry points are required for shape normalization.")
+    if not np.all(np.isfinite(g)):
+        raise ValueError("geometry_points contains NaN or Inf.")
+    if not np.all(np.isfinite(q)):
+        raise ValueError("reference_points contains NaN or Inf.")
 
     g_norm, center, scale = _normalize_coords_basic(g)
     if reference_weights is None:
@@ -656,8 +720,8 @@ def fit_ot_shape_normalizer(
         )
         pred = np.asarray(interpolator(g_norm), dtype=np.float64)
         interpolation_residual = float(np.sqrt(np.mean(np.sum((pred - g_mapped) ** 2, axis=1))))
-    except Exception:
-        interpolator = None
+    except Exception as exc:
+        raise RuntimeError("Shape normalization failed.") from exc
     normalizer = ShapeNormalizer(center=center, scale=scale, interpolator=interpolator)
     diagnostics = ShapeNormalizerDiagnostics(
         geometry_source="unknown",
@@ -741,6 +805,7 @@ def _build_subregion_measures(
             n_points=max(int(geometry_samples), 32),
             seed=seed + rid,
             allow_convex_hull_fallback=allow_convex_hull_fallback,
+            warn_on_fallback=False,
         )
         normalizer, diagnostics = fit_ot_shape_normalizer(
             geometry_points=geom_points,
@@ -884,13 +949,14 @@ def weighted_similarity_fit(
     y0 = y - ybar
     h = x0.T @ (w[:, None] * y0)
     u, s, vt = np.linalg.svd(h)
-    r = u @ vt
-    if not allow_reflection and np.linalg.det(r) < 0:
-        u[:, -1] *= -1
-        r = u @ vt
+    d = np.eye(x.shape[1], dtype=np.float64)
+    if not allow_reflection and np.linalg.det(u @ vt) < 0:
+        d[-1, -1] = -1.0
+    r = u @ d @ vt
     if allow_scale:
         denom = float(np.sum(w * np.sum(x0**2, axis=1)))
-        scale = float(s.sum() / max(denom, 1e-12))
+        scale = float(np.trace(r.T @ h) / max(denom, 1e-12))
+        scale = max(scale, 1e-12)
     else:
         scale = 1.0
     scale = float(np.clip(scale, min_scale, max_scale))
@@ -921,11 +987,12 @@ def _solve_semirelaxed_unbalanced(
     c: np.ndarray,
     eps: float,
     rho: float,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float, OTSolveDiagnostics]:
     regs = [max(float(eps), 1e-5)]
     regs.extend([regs[0] * 2.0, regs[0] * 4.0, regs[0] * 8.0])
     last_gamma = None
     last_objective = 1e12
+    last_reg = regs[0]
     for reg in regs:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -956,15 +1023,20 @@ def _solve_semirelaxed_unbalanced(
         objective = float(objective)
         last_gamma = gamma
         last_objective = objective
+        last_reg = reg
         numeric_warn = any(
             ("Numerical errors" in str(w.message)) or ("did not converge" in str(w.message))
             for w in caught
         )
         if np.all(np.isfinite(gamma)) and np.isfinite(objective) and not numeric_warn:
-            return gamma, objective
+            return gamma, objective, OTSolveDiagnostics(effective_eps=float(reg), used_fallback=not np.isclose(reg, regs[0]))
     if last_gamma is None or not np.all(np.isfinite(last_gamma)):
         raise FloatingPointError("Unable to obtain a finite semi-relaxed unbalanced OT solution.")
-    return last_gamma, last_objective if np.isfinite(last_objective) else 1e12
+    return (
+        last_gamma,
+        last_objective if np.isfinite(last_objective) else 1e12,
+        OTSolveDiagnostics(effective_eps=float(last_reg), used_fallback=not np.isclose(last_reg, regs[0])),
+    )
 
 
 def aligned_semirelaxed_ot_to_cluster(
@@ -987,7 +1059,7 @@ def aligned_semirelaxed_ot_to_cluster(
     max_scale: float,
     scale_penalty: float,
     shift_penalty: float,
-) -> tuple[float, np.ndarray, dict[str, np.ndarray | float], np.ndarray]:
+) -> tuple[float, np.ndarray, dict[str, np.ndarray | float], np.ndarray, OTSolveDiagnostics]:
     u = np.asarray(u, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     a = _normalize_hist(a)
@@ -1000,7 +1072,7 @@ def aligned_semirelaxed_ot_to_cluster(
         cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(cost_scale_x, 1e-12)
         cy = ot.dist(y, atom_features, metric="sqeuclidean") / max(cost_scale_y, 1e-12)
         c = lambda_x * cx + lambda_y * cy
-        gamma, _ = _solve_semirelaxed_unbalanced(a=a, beta=beta, c=c, eps=eps, rho=rho)
+        gamma, _, _ = _solve_semirelaxed_unbalanced(a=a, beta=beta, c=c, eps=eps, rho=rho)
         row_mass = np.maximum(gamma.sum(axis=1), 1e-12)
         target_bary = (gamma @ atom_coords) / row_mass[:, None]
         transform = weighted_similarity_fit(
@@ -1017,7 +1089,7 @@ def aligned_semirelaxed_ot_to_cluster(
     cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(cost_scale_x, 1e-12)
     cy = ot.dist(y, atom_features, metric="sqeuclidean") / max(cost_scale_y, 1e-12)
     c = lambda_x * cx + lambda_y * cy
-    gamma, objective = _solve_semirelaxed_unbalanced(a=a, beta=beta, c=c, eps=eps, rho=rho)
+    gamma, objective, solve_diag = _solve_semirelaxed_unbalanced(a=a, beta=beta, c=c, eps=eps, rho=rho)
     target_mass = np.asarray(gamma.sum(axis=0), dtype=np.float64)
     theta = _normalize_hist(target_mass)
     objective += _transform_penalty(
@@ -1027,22 +1099,28 @@ def aligned_semirelaxed_ot_to_cluster(
     )
     if not np.isfinite(objective):
         objective = 1e12
-    return objective, gamma.astype(np.float32), transform, theta.astype(np.float32)
+    return objective, gamma.astype(np.float32), transform, theta.astype(np.float32), solve_diag
 
 
-def _ensure_nonempty_clusters(labels: np.ndarray, costs: np.ndarray, n_clusters: int) -> np.ndarray:
+def _ensure_nonempty_clusters(labels: np.ndarray, costs: np.ndarray, n_clusters: int) -> tuple[np.ndarray, np.ndarray]:
     labels = labels.copy()
-    counts = pd.Series(labels).value_counts().to_dict()
-    for k in range(n_clusters):
-        if counts.get(k, 0) > 0:
-            continue
-        donor = max(counts, key=lambda x: counts[x])
-        donor_idx = np.flatnonzero(labels == donor)
-        worst = donor_idx[np.argmax(costs[donor_idx, donor])]
-        labels[worst] = k
+    forced = np.zeros(labels.shape[0], dtype=bool)
+    counts = np.bincount(labels, minlength=n_clusters)
+    current_cost = costs[np.arange(labels.shape[0]), labels].astype(np.float64)
+    for empty_k in np.where(counts == 0)[0]:
+        feasible = counts[labels] > 1
+        penalty = costs[:, empty_k].astype(np.float64) - current_cost
+        penalty[~feasible] = np.inf
+        r = int(np.argmin(penalty))
+        if not np.isfinite(penalty[r]):
+            raise RuntimeError("Cannot repair empty cluster without emptying another cluster.")
+        donor = int(labels[r])
         counts[donor] -= 1
-        counts[k] = 1
-    return labels
+        labels[r] = int(empty_k)
+        counts[empty_k] += 1
+        current_cost[r] = float(costs[r, empty_k])
+        forced[r] = True
+    return labels, forced
 
 
 def _compute_assignment_costs(
@@ -1070,7 +1148,7 @@ def _compute_assignment_costs(
 
     for r, measure in enumerate(measures):
         for k in range(n_clusters):
-            cost, _, _, _ = aligned_semirelaxed_ot_to_cluster(
+            cost, _, _, _, _ = aligned_semirelaxed_ot_to_cluster(
                 u=measure.canonical_coords,
                 y=measure.features,
                 a=measure.weights,
@@ -1114,14 +1192,16 @@ def _compute_assigned_artifacts(
     max_scale: float,
     scale_penalty: float,
     shift_penalty: float,
-) -> tuple[list[np.ndarray], list[dict[str, np.ndarray | float]], list[np.ndarray], np.ndarray]:
+) -> tuple[list[np.ndarray], list[dict[str, np.ndarray | float]], list[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
     plans: list[np.ndarray] = []
     transforms: list[dict[str, np.ndarray | float]] = []
     thetas: list[np.ndarray] = []
     assigned_costs = np.zeros(len(measures), dtype=np.float32)
+    effective_eps = np.zeros(len(measures), dtype=np.float32)
+    used_fallback = np.zeros(len(measures), dtype=bool)
     for r, measure in enumerate(measures):
         k = int(labels[r])
-        cost, gamma, transform, theta = aligned_semirelaxed_ot_to_cluster(
+        cost, gamma, transform, theta, solve_diag = aligned_semirelaxed_ot_to_cluster(
             u=measure.canonical_coords,
             y=measure.features,
             a=measure.weights,
@@ -1143,10 +1223,12 @@ def _compute_assigned_artifacts(
             shift_penalty=shift_penalty,
         )
         assigned_costs[r] = cost
+        effective_eps[r] = float(solve_diag.effective_eps)
+        used_fallback[r] = bool(solve_diag.used_fallback)
         plans.append(gamma)
         transforms.append(transform)
         thetas.append(theta)
-    return plans, transforms, thetas, assigned_costs
+    return plans, transforms, thetas, assigned_costs, effective_eps, used_fallback
 
 
 def _update_atoms(
@@ -1311,6 +1393,9 @@ def _project_cells_from_subregions(
 def fit_multilevel_ot(
     features: np.ndarray,
     coords_um: np.ndarray,
+    *,
+    subregion_members: list[np.ndarray] | None = None,
+    subregion_centers_um: np.ndarray | None = None,
     n_clusters: int,
     atoms_per_cluster: int,
     radius_um: float,
@@ -1325,15 +1410,16 @@ def fit_multilevel_ot(
     geometry_samples: int,
     compressed_support_size: int,
     align_iters: int,
-    allow_reflection: bool,
-    allow_scale: bool,
+    allow_reflection: bool = False,
+    allow_scale: bool = False,
     min_scale: float = 0.75,
     max_scale: float = 1.33,
     scale_penalty: float = 0.05,
     shift_penalty: float = 0.05,
     n_init: int = 5,
     region_geometries: list[RegionGeometry] | None = None,
-    allow_convex_hull_fallback: bool = True,
+    build_grid_subregions: bool = True,
+    allow_convex_hull_fallback: bool = False,
     max_iter: int = 10,
     tol: float = 1e-4,
     seed: int = 1337,
@@ -1365,13 +1451,36 @@ def fit_multilevel_ot(
     )
 
     features = _standardize_features(features)
-    centers_um, subregion_members = build_subregions(
-        coords_um=coords_um,
-        radius_um=radius_um,
-        stride_um=stride_um,
-        min_cells=min_cells,
-        max_subregions=max_subregions,
-    )
+    if subregion_members is None:
+        if region_geometries is not None:
+            subregion_members = [np.asarray(region.members, dtype=np.int32) for region in region_geometries]
+            if subregion_centers_um is None:
+                subregion_centers_um = np.vstack(
+                    [
+                        np.asarray(coords_um[members], dtype=np.float32).mean(axis=0)
+                        for members in subregion_members
+                    ]
+                ).astype(np.float32)
+        elif build_grid_subregions:
+            subregion_centers_um, subregion_members = build_subregions(
+                coords_um=coords_um,
+                radius_um=radius_um,
+                stride_um=stride_um,
+                min_cells=min_cells,
+                max_subregions=max_subregions,
+            )
+        else:
+            raise ValueError("Explicit region_geometries or subregion_members are required when build_grid_subregions=False.")
+    else:
+        subregion_members = [np.asarray(members, dtype=np.int32) for members in subregion_members]
+        if subregion_centers_um is None:
+            subregion_centers_um = np.vstack(
+                [
+                    np.asarray(coords_um[members], dtype=np.float32).mean(axis=0)
+                    for members in subregion_members
+                ]
+            ).astype(np.float32)
+    centers_um = np.asarray(subregion_centers_um, dtype=np.float32)
     if centers_um.shape[0] < n_clusters:
         raise ValueError(
             f"n_clusters={n_clusters} exceeds the number of constructed subregions={centers_um.shape[0]}."
@@ -1407,6 +1516,8 @@ def fit_multilevel_ot(
     cost_scale_x, cost_scale_y = _estimate_cost_scales(measures, max_points=5000, random_state=seed)
     best_bundle: dict[str, object] | None = None
     restart_summaries: list[dict[str, float | int]] = []
+    forced_label_mask_best = np.zeros(len(measures), dtype=bool)
+    argmin_labels_best = np.zeros(len(measures), dtype=np.int32)
 
     for run in range(int(n_init)):
         run_seed = seed + 1000 * run
@@ -1446,8 +1557,9 @@ def fit_multilevel_ot(
                 scale_penalty=scale_penalty,
                 shift_penalty=shift_penalty,
             )
-            labels = _ensure_nonempty_clusters(costs.argmin(axis=1).astype(np.int32), costs, n_clusters)
-            plans, transforms, thetas, assigned_costs = _compute_assigned_artifacts(
+            argmin_labels = costs.argmin(axis=1).astype(np.int32)
+            labels, forced_label_mask = _ensure_nonempty_clusters(argmin_labels, costs, n_clusters)
+            plans, transforms, thetas, assigned_costs, assigned_effective_eps, assigned_used_fallback = _compute_assigned_artifacts(
                 measures=measures,
                 labels=labels,
                 atom_coords=atom_coords,
@@ -1493,6 +1605,8 @@ def fit_multilevel_ot(
                     "coord_shift": coord_shift,
                     "feature_shift": feat_shift,
                     "mean_assignment_margin": mean_margin,
+                    "forced_label_count": int(forced_label_mask.sum()),
+                    "assigned_ot_fallback_fraction": float(np.mean(assigned_used_fallback.astype(np.float32))),
                 }
             )
             if label_change_rate < 0.005 and max(coord_shift, feat_shift) < tol:
@@ -1517,8 +1631,9 @@ def fit_multilevel_ot(
             scale_penalty=scale_penalty,
             shift_penalty=shift_penalty,
         )
-        final_labels = _ensure_nonempty_clusters(final_costs.argmin(axis=1).astype(np.int32), final_costs, n_clusters)
-        final_plans, final_transforms, final_thetas, final_assigned_costs = _compute_assigned_artifacts(
+        final_argmin_labels = final_costs.argmin(axis=1).astype(np.int32)
+        final_labels, final_forced_label_mask = _ensure_nonempty_clusters(final_argmin_labels, final_costs, n_clusters)
+        final_plans, final_transforms, final_thetas, final_assigned_costs, final_assigned_effective_eps, final_assigned_used_fallback = _compute_assigned_artifacts(
             measures=measures,
             labels=final_labels,
             atom_coords=atom_coords,
@@ -1562,6 +1677,10 @@ def fit_multilevel_ot(
                 "atom_features": atom_features.astype(np.float32),
                 "betas": betas.astype(np.float32),
                 "objective_history": objective_history,
+                "forced_label_mask": final_forced_label_mask.astype(bool),
+                "argmin_labels": final_argmin_labels.astype(np.int32),
+                "assigned_effective_eps": final_assigned_effective_eps.astype(np.float32),
+                "assigned_used_fallback": final_assigned_used_fallback.astype(bool),
             }
 
     assert best_bundle is not None
@@ -1574,6 +1693,10 @@ def fit_multilevel_ot(
     transforms = list(best_bundle["transforms"])
     thetas = list(best_bundle["thetas"])
     objective_history = list(best_bundle["objective_history"])
+    forced_label_mask_best = np.asarray(best_bundle["forced_label_mask"], dtype=bool)
+    argmin_labels_best = np.asarray(best_bundle["argmin_labels"], dtype=np.int32)
+    assigned_effective_eps_best = np.asarray(best_bundle["assigned_effective_eps"], dtype=np.float32)
+    assigned_used_fallback_best = np.asarray(best_bundle["assigned_used_fallback"], dtype=bool)
 
     thetas_assigned = np.vstack([np.asarray(theta, dtype=np.float32) for theta in thetas]).astype(np.float32)
     subregion_cluster_probs = _softmax_over_negative_costs(costs, temperature=max(float(np.std(costs)), 1e-3))
@@ -1600,6 +1723,8 @@ def fit_multilevel_ot(
     return MultilevelOTResult(
         subregion_centers_um=centers_um.astype(np.float32),
         subregion_members=[m.members for m in measures],
+        subregion_argmin_labels=argmin_labels_best.astype(np.int32),
+        subregion_forced_label_mask=forced_label_mask_best.astype(bool),
         subregion_geometry_point_counts=np.asarray([m.geometry_point_count for m in measures], dtype=np.int32),
         subregion_geometry_sources=[m.normalizer_diagnostics.geometry_source for m in measures],
         subregion_geometry_used_fallback=np.asarray([m.normalizer_diagnostics.used_fallback for m in measures], dtype=bool),
@@ -1610,6 +1735,8 @@ def fit_multilevel_ot(
         subregion_cluster_probs=subregion_cluster_probs.astype(np.float32),
         subregion_cluster_costs=costs.astype(np.float32),
         subregion_atom_weights=thetas_assigned.astype(np.float32),
+        subregion_assigned_effective_eps=assigned_effective_eps_best.astype(np.float32),
+        subregion_assigned_used_ot_fallback=assigned_used_fallback_best.astype(bool),
         cluster_supports=cluster_supports.astype(np.float32),
         cluster_atom_coords=atom_coords.astype(np.float32),
         cluster_atom_features=atom_features.astype(np.float32),
@@ -1646,7 +1773,7 @@ def _compute_subregion_embedding(weights: np.ndarray, seed: int) -> tuple[np.nda
 
 def _cluster_palette(n_clusters: int) -> np.ndarray:
     cmap_name = "tab20" if n_clusters <= 20 else "gist_ncar"
-    cmap = plt.get_cmap(cmap_name, n_clusters)
+    cmap = matplotlib.colormaps.get_cmap(cmap_name).resampled(n_clusters)
     rgba = np.asarray([cmap(i) for i in range(n_clusters)], dtype=np.float32)
     return np.clip(np.rint(rgba[:, :3] * 255.0), 0, 255).astype(np.uint8)
 
@@ -1665,7 +1792,13 @@ def _save_multilevel_outputs(
     embedding_name: str,
     shape_df: pd.DataFrame,
     summary: dict,
+    deep_embedding: np.ndarray | None = None,
+    deep_obsm_key: str | None = None,
+    extra_outputs: dict[str, str] | None = None,
 ) -> dict[str, str]:
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
     output_dir.mkdir(parents=True, exist_ok=True)
     h5ad_path = output_dir / "cells_multilevel_ot.h5ad"
     subregions_path = output_dir / "subregions_multilevel_ot.parquet"
@@ -1683,6 +1816,8 @@ def _save_multilevel_outputs(
         "atom_layouts": str(atom_path),
         "summary": str(summary_path),
     }
+    if extra_outputs:
+        outputs.update(extra_outputs)
     summary["outputs"] = outputs
 
     palette = _cluster_palette(result.cluster_supports.shape[0])
@@ -1694,8 +1829,11 @@ def _save_multilevel_outputs(
     cells_out.obs["mlot_cluster_int"] = result.cell_cluster_labels.astype(np.int32)
     cells_out.obs["mlot_cluster_hex"] = label_hex
     cells_out.obsm["mlot_cluster_probs"] = result.cell_cluster_probs.astype(np.float32)
+    cells_out.obsm["mlot_cell_cluster_scores"] = result.cell_cluster_probs.astype(np.float32)
     cells_out.obsm["mlot_feature_cluster_probs"] = result.cell_feature_cluster_probs.astype(np.float32)
     cells_out.obsm["mlot_context_cluster_probs"] = result.cell_context_cluster_probs.astype(np.float32)
+    if deep_embedding is not None and deep_obsm_key:
+        cells_out.obsm[deep_obsm_key] = np.asarray(deep_embedding, dtype=np.float32)
     cells_out.uns["multilevel_ot"] = {
         "feature_obsm_key": feature_obsm_key,
         "spatial_x_key": spatial_x_key,
@@ -1703,6 +1841,8 @@ def _save_multilevel_outputs(
         "spatial_scale": float(spatial_scale),
         "radius_um": float(radius_um),
         "stride_um": float(stride_um),
+        "cell_projection_mode": "approximate_assigned_subregion",
+        "deep_obsm_key": deep_obsm_key,
         "summary_json": json.dumps(summary),
     }
     cells_out.write_h5ad(h5ad_path, compression="gzip")
@@ -1723,6 +1863,10 @@ def _save_multilevel_outputs(
             "geometry_point_count": int(result.subregion_geometry_point_counts[idx]),
             "geometry_source": result.subregion_geometry_sources[idx],
             "geometry_used_fallback": bool(result.subregion_geometry_used_fallback[idx]),
+            "forced_label": bool(result.subregion_forced_label_mask[idx]),
+            "argmin_cluster_int": int(result.subregion_argmin_labels[idx]),
+            "assigned_effective_eps": float(result.subregion_assigned_effective_eps[idx]),
+            "assigned_ot_used_fallback": bool(result.subregion_assigned_used_ot_fallback[idx]),
             "normalizer_radius_p95": float(result.subregion_normalizer_radius_p95[idx]) if np.isfinite(result.subregion_normalizer_radius_p95[idx]) else np.nan,
             "normalizer_radius_max": float(result.subregion_normalizer_radius_max[idx]) if np.isfinite(result.subregion_normalizer_radius_max[idx]) else np.nan,
             "normalizer_interpolation_residual": float(result.subregion_normalizer_interpolation_residual[idx]) if np.isfinite(result.subregion_normalizer_interpolation_residual[idx]) else np.nan,
@@ -1849,6 +1993,8 @@ def run_multilevel_ot_on_h5ad(
     spatial_x_key: str,
     spatial_y_key: str,
     spatial_scale: float,
+    *,
+    region_obs_key: str | None = None,
     n_clusters: int,
     atoms_per_cluster: int,
     radius_um: float,
@@ -1863,20 +2009,22 @@ def run_multilevel_ot_on_h5ad(
     geometry_samples: int,
     compressed_support_size: int,
     align_iters: int,
-    allow_reflection: bool,
-    allow_scale: bool,
+    allow_reflection: bool = False,
+    allow_scale: bool = False,
     min_scale: float = 0.75,
     max_scale: float = 1.33,
     scale_penalty: float = 0.05,
     shift_penalty: float = 0.05,
     n_init: int = 5,
-    allow_convex_hull_fallback: bool = True,
+    allow_convex_hull_fallback: bool = False,
     max_iter: int = 10,
     tol: float = 1e-4,
     seed: int = 1337,
+    deep_config: DeepFeatureConfig | None = None,
 ) -> dict:
     input_h5ad = Path(input_h5ad)
     output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     adata = ad.read_h5ad(input_h5ad)
     if feature_obsm_key not in adata.obsm:
         raise KeyError(f"Feature key '{feature_obsm_key}' not found in obsm.")
@@ -1889,6 +2037,7 @@ def run_multilevel_ot_on_h5ad(
             stacklevel=2,
         )
 
+    deep_config = deep_config or DeepFeatureConfig()
     features = np.asarray(adata.obsm[feature_obsm_key], dtype=np.float32)
     coords_um = np.stack(
         [
@@ -1897,10 +2046,86 @@ def run_multilevel_ot_on_h5ad(
         ],
         axis=1,
     )
+    feature_obsm_key_used = feature_obsm_key
+    deep_embedding: np.ndarray | None = None
+    deep_outputs: dict[str, str] = {}
+    deep_summary = {
+        "enabled": False,
+        "method": "none",
+    }
+    if deep_config.method != "none":
+        batch = None
+        if deep_config.batch_key is not None:
+            if deep_config.batch_key not in adata.obs:
+                raise KeyError(f"Deep-feature batch key '{deep_config.batch_key}' not found in obs.")
+            batch = np.asarray(adata.obs[deep_config.batch_key].astype(str))
+        if deep_config.pretrained_model is not None:
+            encoder = SpatialOTFeatureEncoder.load(deep_config.pretrained_model)
+            deep_embedding = encoder.transform(features=features, coords_um=coords_um)
+            history = list(encoder.history)
+            model_path = str(Path(deep_config.pretrained_model))
+        else:
+            model_path = str(output_dir / "deep_feature_model.pt") if deep_config.save_model else None
+            deep_result = fit_deep_features(
+                features=features,
+                coords_um=coords_um,
+                config=deep_config,
+                batch=batch,
+                seed=seed,
+                save_path=model_path,
+            )
+            deep_embedding = deep_result.embedding.astype(np.float32)
+            history = list(deep_result.history)
+        features = np.asarray(deep_embedding, dtype=np.float32)
+        feature_obsm_key_used = deep_config.output_obsm_key
+        adata.obsm[feature_obsm_key_used] = features.astype(np.float32)
+        history_path = output_dir / "deep_feature_history.csv"
+        pd.DataFrame(history).to_csv(history_path, index=False)
+        config_path = output_dir / "deep_feature_config.json"
+        config_path.write_text(json.dumps(asdict(deep_config), indent=2))
+        deep_outputs["deep_feature_history"] = str(history_path)
+        deep_outputs["deep_feature_config"] = str(config_path)
+        if model_path is not None:
+            deep_outputs["deep_feature_model"] = str(model_path)
+        final_train_loss = history[-1].get("train_loss") if history else None
+        final_val_loss = history[-1].get("val_loss") if history and "val_loss" in history[-1] else None
+        deep_summary = {
+            "enabled": True,
+            "method": deep_config.method,
+            "input_feature_obsm_key": feature_obsm_key,
+            "output_feature_obsm_key": feature_obsm_key_used,
+            "latent_dim": int(features.shape[1]),
+            "epochs": int(deep_config.epochs),
+            "batch_key": deep_config.batch_key,
+            "neighbor_k": int(deep_config.neighbor_k),
+            "radius_um": float(deep_config.radius_um) if deep_config.radius_um is not None else None,
+            "validation": deep_config.validation,
+            "uses_coordinate_input": False,
+            "final_train_loss": float(final_train_loss) if final_train_loss is not None else None,
+            "final_val_loss": float(final_val_loss) if final_val_loss is not None else None,
+            "model_path": model_path,
+        }
+    region_geometries = None
+    subregion_members = None
+    subregion_centers_um = None
+    build_grid_subregions = True
+    if region_obs_key is not None:
+        if region_obs_key not in adata.obs:
+            raise KeyError(f"Region obs key '{region_obs_key}' not found in obs.")
+        grouped = pd.Series(np.arange(adata.n_obs), index=adata.obs[region_obs_key].astype(str))
+        subregion_members = [group.to_numpy(dtype=np.int32) for _, group in grouped.groupby(level=0)]
+        subregion_centers_um = np.vstack([coords_um[members].mean(axis=0) for members in subregion_members]).astype(np.float32)
+        region_geometries = [
+            RegionGeometry(region_id=str(region_id), members=np.asarray(members, dtype=np.int32))
+            for region_id, members in grouped.groupby(level=0)
+        ]
+        build_grid_subregions = False
 
     result = fit_multilevel_ot(
         features=features,
         coords_um=coords_um,
+        subregion_members=subregion_members,
+        subregion_centers_um=subregion_centers_um,
         n_clusters=n_clusters,
         atoms_per_cluster=atoms_per_cluster,
         radius_um=radius_um,
@@ -1922,12 +2147,21 @@ def run_multilevel_ot_on_h5ad(
         scale_penalty=scale_penalty,
         shift_penalty=shift_penalty,
         n_init=n_init,
+        region_geometries=region_geometries,
+        build_grid_subregions=build_grid_subregions,
         allow_convex_hull_fallback=allow_convex_hull_fallback,
         max_iter=max_iter,
         tol=tol,
         seed=seed,
     )
-    shape_df = _shape_descriptor_frame(result.subregion_members, coords_um)
+    fallback_fraction = float(np.mean(result.subregion_geometry_used_fallback.astype(np.float32)))
+    if fallback_fraction > 0:
+        warnings.warn(
+            f"{int(result.subregion_geometry_used_fallback.sum())}/{len(result.subregion_members)} subregions used observed-coordinate convex-hull geometry fallback. Treat this run as exploratory rather than boundary-shape-invariant.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    shape_df = _shape_descriptor_frame(result.subregion_members, coords_um, region_geometries=region_geometries)
     shape_leakage = _shape_leakage_balanced_accuracy(shape_df, result.subregion_cluster_labels, seed=seed)
     shape_leakage_block = _shape_leakage_spatial_block_accuracy(
         shape_df=shape_df,
@@ -1938,7 +2172,8 @@ def run_multilevel_ot_on_h5ad(
     shape_leakage_perm = _shape_leakage_permutation_baseline(shape_df, result.subregion_cluster_labels, seed=seed)
     embedding_2d, embedding_name = _compute_subregion_embedding(result.subregion_atom_weights, seed=seed)
     silhouette = None
-    if np.unique(result.subregion_cluster_labels).size > 1:
+    n_unique_labels = np.unique(result.subregion_cluster_labels).size
+    if 1 < n_unique_labels < result.subregion_atom_weights.shape[0]:
         silhouette = float(
             silhouette_score(
                 result.subregion_atom_weights,
@@ -1953,10 +2188,12 @@ def run_multilevel_ot_on_h5ad(
     summary = {
         "input_h5ad": str(input_h5ad),
         "output_dir": str(output_dir),
-        "feature_obsm_key": feature_obsm_key,
+        "feature_obsm_key": feature_obsm_key_used,
+        "feature_obsm_key_requested": feature_obsm_key,
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,
         "spatial_scale": float(spatial_scale),
+        "region_obs_key": region_obs_key,
         "n_cells": int(adata.n_obs),
         "feature_dim": int(features.shape[1]),
         "n_subregions": int(len(result.subregion_members)),
@@ -1987,6 +2224,9 @@ def run_multilevel_ot_on_h5ad(
         "seed": int(seed),
         "cost_scale_x": float(result.cost_scale_x),
         "cost_scale_y": float(result.cost_scale_y),
+        "requested_ot_eps": float(ot_eps),
+        "assigned_ot_fallback_fraction": float(np.mean(result.subregion_assigned_used_ot_fallback.astype(np.float32))),
+        "assigned_effective_eps_values": [float(x) for x in np.unique(np.round(result.subregion_assigned_effective_eps.astype(np.float64), 8))],
         "selected_restart": int(result.selected_restart),
         "restart_summaries": result.restart_summaries,
         "subregion_cluster_counts": {f"C{int(k)}": int(v) for k, v in pd.Series(result.subregion_cluster_labels).value_counts().sort_index().items()},
@@ -2002,14 +2242,26 @@ def run_multilevel_ot_on_h5ad(
             int(result.subregion_geometry_point_counts.min()),
             int(result.subregion_geometry_point_counts.max()),
         ],
-        "geometry_fallback_fraction": float(np.mean(result.subregion_geometry_used_fallback.astype(np.float32))),
+        "geometry_fallback_fraction": fallback_fraction,
         "geometry_source_counts": {
             key: int(value)
             for key, value in pd.Series(result.subregion_geometry_sources).value_counts().sort_index().items()
         },
+        "shape_descriptor_source_counts": {
+            key: int(value)
+            for key, value in shape_df["shape_descriptor_source"].value_counts().sort_index().items()
+        }
+        if "shape_descriptor_source" in shape_df.columns
+        else {},
+        "forced_label_count": int(result.subregion_forced_label_mask.sum()),
         "normalizer_radius_p95_mean": float(np.nanmean(result.subregion_normalizer_radius_p95)),
         "normalizer_radius_max_mean": float(np.nanmean(result.subregion_normalizer_radius_max)),
         "normalizer_interpolation_residual_mean": float(np.nanmean(result.subregion_normalizer_interpolation_residual)),
+        "boundary_invariance_claim": (
+            "supported_with_explicit_geometry"
+            if float(np.mean(result.subregion_geometry_used_fallback.astype(np.float32))) == 0.0
+            else "not_supported_without_explicit_geometry"
+        ),
         "method_notes": {
             "core": "shape-normalized cluster-specific semi-relaxed Wasserstein dictionary clustering",
             "geometry_normalization": "uniform geometry samples from each subregion are OT-mapped into a shared unit-disk reference domain before clustering",
@@ -2018,14 +2270,15 @@ def run_multilevel_ot_on_h5ad(
             "local_matching": "semi-relaxed unbalanced Sinkhorn with fixed source marginal and relaxed target marginal",
             "residual_alignment": "weighted similarity transform is optimized during subregion-to-cluster matching",
             "support_sharing": "subregions assigned to the same cluster reuse the same shared atom dictionary but keep subregion-specific mixture weights",
-            "cell_boundary_projection": "cell labels are projected from canonical-coordinate plus feature fit to assigned cluster atoms, modulated by overlapping-subregion cluster evidence",
+            "cell_boundary_projection": "cell-level scores are an approximate projection from canonical-coordinate plus feature fit to assigned cluster atoms, modulated by overlapping-subregion cluster evidence; they are not an exact posterior under the OT model",
         },
+        "deep_features": deep_summary,
     }
     _save_multilevel_outputs(
         adata=adata,
         result=result,
         output_dir=output_dir,
-        feature_obsm_key=feature_obsm_key,
+        feature_obsm_key=feature_obsm_key_used,
         spatial_x_key=spatial_x_key,
         spatial_y_key=spatial_y_key,
         spatial_scale=spatial_scale,
@@ -2035,6 +2288,47 @@ def run_multilevel_ot_on_h5ad(
         embedding_name=embedding_name,
         shape_df=shape_df,
         summary=summary,
+        deep_embedding=deep_embedding,
+        deep_obsm_key=feature_obsm_key_used if deep_embedding is not None else None,
+        extra_outputs=deep_outputs,
     )
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     return summary
+
+
+def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
+    return run_multilevel_ot_on_h5ad(
+        input_h5ad=config.paths.input_h5ad,
+        output_dir=config.paths.output_dir,
+        feature_obsm_key=config.paths.feature_obsm_key,
+        spatial_x_key=config.paths.spatial_x_key,
+        spatial_y_key=config.paths.spatial_y_key,
+        spatial_scale=config.paths.spatial_scale,
+        region_obs_key=config.paths.region_obs_key,
+        n_clusters=config.ot.n_clusters,
+        atoms_per_cluster=config.ot.atoms_per_cluster,
+        radius_um=config.ot.radius_um,
+        stride_um=config.ot.stride_um,
+        min_cells=config.ot.min_cells,
+        max_subregions=config.ot.max_subregions,
+        lambda_x=config.ot.lambda_x,
+        lambda_y=config.ot.lambda_y,
+        geometry_eps=config.ot.geometry_eps,
+        ot_eps=config.ot.ot_eps,
+        rho=config.ot.rho,
+        geometry_samples=config.ot.geometry_samples,
+        compressed_support_size=config.ot.compressed_support_size,
+        align_iters=config.ot.align_iters,
+        allow_reflection=config.ot.allow_reflection,
+        allow_scale=config.ot.allow_scale,
+        min_scale=config.ot.min_scale,
+        max_scale=config.ot.max_scale,
+        scale_penalty=config.ot.scale_penalty,
+        shift_penalty=config.ot.shift_penalty,
+        n_init=config.ot.n_init,
+        allow_convex_hull_fallback=config.ot.allow_convex_hull_fallback,
+        max_iter=config.ot.max_iter,
+        tol=config.ot.tol,
+        seed=config.ot.seed,
+        deep_config=config.deep,
+    )

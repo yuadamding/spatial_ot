@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
+import os
 from pathlib import Path
 import json
 import tomllib
@@ -102,6 +103,86 @@ class ExperimentConfig:
         path.write_text(json.dumps(self.as_dict(), indent=2))
 
 
+@dataclass
+class MultilevelPathConfig:
+    input_h5ad: str = ""
+    output_dir: str = ""
+    feature_obsm_key: str = ""
+    spatial_x_key: str = "cell_x"
+    spatial_y_key: str = "cell_y"
+    spatial_scale: float = 1.0
+    region_obs_key: str | None = None
+
+
+@dataclass
+class MultilevelOTConfig:
+    n_clusters: int = 8
+    atoms_per_cluster: int = 8
+    radius_um: float = 100.0
+    stride_um: float = 100.0
+    min_cells: int = 25
+    max_subregions: int = 1500
+    lambda_x: float = 0.5
+    lambda_y: float = 1.0
+    geometry_eps: float = 0.03
+    ot_eps: float = 0.03
+    rho: float = 0.5
+    geometry_samples: int = 192
+    compressed_support_size: int = 96
+    align_iters: int = 4
+    allow_reflection: bool = False
+    allow_scale: bool = False
+    min_scale: float = 0.75
+    max_scale: float = 1.33
+    scale_penalty: float = 0.05
+    shift_penalty: float = 0.05
+    n_init: int = 5
+    allow_convex_hull_fallback: bool = False
+    max_iter: int = 10
+    tol: float = 1e-4
+    seed: int = 1337
+
+
+@dataclass
+class DeepFeatureConfig:
+    method: str = "none"
+    latent_dim: int = 16
+    hidden_dim: int = 128
+    layers: int = 2
+    neighbor_k: int = 8
+    radius_um: float | None = None
+    epochs: int = 50
+    batch_size: int = 4096
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    validation: str = "none"
+    batch_key: str | None = None
+    count_layer: str | None = None
+    device: str = "auto"
+    reconstruction_weight: float = 1.0
+    context_weight: float = 0.5
+    variance_weight: float = 0.1
+    decorrelation_weight: float = 0.01
+    save_model: bool = True
+    pretrained_model: str | None = None
+    output_obsm_key: str = "X_spatial_ot_deep"
+
+
+@dataclass
+class MultilevelExperimentConfig:
+    paths: MultilevelPathConfig = field(default_factory=MultilevelPathConfig)
+    ot: MultilevelOTConfig = field(default_factory=MultilevelOTConfig)
+    deep: DeepFeatureConfig = field(default_factory=DeepFeatureConfig)
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+    def write_resolved(self, destination: str | Path) -> None:
+        path = Path(destination)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.as_dict(), indent=2))
+
+
 def _validate_payload_keys(section: str, cls, payload: dict | None) -> dict:
     payload = payload or {}
     allowed = {field.name for field in fields(cls)}
@@ -114,6 +195,18 @@ def _validate_payload_keys(section: str, cls, payload: dict | None) -> dict:
 def _make_dataclass(cls, payload: dict | None):
     payload = payload or {}
     return cls(**payload)
+
+
+def _expand_env_value(value):
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, list):
+        return [_expand_env_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_expand_env_value(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _expand_env_value(v) for k, v in value.items()}
+    return value
 
 
 def _validate_experiment(config: ExperimentConfig) -> ExperimentConfig:
@@ -144,9 +237,72 @@ def _validate_experiment(config: ExperimentConfig) -> ExperimentConfig:
     return config
 
 
+def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> MultilevelExperimentConfig:
+    for required in ["input_h5ad", "output_dir", "feature_obsm_key"]:
+        if not getattr(config.paths, required):
+            raise ValueError(f"paths.{required} must be set")
+    if config.paths.spatial_scale <= 0:
+        raise ValueError("paths.spatial_scale must be > 0")
+    if config.ot.n_clusters < 2:
+        raise ValueError("ot.n_clusters must be at least 2")
+    if config.ot.atoms_per_cluster < 1:
+        raise ValueError("ot.atoms_per_cluster must be at least 1")
+    if config.ot.radius_um <= 0 or config.ot.stride_um <= 0:
+        raise ValueError("ot.radius_um and ot.stride_um must be > 0")
+    if config.ot.min_cells < 1:
+        raise ValueError("ot.min_cells must be >= 1")
+    if config.ot.max_subregions != 0 and config.ot.max_subregions < 1:
+        raise ValueError("ot.max_subregions must be positive or 0")
+    if config.ot.lambda_x < 0 or config.ot.lambda_y < 0:
+        raise ValueError("ot.lambda_x and ot.lambda_y must be non-negative")
+    if config.ot.geometry_eps <= 0 or config.ot.ot_eps <= 0:
+        raise ValueError("ot.geometry_eps and ot.ot_eps must be > 0")
+    if config.ot.rho <= 0:
+        raise ValueError("ot.rho must be > 0")
+    if config.ot.geometry_samples < 32:
+        raise ValueError("ot.geometry_samples must be at least 32")
+    if config.ot.compressed_support_size < 2:
+        raise ValueError("ot.compressed_support_size must be at least 2")
+    if config.ot.align_iters < 1 or config.ot.max_iter < 1 or config.ot.n_init < 1:
+        raise ValueError("ot.align_iters, ot.max_iter, and ot.n_init must be at least 1")
+    if config.ot.tol <= 0:
+        raise ValueError("ot.tol must be > 0")
+    if config.ot.min_scale <= 0 or config.ot.max_scale <= 0 or config.ot.min_scale > config.ot.max_scale:
+        raise ValueError("ot.min_scale and ot.max_scale must be positive and min_scale <= max_scale")
+
+    valid_methods = {"none", "autoencoder"}
+    if config.deep.method not in valid_methods:
+        raise ValueError(f"deep.method must be one of {sorted(valid_methods)}, got '{config.deep.method}'")
+    valid_validation = {"none", "spatial_block", "sample_holdout"}
+    if config.deep.validation not in valid_validation:
+        raise ValueError(f"deep.validation must be one of {sorted(valid_validation)}, got '{config.deep.validation}'")
+    if config.deep.latent_dim < 2:
+        raise ValueError("deep.latent_dim must be at least 2")
+    if config.deep.hidden_dim < 4:
+        raise ValueError("deep.hidden_dim must be at least 4")
+    if config.deep.layers < 1:
+        raise ValueError("deep.layers must be at least 1")
+    if config.deep.neighbor_k < 1:
+        raise ValueError("deep.neighbor_k must be at least 1")
+    if config.deep.radius_um is not None and config.deep.radius_um <= 0:
+        raise ValueError("deep.radius_um must be > 0 when set")
+    if config.deep.epochs < 1:
+        raise ValueError("deep.epochs must be at least 1")
+    if config.deep.batch_size < 1:
+        raise ValueError("deep.batch_size must be at least 1")
+    if config.deep.learning_rate <= 0 or config.deep.weight_decay < 0:
+        raise ValueError("deep.learning_rate must be > 0 and deep.weight_decay must be >= 0")
+    for name in ["reconstruction_weight", "context_weight", "variance_weight", "decorrelation_weight"]:
+        if getattr(config.deep, name) < 0:
+            raise ValueError(f"deep.{name} must be >= 0")
+    if config.deep.pretrained_model and config.deep.method == "none":
+        raise ValueError("deep.pretrained_model requires deep.method to be an active encoder method")
+    return config
+
+
 def load_config(path: str | Path) -> ExperimentConfig:
     config_path = Path(path)
-    payload = tomllib.loads(config_path.read_text())
+    payload = _expand_env_value(tomllib.loads(config_path.read_text()))
     top_level = {"paths", "data", "model", "training", "loss"}
     unknown_top = sorted(set(payload) - top_level)
     if unknown_top:
@@ -159,3 +315,22 @@ def load_config(path: str | Path) -> ExperimentConfig:
         loss=_make_dataclass(LossConfig, _validate_payload_keys("loss", LossConfig, payload.get("loss"))),
     )
     return _validate_experiment(config)
+
+
+def load_multilevel_config(path: str | Path) -> MultilevelExperimentConfig:
+    config_path = Path(path)
+    payload = _expand_env_value(tomllib.loads(config_path.read_text()))
+    top_level = {"paths", "ot", "deep"}
+    unknown_top = sorted(set(payload) - top_level)
+    if unknown_top:
+        raise KeyError(f"Unknown top-level config sections: {', '.join(unknown_top)}")
+    config = MultilevelExperimentConfig(
+        paths=_make_dataclass(MultilevelPathConfig, _validate_payload_keys("paths", MultilevelPathConfig, payload.get("paths"))),
+        ot=_make_dataclass(MultilevelOTConfig, _validate_payload_keys("ot", MultilevelOTConfig, payload.get("ot"))),
+        deep=_make_dataclass(DeepFeatureConfig, _validate_payload_keys("deep", DeepFeatureConfig, payload.get("deep"))),
+    )
+    return _validate_multilevel_experiment(config)
+
+
+def validate_multilevel_config(config: MultilevelExperimentConfig) -> MultilevelExperimentConfig:
+    return _validate_multilevel_experiment(config)

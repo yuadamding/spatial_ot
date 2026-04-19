@@ -15,6 +15,8 @@ from spatial_ot.multilevel_ot import (
     _shape_descriptor_frame,
     _shape_leakage_balanced_accuracy,
     _standardize_features,
+    _ensure_nonempty_clusters,
+    weighted_similarity_fit,
     sample_geometry_points,
     build_subregions,
     fit_multilevel_ot,
@@ -103,6 +105,7 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
         align_iters=3,
         allow_reflection=True,
         allow_scale=True,
+        allow_convex_hull_fallback=True,
         max_iter=8,
         tol=1e-4,
         seed=1337,
@@ -124,6 +127,8 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     )
     assert result.cluster_atom_coords.shape == (2, 2, 2)
     assert result.cluster_atom_features.shape == (2, 2, 3)
+    assert result.subregion_assigned_effective_eps.shape[0] == len(result.subregion_members)
+    assert np.all(result.subregion_assigned_effective_eps > 0)
 
 
 def test_shape_normalizer_reduces_boundary_shape_difference() -> None:
@@ -407,6 +412,7 @@ def test_returned_costs_match_returned_atoms() -> None:
         align_iters=2,
         allow_reflection=False,
         allow_scale=False,
+        allow_convex_hull_fallback=True,
         max_iter=3,
         tol=1e-4,
         seed=7,
@@ -450,3 +456,83 @@ def test_returned_costs_match_returned_atoms() -> None:
     assert recomputed.shape == result.subregion_cluster_costs.shape
     assert np.array_equal(result.subregion_cluster_labels, result.subregion_cluster_costs.argmin(axis=1))
     assert np.allclose(recomputed, result.subregion_cluster_costs, atol=1e-4)
+    assert result.subregion_assigned_used_ot_fallback.shape[0] == len(result.subregion_members)
+
+
+def test_empty_mask_geometry_raises() -> None:
+    region = RegionGeometry(
+        region_id="empty",
+        members=np.arange(5, dtype=np.int32),
+        mask=np.zeros((8, 8), dtype=bool),
+    )
+    observed = np.random.default_rng(0).normal(size=(5, 2)).astype(np.float32)
+    try:
+        sample_geometry_points(
+            region,
+            observed_coords=observed,
+            n_points=32,
+            seed=0,
+            allow_convex_hull_fallback=False,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Expected empty mask geometry to raise")
+
+
+def test_fit_requires_explicit_fallback_flag_for_observed_hull_geometry() -> None:
+    coords = np.array([[0.0, 0.0], [0.5, 0.0], [0.0, 0.5], [5.0, 5.0], [5.5, 5.0], [5.0, 5.5]], dtype=np.float32)
+    features = np.array([[0.0], [0.0], [0.0], [1.0], [1.0], [1.0]], dtype=np.float32)
+    try:
+        fit_multilevel_ot(
+            features=features,
+            coords_um=coords,
+            n_clusters=2,
+            atoms_per_cluster=1,
+            radius_um=1.0,
+            stride_um=5.0,
+            min_cells=3,
+            max_subregions=4,
+            lambda_x=0.5,
+            lambda_y=1.0,
+            geometry_eps=0.03,
+            ot_eps=0.03,
+            rho=0.5,
+            geometry_samples=32,
+            compressed_support_size=3,
+            align_iters=1,
+            allow_reflection=False,
+            allow_scale=False,
+            max_iter=1,
+            tol=1e-4,
+            seed=0,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Expected fit_multilevel_ot to require an explicit hull-fallback opt-in")
+
+
+def test_weighted_similarity_fit_no_reflection_keeps_positive_determinant() -> None:
+    x = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 2.0]], dtype=np.float64)
+    y = np.array([[0.0, 0.0], [-1.0, 0.0], [0.0, 2.0]], dtype=np.float64)
+    w = np.array([0.2, 0.4, 0.4], dtype=np.float64)
+    transform = weighted_similarity_fit(x, y, w, allow_reflection=False, allow_scale=True)
+    assert np.linalg.det(transform["R"]) > 0
+    assert transform["scale"] > 0
+
+
+def test_ensure_nonempty_clusters_returns_forced_mask() -> None:
+    labels = np.array([0, 0, 0, 1], dtype=np.int32)
+    costs = np.array(
+        [
+            [0.1, 1.0, 0.9],
+            [0.2, 1.1, 0.8],
+            [0.3, 0.9, 0.4],
+            [1.0, 0.1, 0.6],
+        ],
+        dtype=np.float32,
+    )
+    repaired, forced = _ensure_nonempty_clusters(labels, costs, n_clusters=3)
+    assert set(repaired.tolist()) == {0, 1, 2}
+    assert forced.sum() == 1

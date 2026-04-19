@@ -5,6 +5,7 @@
 The current primary path realizes:
 
 - geometry-only OT normalization of each subregion into a shared reference domain
+- an optional learned deep feature adapter with fit/transform/save/load behavior
 - compressed empirical measures over canonical coordinates plus local features
 - cluster-specific shared heterogeneity atoms with subregion-specific mixture weights
 - semi-relaxed unbalanced OT matching with residual similarity alignment
@@ -66,12 +67,20 @@ By default this writes `input_2d_overview.png` under the configured output direc
 
 ## Multilevel OT on Cell-Level Features
 
-`spatial_ot` now also exposes a redesigned multilevel OT path for cases where the core input is already a cell-level feature embedding, such as UMAP coordinates.
+`spatial_ot` now also exposes a redesigned multilevel OT path for cases where the core input is already a cell-level feature embedding.
 
 Prefer PCA, standardized marker expression, or another calibrated latent space for serious OT runs. UMAP can be useful for exploratory clustering and visualization, but its Euclidean geometry is not generally metric-preserving.
 
+Two multilevel OT modes are supported:
+
+- grid-window discovery: `spatial_ot` builds overlapping radius windows from cells for exploratory local pattern discovery
+- explicit-region clustering: pass true region membership through `--region-obs-key` or the Python API and, ideally, supply explicit geometry objects so boundary shape can be treated as nuisance rather than signal
+
+Without explicit masks or polygons, boundary-shape invariance is not guaranteed. The observed-coordinate convex-hull fallback is now opt-in and should be treated as exploratory only.
+
 This path:
 
+- can learn a reusable feature adapter before OT through `--deep-feature-method autoencoder`
 - builds overlapping spatial subregions from cells
 - learns a geometry-only OT map that normalizes each subregion into a shared reference domain
 - compresses each subregion into a smaller empirical measure over canonical coordinates plus features
@@ -80,14 +89,14 @@ This path:
 - projects the learned labels back to cells for visualization
 - reports shape-leakage diagnostics so we can check whether boundary geometry is still driving cluster labels
 
-Example on the `P2 CRC` cell-level marker-gene UMAP object:
+Example CLI shape. For validated runs, point `--feature-obsm-key` at a metric-stable embedding such as `X_pca`. If you only have a UMAP embedding available, treat the run as exploratory:
 
 ```bash
 cd /storage/hackathon_2026/spatial_ot
 conda run -n ml1 python -m spatial_ot multilevel-ot \
   --input-h5ad /storage/hackathon_2026/work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad \
   --output-dir /storage/hackathon_2026/work/spatial_ot_runs/p2_crc_multilevel_umap \
-  --feature-obsm-key X_umap_marker_genes_3d \
+  --feature-obsm-key X_pca \
   --spatial-x-key cell_x \
   --spatial-y-key cell_y \
   --spatial-scale 0.2737012522439323 \
@@ -105,7 +114,33 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --geometry-samples 192 \
   --compressed-support-size 96 \
   --align-iters 4 \
-  --n-init 5
+  --n-init 5 \
+  --allow-observed-hull-geometry
+```
+
+Exploratory variant when only a UMAP embedding is available:
+
+```bash
+--feature-obsm-key X_umap_marker_genes_3d
+```
+
+The active path now also supports a TOML config surface. A portable example lives at [configs/multilevel_deep_example.toml](/storage/hackathon_2026/spatial_ot/configs/multilevel_deep_example.toml:1), and you can run it with:
+
+```bash
+cd /storage/hackathon_2026/spatial_ot
+conda run -n ml1 python -m spatial_ot multilevel-ot \
+  --config configs/multilevel_deep_example.toml
+```
+
+You can still override config values from the CLI, for example:
+
+```bash
+conda run -n ml1 python -m spatial_ot multilevel-ot \
+  --config configs/multilevel_deep_example.toml \
+  --input-h5ad /path/to/cells.h5ad \
+  --output-dir /path/to/output \
+  --feature-obsm-key X_pca \
+  --deep-feature-method autoencoder
 ```
 
 Key artifacts from this path:
@@ -113,6 +148,8 @@ Key artifacts from this path:
 - `cells_multilevel_ot.h5ad`
 - `subregions_multilevel_ot.parquet`
 - `cluster_supports_multilevel_ot.npz`
+- `deep_feature_model.pt` when deep features are enabled and model saving is on
+- `deep_feature_history.csv` and `deep_feature_config.json` when deep features are enabled
 - `multilevel_ot_spatial_map.png`
 - `multilevel_ot_subregion_embedding.png`
 - `multilevel_ot_atom_layouts.png`
@@ -120,15 +157,18 @@ Key artifacts from this path:
 
 The saved summary now includes:
 
+- a `deep_features` block describing whether the active path learned a feature adapter before OT
 - restart summaries and the selected restart
 - geometry-source counts and convex-hull fallback frequency
+- assigned OT fallback frequency and the effective entropy values actually used by the solver
+- a `boundary_invariance_claim` field showing whether explicit geometry supported the run
 - random-fold and spatial-block shape-leakage diagnostics
 - canonical-normalizer radius / interpolation diagnostics
 
 ## Config notes
 
 - `subset_strategy` should currently be `spatial_grid` or `stratified`
-- the public TOML config surface currently applies to the legacy `train` path
+- the active `multilevel-ot` path now has its own TOML config surface via `load_multilevel_config`
 - overlap fallback from cells to the nearest `8 µm` bin is controlled by `allow_nearest_overlap_fallback`
 
 ## Pilot config

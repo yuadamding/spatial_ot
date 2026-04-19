@@ -34,6 +34,7 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --compressed-support-size 96 \
   --align-iters 4 \
   --n-init 5 \
+  --allow-observed-hull-geometry \
   --max-iter 10 \
   --tol 1e-4 \
   --seed 1337
