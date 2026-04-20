@@ -10,7 +10,7 @@ from scipy import sparse
 import torch
 
 from spatial_ot.communication import _masked_sinkhorn
-from spatial_ot.config import load_config
+from spatial_ot.config import DeepFeatureConfig, MultilevelExperimentConfig, TrainingConfig, load_config
 from spatial_ot.nn import aggregate_mean, sample_negative_edges
 from spatial_ot.ot import _build_shell_ground
 from spatial_ot.preprocessing import _extract_cell_types, _resolve_raw_counts, _spatial_grid_subset, aggregate_mean_numpy, aggregate_sum_numpy
@@ -208,3 +208,9 @@ def test_config_validation_rejects_legacy_subset_strategy() -> None:
             pass
         else:
             raise AssertionError("Expected legacy subset_strategy to be rejected explicitly")
+
+
+def test_cuda_first_defaults_are_explicit() -> None:
+    assert TrainingConfig().device == "cuda"
+    assert DeepFeatureConfig().device == "cuda"
+    assert MultilevelExperimentConfig().ot.compute_device == "cuda"

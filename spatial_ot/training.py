@@ -30,7 +30,10 @@ from .preprocessing import PreparedSpatialOTData, prepare_data
 
 def _device_from_config(config: ExperimentConfig) -> torch.device:
     if config.training.device != "auto":
-        return torch.device(config.training.device)
+        resolved = torch.device(config.training.device)
+        if resolved.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested for legacy training, but torch.cuda.is_available() is False.")
+        return resolved
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 

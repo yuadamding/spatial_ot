@@ -7,7 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-INPUT_H5AD="${INPUT_H5AD:-../work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad}"
+CONDA_ENV="${CONDA_ENV:-ml1}"
+INPUT_H5AD="${INPUT_H5AD:-../spatial_ot_input/p2_crc_cells_marker_genes_umap3d.h5ad}"
 OUTPUT_DIR="${OUTPUT_DIR:-../work/spatial_ot_runs/p2_crc_multilevel_umap_exploratory}"
 FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X_umap_marker_genes_3d}"
 SPATIAL_X_KEY="${SPATIAL_X_KEY:-cell_x}"
@@ -15,10 +16,10 @@ SPATIAL_Y_KEY="${SPATIAL_Y_KEY:-cell_y}"
 SPATIAL_SCALE="${SPATIAL_SCALE:-0.2737012522439323}"
 N_CLUSTERS="${N_CLUSTERS:-8}"
 ATOMS_PER_CLUSTER="${ATOMS_PER_CLUSTER:-8}"
-COMPUTE_DEVICE="${COMPUTE_DEVICE:-auto}"
+COMPUTE_DEVICE="${COMPUTE_DEVICE:-cuda}"
 BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-200}"
 
-conda run -n ml1 python -m spatial_ot multilevel-ot \
+conda run -n "$CONDA_ENV" python -m spatial_ot multilevel-ot \
   --input-h5ad "$INPUT_H5AD" \
   --output-dir "$OUTPUT_DIR" \
   --feature-obsm-key "$FEATURE_OBSM_KEY" \

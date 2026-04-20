@@ -48,7 +48,7 @@ class ModelConfig:
 
 @dataclass
 class TrainingConfig:
-    device: str = "auto"
+    device: str = "cuda"
     teacher_epochs: int = 8
     intrinsic_epochs: int = 8
     context_epochs: int = 12
@@ -142,7 +142,7 @@ class MultilevelOTConfig:
     max_iter: int = 10
     tol: float = 1e-4
     seed: int = 1337
-    compute_device: str = "auto"
+    compute_device: str = "cuda"
 
 
 @dataclass
@@ -166,7 +166,7 @@ class DeepFeatureConfig:
     validation_context_mode: str = "inductive"
     batch_key: str | None = None
     count_layer: str | None = None
-    device: str = "auto"
+    device: str = "cuda"
     reconstruction_weight: float = 1.0
     context_weight: float = 0.5
     contrastive_weight: float = 0.1

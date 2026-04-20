@@ -12,6 +12,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.cluster import KMeans
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.neighbors import NearestNeighbors
+import torch
 
 from .types import RegionGeometry, ShapeNormalizer, ShapeNormalizerDiagnostics
 
@@ -648,6 +649,59 @@ def _normalize_coords_basic(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, floa
     return x0 / scale, center.astype(np.float64), scale
 
 
+def _gpu_balanced_sinkhorn_transport(
+    g_norm: np.ndarray,
+    q: np.ndarray,
+    w_geom: np.ndarray,
+    w_ref: np.ndarray,
+    eps_geom: float,
+    compute_device: torch.device,
+) -> tuple[np.ndarray, float, bool]:
+    """GPU balanced Sinkhorn for the geometry shape normalizer.
+
+    Returns (T, ot_cost, converged).
+    """
+    from .gpu_ot import sinkhorn_balanced_log_torch
+
+    dtype = torch.float32
+    g_t = torch.as_tensor(g_norm, dtype=dtype, device=compute_device)
+    q_t = torch.as_tensor(q, dtype=dtype, device=compute_device)
+    c = torch.cdist(g_t, q_t, p=2).pow(2)
+    positive = c[c > 0]
+    scale_cost = float(positive.median().item()) if positive.numel() else 1.0
+    c = c / max(scale_cost, 1e-12)
+    a_t = torch.as_tensor(w_geom, dtype=dtype, device=compute_device)
+    b_t = torch.as_tensor(w_ref, dtype=dtype, device=compute_device)
+    t, transport_cost, converged, _ = sinkhorn_balanced_log_torch(
+        a_t,
+        b_t,
+        c,
+        eps=max(float(eps_geom), 1e-5),
+        num_iter=600,
+        tol=1e-5,
+    )
+    if not bool(torch.isfinite(t).all().item()):
+        # Re-try with a more relaxed regulariser before falling back to numpy.
+        for fallback_eps in (max(float(eps_geom), 1e-5) * 4.0, max(float(eps_geom), 1e-5) * 16.0):
+            t, transport_cost, converged, _ = sinkhorn_balanced_log_torch(
+                a_t,
+                b_t,
+                c,
+                eps=fallback_eps,
+                num_iter=600,
+                tol=1e-5,
+            )
+            if bool(torch.isfinite(t).all().item()):
+                break
+        else:
+            raise RuntimeError("GPU balanced Sinkhorn produced non-finite plan even after regulariser fallback.")
+    return (
+        t.detach().cpu().numpy().astype(np.float64),
+        float(transport_cost.detach().item()),
+        bool(converged),
+    )
+
+
 def fit_ot_shape_normalizer(
     geometry_points: np.ndarray,
     reference_points: np.ndarray,
@@ -655,6 +709,7 @@ def fit_ot_shape_normalizer(
     eps_geom: float = 0.03,
     rbf_smoothing: float = 1e-3,
     rbf_neighbors: int = 64,
+    compute_device: torch.device | None = None,
 ) -> tuple[ShapeNormalizer, ShapeNormalizerDiagnostics]:
     g = np.asarray(geometry_points, dtype=np.float64)
     q = np.asarray(reference_points, dtype=np.float64)
@@ -683,26 +738,39 @@ def fit_ot_shape_normalizer(
     mapped_radius_max = None
     interpolation_residual = None
     try:
-        c = ot.dist(g_norm, q, metric="sqeuclidean")
-        positive = c[c > 0]
-        scale_cost = float(np.median(positive)) if positive.size else 1.0
-        c = c / max(scale_cost, 1e-12)
-        t, log = ot.sinkhorn(
-            w_geom,
-            w_ref,
-            c,
-            reg=max(float(eps_geom), 1e-5),
-            method="sinkhorn_stabilized",
-            numItermax=3000,
-            stopThr=1e-8,
-            warn=False,
-            log=True,
-        )
-        row_mass = np.maximum(t.sum(axis=1, keepdims=True), 1e-12)
-        g_mapped = (t @ q) / row_mass
-        ot_cost = float(np.sum(t * c))
-        err_hist = np.asarray(log.get("err", []), dtype=np.float64)
-        sinkhorn_converged = bool(err_hist.size == 0 or err_hist[-1] < 1e-7)
+        use_gpu = compute_device is not None and torch.device(compute_device).type == "cuda"
+        if use_gpu:
+            t, ot_cost, sinkhorn_converged = _gpu_balanced_sinkhorn_transport(
+                g_norm=g_norm,
+                q=q,
+                w_geom=w_geom,
+                w_ref=w_ref,
+                eps_geom=eps_geom,
+                compute_device=torch.device(compute_device),
+            )
+            row_mass = np.maximum(t.sum(axis=1, keepdims=True), 1e-12)
+            g_mapped = (t @ q) / row_mass
+        else:
+            c = ot.dist(g_norm, q, metric="sqeuclidean")
+            positive = c[c > 0]
+            scale_cost = float(np.median(positive)) if positive.size else 1.0
+            c = c / max(scale_cost, 1e-12)
+            t, log = ot.sinkhorn(
+                w_geom,
+                w_ref,
+                c,
+                reg=max(float(eps_geom), 1e-5),
+                method="sinkhorn_stabilized",
+                numItermax=3000,
+                stopThr=1e-8,
+                warn=False,
+                log=True,
+            )
+            row_mass = np.maximum(t.sum(axis=1, keepdims=True), 1e-12)
+            g_mapped = (t @ q) / row_mass
+            ot_cost = float(np.sum(t * c))
+            err_hist = np.asarray(log.get("err", []), dtype=np.float64)
+            sinkhorn_converged = bool(err_hist.size == 0 or err_hist[-1] < 1e-7)
         radius = np.sqrt(np.sum(g_mapped**2, axis=1))
         mapped_radius_p95 = float(np.percentile(radius, 95)) if radius.size else 0.0
         mapped_radius_max = float(radius.max()) if radius.size else 0.0

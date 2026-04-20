@@ -46,6 +46,22 @@ Current notes:
 - `configs/`: config files and demo prior programs
 - `tests/`: regression and multilevel OT tests
 
+## Environment Setup
+
+Create or refresh a conda environment and install the package in editable mode:
+
+```bash
+cd spatial_ot
+bash install_env.sh
+```
+
+You can override the target environment name or extras:
+
+```bash
+cd spatial_ot
+CONDA_ENV=spatial-ot EXTRAS=dev,viz,geometry,parallel bash install_env.sh
+```
+
 ## Legacy train path
 
 The smoke config points at the already-prepared `P2 CRC` Visium HD sample in this workspace and keeps the subset/epoch sizes intentionally small.
@@ -81,7 +97,7 @@ The current deep feature adapter is still a research-stage component, but it is 
 - `validation_context_mode = "inductive"` keeps train and validation neighborhood targets separated to reduce transductive leakage
 - `batch_key` currently supports validation/sample-holdout bookkeeping, not true batch correction
 - `count_layer` is reserved but not implemented for count reconstruction yet
-- the active multilevel OT path now has its own Torch compute device via `--compute-device` / `ot.compute_device`; `auto` uses CUDA when available for cost matrices, projection, and the semi-relaxed Sinkhorn solver
+- the active multilevel OT path now defaults to explicit `cuda` compute via `--compute-device` / `ot.compute_device`; use `auto` or `cpu` only when you intentionally want fallback behavior
 
 Current deep-path capability snapshot:
 
@@ -126,7 +142,7 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --spatial-x-key cell_x \
   --spatial-y-key cell_y \
   --spatial-scale 1.0 \
-  --compute-device auto \
+  --compute-device cuda \
   --n-clusters 8 \
   --atoms-per-cluster 8 \
   --radius-um 100 \
@@ -151,13 +167,13 @@ Exploratory UMAP run when only a UMAP embedding is available:
 ```bash
 cd spatial_ot
 conda run -n ml1 python -m spatial_ot multilevel-ot \
-  --input-h5ad ../work/visium_hd_p2_crc/exports/p2_crc_cells_marker_genes_umap3d_rgb.h5ad \
+  --input-h5ad ../spatial_ot_input/p2_crc_cells_marker_genes_umap3d.h5ad \
   --output-dir ../work/spatial_ot_runs/p2_crc_multilevel_umap_exploratory \
   --feature-obsm-key X_umap_marker_genes_3d \
   --spatial-x-key cell_x \
   --spatial-y-key cell_y \
   --spatial-scale 0.2737012522439323 \
-  --compute-device auto \
+  --compute-device cuda \
   --n-clusters 8 \
   --atoms-per-cluster 8 \
   --radius-um 100 \
@@ -167,6 +183,8 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --max-subregions 2000 \
   --allow-observed-hull-geometry
 ```
+
+When you are using the cohort-ready Visium HD inputs generated in this workspace, treat `../spatial_ot_input/` as the canonical staging directory for those H5AD files.
 
 The active path now also supports a TOML config surface. A portable example lives at `configs/multilevel_deep_example.toml`, and it now demonstrates the graph-aware encoder:
 
@@ -223,6 +241,8 @@ conda run -n ml1 python -m spatial_ot deep-transform \
 
 For graph-based deep runs, `spatial_scale` matters: graph radii such as `radius_um`, `short_radius_um`, and `mid_radius_um` are interpreted after applying that scale, so pixel-space coordinates should be converted to microns before training or transform.
 
+The package defaults now assume a CUDA-capable GPU is available for both the active multilevel OT path and the deep feature adapter. If you intentionally need fallback behavior, set `compute_device = "auto"` or `compute_device = "cpu"` for multilevel OT, and `device = "auto"` or `device = "cpu"` for the deep path.
+
 For grid-built multilevel OT runs, `basic_niche_size_um` sets the smallest building block used to compose larger subregions. The current default active-path recommendation is a `200 µm` basic niche diameter.
 
 Key artifacts from this path:
@@ -255,6 +275,14 @@ Helper scripts:
 
 - `run_p2_crc_multilevel_ot.sh`: safer default helper using `X_pca`
 - `run_p2_crc_multilevel_ot_exploratory_umap.sh`: explicit exploratory helper when only a UMAP feature space is available
+- `run_spatial_ot_input.sh`: generic exploratory helper for cohort-ready H5ADs staged under `../spatial_ot_input/`
+
+Example:
+
+```bash
+cd spatial_ot
+SAMPLE_KEY=p2_crc bash run_spatial_ot_input.sh
+```
 
 ## Config notes
 

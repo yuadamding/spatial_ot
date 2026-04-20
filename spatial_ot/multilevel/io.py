@@ -324,7 +324,7 @@ def run_multilevel_ot_on_h5ad(
     tol: float = 1e-4,
     basic_niche_size_um: float | None = 200.0,
     seed: int = 1337,
-    compute_device: str = "auto",
+    compute_device: str = "cuda",
     deep_config: DeepFeatureConfig | None = None,
 ) -> dict:
     input_h5ad = Path(input_h5ad)

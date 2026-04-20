@@ -20,6 +20,7 @@ from .geometry import (
     sample_geometry_points,
     _region_geometries_from_members,
 )
+from .gpu_ot import sinkhorn_semirelaxed_unbalanced_log_torch
 from .types import MultilevelOTResult, OTSolveDiagnostics, RegionGeometry, SubregionMeasure
 
 
@@ -37,6 +38,38 @@ def _resolve_compute_device(device: str) -> torch.device:
     if resolved.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA compute was requested for multilevel OT, but torch.cuda.is_available() is False.")
     return resolved
+
+
+def _cluster_cost_matrix(
+    u_aligned: np.ndarray,
+    y: np.ndarray,
+    atom_coords: np.ndarray,
+    atom_features: np.ndarray,
+    *,
+    cost_scale_x: float,
+    cost_scale_y: float,
+    lambda_x: float,
+    lambda_y: float,
+    compute_device: torch.device,
+    atom_coords_t: torch.Tensor | None = None,
+    atom_features_t: torch.Tensor | None = None,
+    y_t: torch.Tensor | None = None,
+) -> np.ndarray | torch.Tensor:
+    if compute_device.type == "cpu":
+        cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(cost_scale_x, 1e-12)
+        cy = ot.dist(y, atom_features, metric="sqeuclidean") / max(cost_scale_y, 1e-12)
+        return lambda_x * cx + lambda_y * cy
+
+    u_aligned_t = torch.as_tensor(u_aligned, dtype=torch.float64, device=compute_device)
+    if atom_coords_t is None:
+        atom_coords_t = torch.as_tensor(atom_coords, dtype=torch.float64, device=compute_device)
+    if atom_features_t is None:
+        atom_features_t = torch.as_tensor(atom_features, dtype=torch.float64, device=compute_device)
+    if y_t is None:
+        y_t = torch.as_tensor(y, dtype=torch.float64, device=compute_device)
+    cx_t = torch.cdist(u_aligned_t, atom_coords_t, p=2).pow(2) / max(cost_scale_x, 1e-12)
+    cy_t = torch.cdist(y_t, atom_features_t, p=2).pow(2) / max(cost_scale_y, 1e-12)
+    return float(lambda_x) * cx_t + float(lambda_y) * cy_t
 
 
 def _pairwise_sqdist_array(
@@ -122,6 +155,7 @@ def _build_subregion_measures(
     lambda_y: float,
     seed: int,
     allow_convex_hull_fallback: bool,
+    compute_device: torch.device | None = None,
 ) -> list[SubregionMeasure]:
     measures: list[SubregionMeasure] = []
     for rid, region in enumerate(region_geometries):
@@ -142,6 +176,7 @@ def _build_subregion_measures(
             reference_points=geometry_reference_points,
             reference_weights=geometry_reference_weights,
             eps_geom=geometry_eps,
+            compute_device=compute_device,
         )
         diagnostics.geometry_source = geometry_source
         diagnostics.used_fallback = used_fallback
@@ -326,6 +361,49 @@ def _transform_penalty(
     return float(scale_penalty * (np.log(scale) ** 2) + shift_penalty * float(t @ t))
 
 
+def _solve_semirelaxed_unbalanced_gpu(
+    a: np.ndarray | torch.Tensor,
+    beta: np.ndarray | torch.Tensor,
+    c: np.ndarray | torch.Tensor,
+    eps: float,
+    rho: float,
+    compute_device: torch.device,
+) -> tuple[torch.Tensor, float, OTSolveDiagnostics]:
+    regs = [max(float(eps), 1e-5)]
+    regs.extend([regs[0] * 2.0, regs[0] * 4.0, regs[0] * 8.0])
+    a_t = torch.as_tensor(a, dtype=torch.float32, device=compute_device)
+    beta_t = torch.as_tensor(beta, dtype=torch.float32, device=compute_device)
+    c_t = torch.as_tensor(c, dtype=torch.float32, device=compute_device)
+    last_gamma: torch.Tensor | None = None
+    last_objective = float("inf")
+    last_reg = regs[0]
+    for reg in regs:
+        gamma, objective, converged, _ = sinkhorn_semirelaxed_unbalanced_log_torch(
+            a_t,
+            beta_t,
+            c_t,
+            eps=reg,
+            rho=max(float(rho), 1e-6),
+            num_iter=600,
+            tol=1e-5,
+        )
+        gamma_finite = bool(torch.isfinite(gamma).all().item())
+        obj_val = float(objective.detach().item())
+        obj_finite = bool(np.isfinite(obj_val))
+        last_gamma = gamma
+        last_objective = obj_val
+        last_reg = reg
+        if gamma_finite and obj_finite and converged:
+            return gamma, obj_val, OTSolveDiagnostics(effective_eps=float(reg), used_fallback=not np.isclose(reg, regs[0]))
+    if last_gamma is None or not bool(torch.isfinite(last_gamma).all().item()):
+        raise FloatingPointError("Unable to obtain a finite semi-relaxed unbalanced OT solution on GPU.")
+    return (
+        last_gamma,
+        last_objective if np.isfinite(last_objective) else 1e12,
+        OTSolveDiagnostics(effective_eps=float(last_reg), used_fallback=not np.isclose(last_reg, regs[0])),
+    )
+
+
 def _solve_semirelaxed_unbalanced(
     a: np.ndarray,
     beta: np.ndarray,
@@ -334,19 +412,18 @@ def _solve_semirelaxed_unbalanced(
     rho: float,
     compute_device: torch.device,
 ) -> tuple[np.ndarray, float, OTSolveDiagnostics]:
+    if compute_device.type == "cuda":
+        gamma_t, objective, diag = _solve_semirelaxed_unbalanced_gpu(a, beta, c, eps=eps, rho=rho, compute_device=compute_device)
+        return gamma_t.detach().cpu().numpy().astype(np.float64), float(objective), diag
     regs = [max(float(eps), 1e-5)]
     regs.extend([regs[0] * 2.0, regs[0] * 4.0, regs[0] * 8.0])
     last_gamma = None
     last_objective = 1e12
     last_reg = regs[0]
-    if compute_device.type == "cpu":
-        a_backend = np.asarray(a, dtype=np.float64)
-        beta_backend = np.asarray(beta, dtype=np.float64)
-    else:
-        a_backend = torch.as_tensor(a, dtype=torch.float64, device=compute_device)
-        beta_backend = torch.as_tensor(beta, dtype=torch.float64, device=compute_device)
+    a_backend = np.asarray(a, dtype=np.float64)
+    beta_backend = np.asarray(beta, dtype=np.float64)
     for reg in regs:
-        c_backend = np.asarray(c, dtype=np.float64) if compute_device.type == "cpu" else torch.as_tensor(c, dtype=torch.float64, device=compute_device)
+        c_backend = np.asarray(c, dtype=np.float64)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             gamma = ot.unbalanced.sinkhorn_unbalanced(
@@ -430,14 +507,20 @@ def aligned_semirelaxed_ot_to_cluster(
 
     for _ in range(max(int(n_align_iter), 1)):
         u_aligned = apply_similarity(u, transform)
-        if compute_device.type == "cpu":
-            cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(cost_scale_x, 1e-12)
-            cy = ot.dist(y, atom_features, metric="sqeuclidean") / max(cost_scale_y, 1e-12)
-        else:
-            u_aligned_t = torch.as_tensor(u_aligned, dtype=torch.float64, device=compute_device)
-            cx = (torch.cdist(u_aligned_t, atom_coords_t, p=2) ** 2 / max(cost_scale_x, 1e-12)).detach().cpu().numpy()
-            cy = (torch.cdist(y_t, atom_features_t, p=2) ** 2 / max(cost_scale_y, 1e-12)).detach().cpu().numpy()
-        c = lambda_x * cx + lambda_y * cy
+        c = _cluster_cost_matrix(
+            u_aligned,
+            y,
+            atom_coords,
+            atom_features,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            compute_device=compute_device,
+            atom_coords_t=atom_coords_t,
+            atom_features_t=atom_features_t,
+            y_t=y_t,
+        )
         gamma, _, _ = _solve_semirelaxed_unbalanced(a=a, beta=beta, c=c, eps=eps, rho=rho, compute_device=compute_device)
         row_mass = np.maximum(gamma.sum(axis=1), 1e-12)
         target_bary = (gamma @ atom_coords) / row_mass[:, None]
@@ -452,14 +535,20 @@ def aligned_semirelaxed_ot_to_cluster(
         )
 
     u_aligned = apply_similarity(u, transform)
-    if compute_device.type == "cpu":
-        cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(cost_scale_x, 1e-12)
-        cy = ot.dist(y, atom_features, metric="sqeuclidean") / max(cost_scale_y, 1e-12)
-    else:
-        u_aligned_t = torch.as_tensor(u_aligned, dtype=torch.float64, device=compute_device)
-        cx = (torch.cdist(u_aligned_t, atom_coords_t, p=2) ** 2 / max(cost_scale_x, 1e-12)).detach().cpu().numpy()
-        cy = (torch.cdist(y_t, atom_features_t, p=2) ** 2 / max(cost_scale_y, 1e-12)).detach().cpu().numpy()
-    c = lambda_x * cx + lambda_y * cy
+    c = _cluster_cost_matrix(
+        u_aligned,
+        y,
+        atom_coords,
+        atom_features,
+        cost_scale_x=cost_scale_x,
+        cost_scale_y=cost_scale_y,
+        lambda_x=lambda_x,
+        lambda_y=lambda_y,
+        compute_device=compute_device,
+        atom_coords_t=atom_coords_t,
+        atom_features_t=atom_features_t,
+        y_t=y_t,
+    )
     gamma, objective, solve_diag = _solve_semirelaxed_unbalanced(a=a, beta=beta, c=c, eps=eps, rho=rho, compute_device=compute_device)
     target_mass = np.asarray(gamma.sum(axis=0), dtype=np.float64)
     theta = _normalize_hist(target_mass)
@@ -471,6 +560,544 @@ def aligned_semirelaxed_ot_to_cluster(
     if not np.isfinite(objective):
         objective = 1e12
     return objective, gamma.astype(np.float32), transform, theta.astype(np.float32), solve_diag
+
+
+def _batched_weighted_similarity_fit_torch(
+    x: torch.Tensor,      # (K, m, 2)
+    y: torch.Tensor,      # (K, m, 2)
+    w: torch.Tensor,      # (K, m)
+    allow_reflection: bool,
+    allow_scale: bool,
+    min_scale: float,
+    max_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    w_sum = w.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    w_norm = w / w_sum
+    xbar = (w_norm.unsqueeze(-1) * x).sum(dim=-2)   # (K, 2)
+    ybar = (w_norm.unsqueeze(-1) * y).sum(dim=-2)   # (K, 2)
+    x0 = x - xbar.unsqueeze(-2)
+    y0 = y - ybar.unsqueeze(-2)
+    h = x0.transpose(-1, -2) @ (w_norm.unsqueeze(-1) * y0)   # (K, 2, 2)
+    u, _s, vt = torch.linalg.svd(h)
+    d = torch.eye(2, device=x.device, dtype=x.dtype).expand(h.shape[0], 2, 2).contiguous()
+    if not allow_reflection:
+        det = torch.linalg.det(u @ vt)
+        neg = det < 0
+        if torch.any(neg):
+            d = d.clone()
+            d[:, -1, -1] = torch.where(neg, torch.full_like(det, -1.0), torch.full_like(det, 1.0))
+    r = u @ d @ vt                                   # (K, 2, 2)
+    if allow_scale:
+        denom = (w_norm * (x0 ** 2).sum(dim=-1)).sum(dim=-1).clamp_min(1e-12)   # (K,)
+        trace = torch.einsum("kij,kij->k", r, h)
+        scale = (trace / denom).clamp_min(1e-12)
+    else:
+        scale = torch.ones(h.shape[0], device=x.device, dtype=x.dtype)
+    scale = scale.clamp(min=float(min_scale), max=float(max_scale))
+    xbar_r = torch.einsum("ki,kij->kj", xbar, r)     # (K, 2)
+    t = ybar - scale.unsqueeze(-1) * xbar_r
+    return r, scale, t
+
+
+def _apply_similarity_batched_torch(x: torch.Tensor, r: torch.Tensor, scale: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    # x: (K, m, 2), r: (K, 2, 2), scale: (K,), t: (K, 2)
+    return scale.unsqueeze(-1).unsqueeze(-1) * torch.einsum("kmi,kij->kmj", x, r) + t.unsqueeze(-2)
+
+
+def _aligned_semirelaxed_ot_costs_all_clusters_gpu(
+    u: np.ndarray,
+    y: np.ndarray,
+    a: np.ndarray,
+    atom_coords: np.ndarray,
+    atom_features: np.ndarray,
+    betas: np.ndarray,
+    lambda_x: float,
+    lambda_y: float,
+    eps: float,
+    rho: float,
+    n_align_iter: int,
+    allow_reflection: bool,
+    allow_scale: bool,
+    cost_scale_x: float,
+    cost_scale_y: float,
+    min_scale: float,
+    max_scale: float,
+    scale_penalty: float,
+    shift_penalty: float,
+    compute_device: torch.device,
+    *,
+    atom_coords_t: torch.Tensor | None = None,
+    atom_features_t: torch.Tensor | None = None,
+    betas_t: torch.Tensor | None = None,
+) -> np.ndarray:
+    """All-K batched aligned semi-relaxed OT (costs only). Returns shape (K,) numpy."""
+    dtype = torch.float32
+    dev = compute_device
+    # tensors
+    u_t = torch.as_tensor(u, dtype=dtype, device=dev)              # (m, 2)
+    y_t = torch.as_tensor(y, dtype=dtype, device=dev)              # (m, f)
+    a_vec = torch.as_tensor(_normalize_hist(a), dtype=dtype, device=dev)  # (m,)
+    if atom_coords_t is None:
+        atom_coords_t = torch.as_tensor(atom_coords, dtype=dtype, device=dev)
+    if atom_features_t is None:
+        atom_features_t = torch.as_tensor(atom_features, dtype=dtype, device=dev)
+    if betas_t is None:
+        betas_np = np.stack([_normalize_hist(b) for b in betas], axis=0)
+        betas_t = torch.as_tensor(betas_np, dtype=dtype, device=dev)
+    K = atom_coords_t.shape[0]
+    m = u_t.shape[0]
+    p = atom_coords_t.shape[1]
+    # Broadcast u, y to (K, m, *)
+    u_kb = u_t.unsqueeze(0).expand(K, -1, -1).contiguous()
+    y_kb = y_t.unsqueeze(0).expand(K, -1, -1).contiguous()
+    a_kb = a_vec.unsqueeze(0).expand(K, -1).contiguous()
+
+    r = torch.eye(2, device=dev, dtype=dtype).unsqueeze(0).expand(K, 2, 2).contiguous()
+    scale = torch.ones(K, device=dev, dtype=dtype)
+    t = torch.zeros(K, 2, device=dev, dtype=dtype)
+
+    sx = max(float(cost_scale_x), 1e-12)
+    sy = max(float(cost_scale_y), 1e-12)
+    cy_full = torch.cdist(y_kb, atom_features_t, p=2).pow(2) / sy
+    cy_scaled = float(lambda_y) * cy_full                # (K, m, p) — fixed over align iters
+
+    eps_base = max(float(eps), 1e-5)
+    reg_schedule = [eps_base, 2.0 * eps_base, 4.0 * eps_base, 8.0 * eps_base]
+
+    def _solve_once(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, float]:
+        last_gamma = None
+        last_obj = None
+        last_reg = reg_schedule[0]
+        for reg in reg_schedule:
+            gamma, obj, converged, _ = sinkhorn_semirelaxed_unbalanced_log_torch(
+                a_kb,
+                betas_t,
+                cost,
+                eps=reg,
+                rho=max(float(rho), 1e-6),
+                num_iter=600,
+                tol=1e-5,
+            )
+            finite = torch.isfinite(gamma).all() and torch.isfinite(obj).all()
+            last_gamma = gamma
+            last_obj = obj
+            last_reg = reg
+            if bool(finite.item()) and converged:
+                return gamma, obj, float(reg)
+        if last_gamma is None:
+            raise FloatingPointError("Unable to obtain finite batched semirelaxed OT on GPU.")
+        return last_gamma, last_obj, float(last_reg)
+
+    for _ in range(max(int(n_align_iter), 1)):
+        u_aligned = _apply_similarity_batched_torch(u_kb, r, scale, t)       # (K, m, 2)
+        cx = torch.cdist(u_aligned, atom_coords_t, p=2).pow(2) / sx          # (K, m, p)
+        cost = float(lambda_x) * cx + cy_scaled
+        gamma, _, _ = _solve_once(cost)
+        row_mass = gamma.sum(dim=-1).clamp_min(1e-12)                        # (K, m)
+        target_bary = torch.einsum("kmp,kpd->kmd", gamma, atom_coords_t) / row_mass.unsqueeze(-1)
+        r, scale, t = _batched_weighted_similarity_fit_torch(
+            u_kb,
+            target_bary,
+            row_mass,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            min_scale=min_scale,
+            max_scale=max_scale,
+        )
+
+    u_aligned = _apply_similarity_batched_torch(u_kb, r, scale, t)
+    cx = torch.cdist(u_aligned, atom_coords_t, p=2).pow(2) / sx
+    cost = float(lambda_x) * cx + cy_scaled
+    _, obj, _ = _solve_once(cost)
+
+    # transform penalty: scale_penalty * log(scale)^2 + shift_penalty * (t @ t)
+    penalty = float(scale_penalty) * torch.log(scale.clamp_min(1e-12)).pow(2) + float(shift_penalty) * (t * t).sum(dim=-1)
+    total = obj + penalty
+    total = torch.where(torch.isfinite(total), total, torch.full_like(total, 1e12))
+    return total.detach().cpu().numpy().astype(np.float64)
+
+
+def _pack_measures_padded(
+    measures: list[SubregionMeasure],
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pad all subregion measures to shape (R, m_max, *). Zero-mass rows mark padding."""
+    R = len(measures)
+    if R == 0:
+        raise ValueError("no subregion measures to pack")
+    m_max = max(int(m.canonical_coords.shape[0]) for m in measures)
+    coord_dim = int(measures[0].canonical_coords.shape[1])
+    feat_dim = int(measures[0].features.shape[1])
+    u = np.zeros((R, m_max, coord_dim), dtype=np.float32)
+    y = np.zeros((R, m_max, feat_dim), dtype=np.float32)
+    a = np.zeros((R, m_max), dtype=np.float32)
+    m_r = np.zeros(R, dtype=np.int32)
+    for r, meas in enumerate(measures):
+        mr = int(meas.canonical_coords.shape[0])
+        m_r[r] = mr
+        u[r, :mr] = np.asarray(meas.canonical_coords, dtype=np.float32)
+        y[r, :mr] = np.asarray(meas.features, dtype=np.float32)
+        a[r, :mr] = _normalize_hist(np.asarray(meas.weights)).astype(np.float32)
+    return (
+        torch.as_tensor(u, dtype=dtype, device=device),
+        torch.as_tensor(y, dtype=dtype, device=device),
+        torch.as_tensor(a, dtype=dtype, device=device),
+        torch.as_tensor(m_r, dtype=torch.int32, device=device),
+    )
+
+
+def _batched_weighted_similarity_fit_rk_torch(
+    x: torch.Tensor,      # (R, K, m, 2)  --- x is u replicated across K
+    y: torch.Tensor,      # (R, K, m, 2)  --- barycentric target
+    w: torch.Tensor,      # (R, K, m)
+    allow_reflection: bool,
+    allow_scale: bool,
+    min_scale: float,
+    max_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    w_sum = w.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    w_norm = w / w_sum
+    xbar = (w_norm.unsqueeze(-1) * x).sum(dim=-2)     # (R, K, 2)
+    ybar = (w_norm.unsqueeze(-1) * y).sum(dim=-2)     # (R, K, 2)
+    x0 = x - xbar.unsqueeze(-2)
+    y0 = y - ybar.unsqueeze(-2)
+    # h[r,k] = x0^T @ (diag(w_norm) @ y0)
+    h = torch.einsum("rkmi,rkmj->rkij", x0, w_norm.unsqueeze(-1) * y0)
+    # batched 2x2 SVD over (R, K, 2, 2)
+    u_svd, _s, vt = torch.linalg.svd(h)
+    if not allow_reflection:
+        det = torch.linalg.det(u_svd @ vt)
+        d = torch.eye(2, device=x.device, dtype=x.dtype).expand(*h.shape[:-2], 2, 2).contiguous()
+        neg = det < 0
+        if torch.any(neg):
+            d = d.clone()
+            # set last diagonal entry to -1 where det<0
+            fix = torch.where(neg, torch.full_like(det, -1.0), torch.full_like(det, 1.0))
+            d[..., -1, -1] = fix
+        r_mat = u_svd @ d @ vt
+    else:
+        r_mat = u_svd @ vt
+    if allow_scale:
+        denom = (w_norm * (x0 ** 2).sum(dim=-1)).sum(dim=-1).clamp_min(1e-12)
+        trace = torch.einsum("rkij,rkij->rk", r_mat, h)
+        scale = (trace / denom).clamp_min(1e-12)
+    else:
+        scale = torch.ones(h.shape[:-2], device=x.device, dtype=x.dtype)
+    scale = scale.clamp(min=float(min_scale), max=float(max_scale))
+    xbar_r = torch.einsum("rki,rkij->rkj", xbar, r_mat)
+    t = ybar - scale.unsqueeze(-1) * xbar_r
+    return r_mat, scale, t
+
+
+def _apply_similarity_rk_torch(x: torch.Tensor, r: torch.Tensor, scale: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    return scale.unsqueeze(-1).unsqueeze(-1) * torch.einsum("rkmi,rkij->rkmj", x, r) + t.unsqueeze(-2)
+
+
+def _compute_assignment_costs_rk_gpu(
+    measures: list[SubregionMeasure],
+    atom_coords: np.ndarray,
+    atom_features: np.ndarray,
+    betas: np.ndarray,
+    lambda_x: float,
+    lambda_y: float,
+    eps: float,
+    rho: float,
+    align_iters: int,
+    allow_reflection: bool,
+    allow_scale: bool,
+    cost_scale_x: float,
+    cost_scale_y: float,
+    min_scale: float,
+    max_scale: float,
+    scale_penalty: float,
+    shift_penalty: float,
+    compute_device: torch.device,
+) -> np.ndarray:
+    """Fully batched (R*K, m, *) aligned semi-relaxed OT on GPU.
+
+    This amortizes kernel-launch overhead across all (subregion, cluster) pairs.
+    Returns costs of shape (R, K) as float32 numpy.
+    """
+    dtype = torch.float32
+    dev = compute_device
+    u_rm, y_rm, a_rm, _m_r = _pack_measures_padded(measures, dtype=dtype, device=dev)
+    R = u_rm.shape[0]
+    m = u_rm.shape[1]
+    K = int(atom_coords.shape[0])
+    p = int(atom_coords.shape[1])
+
+    atom_coords_t = torch.as_tensor(atom_coords, dtype=dtype, device=dev)        # (K, p, 2)
+    atom_features_t = torch.as_tensor(atom_features, dtype=dtype, device=dev)    # (K, p, f)
+    betas_np = np.stack([_normalize_hist(b) for b in betas], axis=0)
+    beta_k = torch.as_tensor(betas_np, dtype=dtype, device=dev)                   # (K, p)
+
+    # Broadcast to (R, K, *)
+    u_rkm = u_rm.unsqueeze(1).expand(R, K, m, u_rm.shape[-1]).contiguous()
+    y_rkm = y_rm.unsqueeze(1).expand(R, K, m, y_rm.shape[-1]).contiguous()
+    a_rkm = a_rm.unsqueeze(1).expand(R, K, m).contiguous()
+    atom_coords_rk = atom_coords_t.unsqueeze(0).expand(R, K, p, atom_coords_t.shape[-1]).contiguous()
+    atom_features_rk = atom_features_t.unsqueeze(0).expand(R, K, p, atom_features_t.shape[-1]).contiguous()
+    beta_rk = beta_k.unsqueeze(0).expand(R, K, p).contiguous()
+
+    sx = max(float(cost_scale_x), 1e-12)
+    sy = max(float(cost_scale_y), 1e-12)
+    cy_full = torch.cdist(y_rkm.reshape(R * K, m, y_rm.shape[-1]), atom_features_rk.reshape(R * K, p, y_rm.shape[-1]), p=2).pow(2).reshape(R, K, m, p) / sy
+    cy_scaled = float(lambda_y) * cy_full
+
+    r_mat = torch.eye(2, device=dev, dtype=dtype).expand(R, K, 2, 2).contiguous()
+    scale_t = torch.ones(R, K, device=dev, dtype=dtype)
+    t_t = torch.zeros(R, K, 2, device=dev, dtype=dtype)
+
+    eps_base = max(float(eps), 1e-5)
+    reg_schedule = (eps_base, 2.0 * eps_base, 4.0 * eps_base, 8.0 * eps_base)
+    rho_val = max(float(rho), 1e-6)
+
+    def _solve(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # cost shape: (R, K, m, p). Flatten batch dims for Sinkhorn.
+        flat_cost = cost.reshape(R * K, m, p)
+        flat_a = a_rkm.reshape(R * K, m)
+        flat_b = beta_rk.reshape(R * K, p)
+        last_gamma = None
+        last_obj = None
+        eff_reg = torch.full((R, K), reg_schedule[0], dtype=dtype, device=dev)
+        converged_all = torch.zeros(R, K, dtype=torch.bool, device=dev)
+        for reg in reg_schedule:
+            gamma, obj, _conv, _err = sinkhorn_semirelaxed_unbalanced_log_torch(
+                flat_a,
+                flat_b,
+                flat_cost,
+                eps=reg,
+                rho=rho_val,
+                num_iter=600,
+                tol=1e-5,
+            )
+            gamma = gamma.reshape(R, K, m, p)
+            obj = obj.reshape(R, K)
+            finite = torch.isfinite(gamma).all(dim=(-1, -2)) & torch.isfinite(obj)
+            if last_gamma is None:
+                last_gamma = gamma.clone()
+                last_obj = obj.clone()
+                converged_all = finite.clone()
+                eff_reg = torch.full_like(obj, reg)
+            update = finite & ~converged_all
+            if update.any():
+                last_gamma = torch.where(update.unsqueeze(-1).unsqueeze(-1), gamma, last_gamma)
+                last_obj = torch.where(update, obj, last_obj)
+                eff_reg = torch.where(update, torch.full_like(eff_reg, reg), eff_reg)
+                converged_all = converged_all | update
+            if bool(converged_all.all().item()):
+                break
+        if last_gamma is None or last_obj is None:
+            raise FloatingPointError("GPU batched Sinkhorn failed")
+        return last_gamma, last_obj, eff_reg
+
+    identity_r = torch.eye(2, device=dev, dtype=dtype).expand(R, K, 2, 2).contiguous()
+    for _ in range(max(int(align_iters), 1)):
+        u_aligned = _apply_similarity_rk_torch(u_rkm, r_mat, scale_t, t_t)           # (R, K, m, 2)
+        cx = torch.cdist(u_aligned.reshape(R * K, m, u_aligned.shape[-1]), atom_coords_rk.reshape(R * K, p, u_aligned.shape[-1]), p=2).pow(2).reshape(R, K, m, p) / sx
+        cost = float(lambda_x) * cx + cy_scaled
+        gamma, _obj, _reg = _solve(cost)
+        gamma = torch.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0)
+        row_mass = gamma.sum(dim=-1).clamp_min(1e-12)                                # (R, K, m)
+        target_bary = torch.einsum("rkmp,rkpd->rkmd", gamma, atom_coords_rk) / row_mass.unsqueeze(-1)
+        r_new, scale_new, t_new = _batched_weighted_similarity_fit_rk_torch(
+            u_rkm,
+            target_bary,
+            row_mass,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            min_scale=min_scale,
+            max_scale=max_scale,
+        )
+        # Reset any NaN/Inf transforms to identity so we don't poison subsequent iters.
+        bad = ~torch.isfinite(r_new).all(dim=(-1, -2)) | ~torch.isfinite(scale_new) | ~torch.isfinite(t_new).all(dim=-1)
+        if bool(bad.any().item()):
+            r_new = torch.where(bad.unsqueeze(-1).unsqueeze(-1), identity_r, r_new)
+            scale_new = torch.where(bad, torch.ones_like(scale_new), scale_new)
+            t_new = torch.where(bad.unsqueeze(-1), torch.zeros_like(t_new), t_new)
+        r_mat, scale_t, t_t = r_new, scale_new, t_new
+
+    u_aligned = _apply_similarity_rk_torch(u_rkm, r_mat, scale_t, t_t)
+    cx = torch.cdist(u_aligned.reshape(R * K, m, u_aligned.shape[-1]), atom_coords_rk.reshape(R * K, p, u_aligned.shape[-1]), p=2).pow(2).reshape(R, K, m, p) / sx
+    cost = float(lambda_x) * cx + cy_scaled
+    _gamma, obj, _reg = _solve(cost)
+
+    penalty = float(scale_penalty) * torch.log(scale_t.clamp_min(1e-12)).pow(2) + float(shift_penalty) * (t_t * t_t).sum(dim=-1)
+    total = obj + penalty
+    total = torch.where(torch.isfinite(total), total, torch.full_like(total, 1e12))
+    return total.detach().cpu().numpy().astype(np.float32)
+
+
+def _compute_assigned_artifacts_r_gpu(
+    measures: list[SubregionMeasure],
+    labels: np.ndarray,
+    atom_coords: np.ndarray,
+    atom_features: np.ndarray,
+    betas: np.ndarray,
+    lambda_x: float,
+    lambda_y: float,
+    eps: float,
+    rho: float,
+    align_iters: int,
+    allow_reflection: bool,
+    allow_scale: bool,
+    cost_scale_x: float,
+    cost_scale_y: float,
+    min_scale: float,
+    max_scale: float,
+    scale_penalty: float,
+    shift_penalty: float,
+    compute_device: torch.device,
+) -> tuple[list[np.ndarray], list[dict[str, np.ndarray | float]], list[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
+    """Fully batched (over R) aligned semirelaxed OT on GPU, returning per-subregion artifacts."""
+    dtype = torch.float32
+    dev = compute_device
+    R = len(measures)
+    label_idx = torch.as_tensor(np.asarray(labels, dtype=np.int64), dtype=torch.long, device=dev)
+    u_rm, y_rm, a_rm, m_r = _pack_measures_padded(measures, dtype=dtype, device=dev)
+    m = u_rm.shape[1]
+
+    atom_coords_t = torch.as_tensor(atom_coords, dtype=dtype, device=dev)          # (K, p, 2)
+    atom_features_t = torch.as_tensor(atom_features, dtype=dtype, device=dev)      # (K, p, f)
+    betas_np = np.stack([_normalize_hist(b) for b in betas], axis=0)
+    beta_k = torch.as_tensor(betas_np, dtype=dtype, device=dev)                    # (K, p)
+
+    # Gather per-r atoms using labels
+    atom_coords_r = atom_coords_t[label_idx]       # (R, p, 2)
+    atom_features_r = atom_features_t[label_idx]   # (R, p, f)
+    beta_r = beta_k[label_idx]                     # (R, p)
+
+    p = atom_coords_r.shape[1]
+    sx = max(float(cost_scale_x), 1e-12)
+    sy = max(float(cost_scale_y), 1e-12)
+    cy_full = torch.cdist(y_rm, atom_features_r, p=2).pow(2) / sy
+    cy_scaled = float(lambda_y) * cy_full
+
+    r_mat = torch.eye(2, device=dev, dtype=dtype).expand(R, 2, 2).contiguous()
+    scale_t = torch.ones(R, device=dev, dtype=dtype)
+    t_t = torch.zeros(R, 2, device=dev, dtype=dtype)
+
+    eps_base = max(float(eps), 1e-5)
+    reg_schedule = (eps_base, 2.0 * eps_base, 4.0 * eps_base, 8.0 * eps_base)
+    rho_val = max(float(rho), 1e-6)
+
+    def _solve(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        last_gamma = None
+        last_obj = None
+        eff_reg = torch.full((R,), reg_schedule[0], dtype=dtype, device=dev)
+        converged_all = torch.zeros(R, dtype=torch.bool, device=dev)
+        for reg in reg_schedule:
+            gamma, obj, _conv, _err = sinkhorn_semirelaxed_unbalanced_log_torch(
+                a_rm,
+                beta_r,
+                cost,
+                eps=reg,
+                rho=rho_val,
+                num_iter=600,
+                tol=1e-5,
+            )
+            finite = torch.isfinite(gamma).all(dim=(-1, -2)) & torch.isfinite(obj)
+            if last_gamma is None:
+                last_gamma = gamma.clone()
+                last_obj = obj.clone()
+                converged_all = finite.clone()
+                eff_reg = torch.full_like(obj, reg)
+            update = finite & ~converged_all
+            if update.any():
+                last_gamma = torch.where(update.unsqueeze(-1).unsqueeze(-1), gamma, last_gamma)
+                last_obj = torch.where(update, obj, last_obj)
+                eff_reg = torch.where(update, torch.full_like(eff_reg, reg), eff_reg)
+                converged_all = converged_all | update
+            if bool(converged_all.all().item()):
+                break
+        if last_gamma is None:
+            raise FloatingPointError("GPU batched-R Sinkhorn failed")
+        return last_gamma, last_obj, eff_reg
+
+    # R-wise barycentric alignment
+    identity_r = torch.eye(2, device=dev, dtype=dtype).expand(R, 2, 2).contiguous()
+    for _ in range(max(int(align_iters), 1)):
+        u_aligned = scale_t.unsqueeze(-1).unsqueeze(-1) * torch.einsum("rmi,rij->rmj", u_rm, r_mat) + t_t.unsqueeze(-2)
+        cx = torch.cdist(u_aligned, atom_coords_r, p=2).pow(2) / sx
+        cost = float(lambda_x) * cx + cy_scaled
+        gamma, _obj, _reg = _solve(cost)
+        gamma = torch.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0)
+        row_mass = gamma.sum(dim=-1).clamp_min(1e-12)
+        target_bary = torch.einsum("rmp,rpd->rmd", gamma, atom_coords_r) / row_mass.unsqueeze(-1)
+        # Batched weighted similarity fit over R (2D).
+        w_sum = row_mass.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        w_norm = row_mass / w_sum
+        xbar = (w_norm.unsqueeze(-1) * u_rm).sum(dim=-2)
+        ybar = (w_norm.unsqueeze(-1) * target_bary).sum(dim=-2)
+        x0 = u_rm - xbar.unsqueeze(-2)
+        y0 = target_bary - ybar.unsqueeze(-2)
+        h = torch.einsum("rmi,rmj->rij", x0, w_norm.unsqueeze(-1) * y0)
+        u_svd, _s, vt = torch.linalg.svd(h)
+        if not allow_reflection:
+            det = torch.linalg.det(u_svd @ vt)
+            d = torch.eye(2, device=dev, dtype=dtype).expand(R, 2, 2).contiguous()
+            neg = det < 0
+            if torch.any(neg):
+                d = d.clone()
+                fix = torch.where(neg, torch.full_like(det, -1.0), torch.full_like(det, 1.0))
+                d[..., -1, -1] = fix
+            r_new = u_svd @ d @ vt
+        else:
+            r_new = u_svd @ vt
+        if allow_scale:
+            denom = (w_norm * (x0 ** 2).sum(dim=-1)).sum(dim=-1).clamp_min(1e-12)
+            trace = torch.einsum("rij,rij->r", r_new, h)
+            scale_new = (trace / denom).clamp_min(1e-12)
+        else:
+            scale_new = torch.ones(R, device=dev, dtype=dtype)
+        scale_new = scale_new.clamp(min=float(min_scale), max=float(max_scale))
+        xbar_r = torch.einsum("ri,rij->rj", xbar, r_new)
+        t_new = ybar - scale_new.unsqueeze(-1) * xbar_r
+        bad = ~torch.isfinite(r_new).all(dim=(-1, -2)) | ~torch.isfinite(scale_new) | ~torch.isfinite(t_new).all(dim=-1)
+        if bool(bad.any().item()):
+            r_new = torch.where(bad.unsqueeze(-1).unsqueeze(-1), identity_r, r_new)
+            scale_new = torch.where(bad, torch.ones_like(scale_new), scale_new)
+            t_new = torch.where(bad.unsqueeze(-1), torch.zeros_like(t_new), t_new)
+        r_mat, scale_t, t_t = r_new, scale_new, t_new
+
+    # Final solve
+    u_aligned = scale_t.unsqueeze(-1).unsqueeze(-1) * torch.einsum("rmi,rij->rmj", u_rm, r_mat) + t_t.unsqueeze(-2)
+    cx = torch.cdist(u_aligned, atom_coords_r, p=2).pow(2) / sx
+    cost = float(lambda_x) * cx + cy_scaled
+    gamma, obj, eff_reg = _solve(cost)
+    gamma = torch.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0)
+    col_mass = gamma.sum(dim=-2)                        # (R, p)
+    theta = col_mass / col_mass.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+
+    penalty = float(scale_penalty) * torch.log(scale_t.clamp_min(1e-12)).pow(2) + float(shift_penalty) * (t_t * t_t).sum(dim=-1)
+    total = obj + penalty
+    total = torch.where(torch.isfinite(total), total, torch.full_like(total, 1e12))
+
+    # Move to CPU once
+    gamma_np = gamma.detach().cpu().numpy()
+    r_np = r_mat.detach().cpu().numpy()
+    scale_np = scale_t.detach().cpu().numpy()
+    t_np = t_t.detach().cpu().numpy()
+    theta_np = theta.detach().cpu().numpy()
+    total_np = total.detach().cpu().numpy().astype(np.float32)
+    eff_reg_np = eff_reg.detach().cpu().numpy().astype(np.float32)
+    m_r_np = m_r.detach().cpu().numpy()
+
+    plans: list[np.ndarray] = []
+    transforms: list[dict[str, np.ndarray | float]] = []
+    thetas: list[np.ndarray] = []
+    used_fallback_np = ~np.isclose(eff_reg_np, float(eps_base))
+    for r in range(R):
+        mr = int(m_r_np[r])
+        plans.append(gamma_np[r, :mr, :].astype(np.float32))
+        transforms.append({
+            "R": r_np[r].astype(np.float64),
+            "scale": float(scale_np[r]),
+            "t": t_np[r].astype(np.float64),
+        })
+        thetas.append(theta_np[r].astype(np.float32))
+    return plans, transforms, thetas, total_np, eff_reg_np, used_fallback_np.astype(bool)
 
 
 def _ensure_nonempty_clusters(labels: np.ndarray, costs: np.ndarray, n_clusters: int) -> tuple[np.ndarray, np.ndarray]:
@@ -517,6 +1144,30 @@ def _compute_assignment_costs(
     n_subregions = len(measures)
     n_clusters = atom_coords.shape[0]
     costs = np.zeros((n_subregions, n_clusters), dtype=np.float64)
+
+    if compute_device.type == "cuda":
+        # Fully batched (R*K) GPU solve — amortizes kernel launch latency.
+        costs_rk = _compute_assignment_costs_rk_gpu(
+            measures=measures,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            betas=betas,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            eps=eps,
+            rho=rho,
+            align_iters=align_iters,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            scale_penalty=scale_penalty,
+            shift_penalty=shift_penalty,
+            compute_device=compute_device,
+        )
+        return np.clip(costs_rk, -1e12, 1e12).astype(np.float32)
 
     for r, measure in enumerate(measures):
         for k in range(n_clusters):
@@ -567,6 +1218,28 @@ def _compute_assigned_artifacts(
     shift_penalty: float,
     compute_device: torch.device,
 ) -> tuple[list[np.ndarray], list[dict[str, np.ndarray | float]], list[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
+    if compute_device.type == "cuda":
+        return _compute_assigned_artifacts_r_gpu(
+            measures=measures,
+            labels=labels,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            betas=betas,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            eps=eps,
+            rho=rho,
+            align_iters=align_iters,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            scale_penalty=scale_penalty,
+            shift_penalty=shift_penalty,
+            compute_device=compute_device,
+        )
     plans: list[np.ndarray] = []
     transforms: list[dict[str, np.ndarray | float]] = []
     thetas: list[np.ndarray] = []
@@ -689,12 +1362,27 @@ def _cell_cluster_feature_costs(
 ) -> np.ndarray:
     n_cells = features.shape[0]
     n_clusters = support_features.shape[0]
+    temp = max(float(temperature), 1e-5)
+    if compute_device.type == "cuda" and n_cells > 0 and n_clusters > 0:
+        dtype = torch.float32
+        feats_t = torch.as_tensor(features, dtype=dtype, device=compute_device)
+        support_t = torch.as_tensor(support_features, dtype=dtype, device=compute_device)
+        weights_t = torch.as_tensor(np.clip(prototype_weights, 1e-8, None), dtype=dtype, device=compute_device)
+        costs_t = torch.empty((n_cells, n_clusters), dtype=dtype, device=compute_device)
+        batch = max(1, min(n_cells, 65536 // max(n_clusters, 1)))
+        with torch.inference_mode():
+            for start in range(0, n_cells, batch):
+                f_chunk = feats_t[start : start + batch].unsqueeze(0).expand(n_clusters, -1, -1)
+                dist = torch.cdist(f_chunk, support_t, p=2).pow(2)                     # (K, B, p)
+                scaled = torch.exp(-dist / temp) * weights_t.unsqueeze(1)              # (K, B, p)
+                costs_t[start : start + batch] = (-temp * torch.log(scaled.sum(dim=-1).clamp_min(1e-8))).transpose(0, 1)
+        return costs_t.detach().cpu().numpy().astype(np.float32)
     costs = np.zeros((n_cells, n_clusters), dtype=np.float32)
     for k in range(n_clusters):
         dist = _pairwise_sqdist_array(features, support_features[k], device=compute_device)
         weights = np.clip(prototype_weights[k], 1e-8, None).astype(np.float32)
-        scores = np.exp(-dist / max(float(temperature), 1e-5)) * weights[None, :]
-        costs[:, k] = -max(float(temperature), 1e-5) * np.log(np.maximum(scores.sum(axis=1), 1e-8))
+        scores = np.exp(-dist / temp) * weights[None, :]
+        costs[:, k] = -temp * np.log(np.maximum(scores.sum(axis=1), 1e-8))
     return costs
 
 
@@ -803,7 +1491,7 @@ def fit_multilevel_ot(
     tol: float = 1e-4,
     basic_niche_size_um: float | None = 200.0,
     seed: int = 1337,
-    compute_device: str = "auto",
+    compute_device: str = "cuda",
 ) -> MultilevelOTResult:
     features = np.asarray(features, dtype=np.float32)
     coords_um = np.asarray(coords_um, dtype=np.float32)
@@ -917,6 +1605,7 @@ def fit_multilevel_ot(
         lambda_y=lambda_y,
         seed=seed,
         allow_convex_hull_fallback=allow_convex_hull_fallback,
+        compute_device=resolved_compute_device,
     )
 
     summaries = np.vstack([_measure_summary(m) for m in measures])

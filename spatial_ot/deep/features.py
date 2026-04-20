@@ -19,7 +19,10 @@ from .losses import decorrelation_loss, edge_contrastive_loss, variance_loss
 def _resolve_device(device: str) -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device)
+    resolved = torch.device(device)
+    if resolved.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested for deep features, but torch.cuda.is_available() is False.")
+    return resolved
 
 
 def _standardize_features(features: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

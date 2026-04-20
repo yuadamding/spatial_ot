@@ -28,7 +28,7 @@ allow_convex_hull_fallback = false
 max_iter = 10
 tol = 1e-4
 seed = 1337
-compute_device = "auto"
+compute_device = "cuda"
 
 [deep]
 method = "graph_autoencoder"
@@ -48,7 +48,7 @@ learning_rate = 0.001
 weight_decay = 0.0001
 validation = "spatial_block"
 validation_context_mode = "inductive"
-device = "auto"
+device = "cuda"
 reconstruction_weight = 1.0
 context_weight = 0.5
 contrastive_weight = 0.1
