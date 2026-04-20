@@ -225,6 +225,7 @@ def _resolve_deep_fit_config_from_args(args: argparse.Namespace) -> tuple[Multil
     _set_if_not_none(config.paths, "feature_obsm_key", args.feature_obsm_key)
     _set_if_not_none(config.paths, "spatial_x_key", args.spatial_x_key)
     _set_if_not_none(config.paths, "spatial_y_key", args.spatial_y_key)
+    _set_if_not_none(config.paths, "spatial_scale", args.spatial_scale)
 
     deep_mapping = {
         "deep_feature_method": "method",

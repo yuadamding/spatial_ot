@@ -132,9 +132,14 @@ def build_composite_subregions_from_basic_niches(
     )
 
     if radius_um <= basic_niche_radius_um + 1e-6:
-        subregion_centers_um = basic_centers_um.astype(np.float32, copy=True)
-        subregion_members = [np.asarray(members, dtype=np.int32) for members in basic_members]
-        subregion_basic_niche_ids = [np.asarray([idx], dtype=np.int32) for idx in range(len(basic_members))]
+        kept_idx = [idx for idx, members in enumerate(basic_members) if np.asarray(members).size >= min_cells]
+        if not kept_idx:
+            raise RuntimeError(
+                "No valid basic niches were created; lower min_cells, decrease basic_niche_size_um, or increase the radius."
+            )
+        subregion_centers_um = basic_centers_um[np.asarray(kept_idx, dtype=np.int32)].astype(np.float32, copy=True)
+        subregion_members = [np.asarray(basic_members[idx], dtype=np.int32) for idx in kept_idx]
+        subregion_basic_niche_ids = [np.asarray([idx], dtype=np.int32) for idx in kept_idx]
         if max_subregions > 0 and subregion_centers_um.shape[0] > max_subregions:
             keep_idx = _subsample_grid_points(subregion_centers_um, target=max_subregions)
             subregion_centers_um = subregion_centers_um[keep_idx]

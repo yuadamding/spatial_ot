@@ -74,6 +74,27 @@ def test_composite_subregions_are_unions_of_basic_niches() -> None:
         assert len(niche_ids) >= 1
 
 
+def test_basic_niche_subregions_still_respect_min_cells() -> None:
+    dense_xs, dense_ys = np.meshgrid(np.arange(0.0, 120.0, 20.0), np.arange(0.0, 120.0, 20.0))
+    sparse = np.array([[260.0, 0.0], [280.0, 0.0]], dtype=np.float32)
+    coords = np.vstack([np.column_stack([dense_xs.reshape(-1), dense_ys.reshape(-1)]), sparse]).astype(np.float32)
+
+    subregion_centers, subregion_members, basic_centers, basic_members, subregion_basic_niche_ids = (
+        build_composite_subregions_from_basic_niches(
+            coords_um=coords,
+            radius_um=100.0,
+            stride_um=200.0,
+            min_cells=5,
+            max_subregions=16,
+            basic_niche_size_um=200.0,
+        )
+    )
+    assert basic_centers.shape[0] >= 2
+    assert any(len(members) < 5 for members in basic_members)
+    assert all(len(members) >= 5 for members in subregion_members)
+    assert all(len(niche_ids) == 1 for niche_ids in subregion_basic_niche_ids)
+
+
 def test_multilevel_ot_recovers_two_subregion_families() -> None:
     rng = np.random.default_rng(1337)
     group_centers = np.array(

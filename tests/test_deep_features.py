@@ -7,6 +7,7 @@ import anndata as ad
 import numpy as np
 import pytest
 
+from spatial_ot.cli import _resolve_deep_fit_config_from_args, build_parser
 from spatial_ot.config import DeepFeatureConfig, load_multilevel_config
 from spatial_ot.deep.graph import build_neighbor_graph
 from spatial_ot.deep_features import (
@@ -505,6 +506,56 @@ count_layer = "counts"
     )
     with pytest.raises(NotImplementedError):
         load_multilevel_config(config_path)
+
+
+def test_deep_fit_cli_spatial_scale_overrides_config(tmp_path) -> None:
+    config_path = tmp_path / "deep_fit_cli.toml"
+    config_path.write_text(
+        """
+[paths]
+input_h5ad = "input.h5ad"
+output_dir = "outputs/run"
+feature_obsm_key = "X_pca"
+spatial_scale = 1.0
+"""
+    )
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "deep-fit",
+            "--config",
+            str(config_path),
+            "--input-h5ad",
+            "cells.h5ad",
+            "--output-dir",
+            "out",
+            "--feature-obsm-key",
+            "X_pca",
+            "--spatial-scale",
+            "2.0",
+        ]
+    )
+    config, _ = _resolve_deep_fit_config_from_args(args)
+    assert config.paths.spatial_scale == 2.0
+
+
+def test_basic_niche_zero_in_toml_disables_composition(tmp_path) -> None:
+    config_path = tmp_path / "basic_niche_zero.toml"
+    config_path.write_text(
+        """
+[paths]
+input_h5ad = "input.h5ad"
+output_dir = "outputs/run"
+feature_obsm_key = "X_pca"
+
+[ot]
+n_clusters = 2
+atoms_per_cluster = 2
+basic_niche_size_um = 0
+"""
+    )
+    config = load_multilevel_config(config_path)
+    assert config.ot.basic_niche_size_um is None
 
 
 def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
