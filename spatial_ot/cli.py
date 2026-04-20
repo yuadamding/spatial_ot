@@ -73,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     deep_fit.add_argument("--feature-obsm-key", help="obsm key containing the feature embedding used as input to the deep encoder.")
     deep_fit.add_argument("--spatial-x-key", default=None, help="obs key for the x coordinate.")
     deep_fit.add_argument("--spatial-y-key", default=None, help="obs key for the y coordinate.")
+    deep_fit.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value before building deep graph neighborhoods.")
     deep_fit.add_argument("--seed", type=int, default=None, help="Random seed.")
     _add_deep_args(deep_fit)
 
@@ -86,6 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     deep_transform.add_argument("--feature-obsm-key", required=True, help="obsm key containing the input feature embedding.")
     deep_transform.add_argument("--spatial-x-key", default="cell_x", help="obs key for the x coordinate.")
     deep_transform.add_argument("--spatial-y-key", default="cell_y", help="obs key for the y coordinate.")
+    deep_transform.add_argument("--spatial-scale", type=float, default=1.0, help="Multiply spatial coordinates by this value before building deep graph neighborhoods.")
     deep_transform.add_argument("--output-obsm-key", default=None, help="Optional obsm key for the transformed embedding.")
     deep_transform.add_argument("--batch-size", type=int, default=None, help="Optional transform batch size for non-graph encoders.")
 
@@ -105,6 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--atoms-per-cluster", type=int, default=None, help="Number of shared atoms per cluster.")
     multilevel.add_argument("--radius-um", type=float, default=None, help="Subregion radius in microns.")
     multilevel.add_argument("--stride-um", type=float, default=None, help="Subregion center stride in microns.")
+    multilevel.add_argument("--basic-niche-size-um", type=float, default=None, help="Diameter in microns for the smallest basic niche blocks used to compose grid-built subregions. Set to 0 to disable niche composition.")
     multilevel.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
     multilevel.add_argument("--max-subregions", type=int, default=None, help="Maximum number of subregions to retain after grid construction.")
     multilevel.add_argument("--lambda-x", type=float, default=None, help="Weight on canonical spatial coordinates in the OT cost.")
@@ -143,6 +146,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
     _set_if_not_none(config.paths, "feature_obsm_key", args.feature_obsm_key)
     _set_if_not_none(config.paths, "spatial_x_key", args.spatial_x_key)
     _set_if_not_none(config.paths, "spatial_y_key", args.spatial_y_key)
+    _set_if_not_none(config.paths, "spatial_scale", args.spatial_scale)
     _set_if_not_none(config.paths, "region_obs_key", args.region_obs_key)
     _set_if_not_none(config.paths, "spatial_scale", args.spatial_scale)
 
@@ -151,6 +155,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "atoms_per_cluster",
         "radius_um",
         "stride_um",
+        "basic_niche_size_um",
         "min_cells",
         "max_subregions",
         "lambda_x",
@@ -176,6 +181,8 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
     ]:
         attr = "allow_convex_hull_fallback" if name == "allow_observed_hull_geometry" else name
         _set_if_not_none(config.ot, attr, getattr(args, name))
+    if config.ot.basic_niche_size_um is not None and float(config.ot.basic_niche_size_um) <= 0:
+        config.ot.basic_niche_size_um = None
 
     deep_mapping = {
         "deep_feature_method": "method",
@@ -282,6 +289,7 @@ def main() -> None:
             feature_obsm_key=config.paths.feature_obsm_key,
             spatial_x_key=config.paths.spatial_x_key,
             spatial_y_key=config.paths.spatial_y_key,
+            spatial_scale=config.paths.spatial_scale,
             config=config.deep,
             seed=seed,
         )
@@ -294,6 +302,7 @@ def main() -> None:
             feature_obsm_key=args.feature_obsm_key,
             spatial_x_key=args.spatial_x_key,
             spatial_y_key=args.spatial_y_key,
+            spatial_scale=args.spatial_scale,
             output_obsm_key=args.output_obsm_key,
             batch_size=args.batch_size,
         )

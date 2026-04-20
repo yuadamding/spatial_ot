@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spatial-ot"
-version = "0.0.10"
+version = "0.0.11"
 description = "Spatial OT research package with multilevel, shape-normalized semi-relaxed Wasserstein clustering utilities."
 readme = "README.md"
 requires-python = ">=3.11"

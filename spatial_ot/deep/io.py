@@ -46,6 +46,7 @@ def _extract_features_and_coords(
     feature_obsm_key: str,
     spatial_x_key: str,
     spatial_y_key: str,
+    spatial_scale: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     if feature_obsm_key not in adata.obsm:
         raise KeyError(f"Feature obsm key '{feature_obsm_key}' not found in the input H5AD.")
@@ -58,7 +59,7 @@ def _extract_features_and_coords(
             np.asarray(adata.obs[spatial_y_key], dtype=np.float32),
         ],
         axis=1,
-    )
+    ) * float(spatial_scale)
     return features, coords_um
 
 
@@ -67,13 +68,15 @@ def _feature_schema_extra(
     feature_obsm_key: str,
     spatial_x_key: str,
     spatial_y_key: str,
+    spatial_scale: float,
 ) -> dict:
     return {
         "input_mode": "obsm",
         "input_obsm_key": str(feature_obsm_key),
         "coordinate_keys": [str(spatial_x_key), str(spatial_y_key)],
         "preprocessing": "train_only_standardization",
-        "spatial_units": "um",
+        "spatial_scale": float(spatial_scale),
+        "spatial_units_after_scaling": "um",
     }
 
 
@@ -134,6 +137,7 @@ def fit_deep_features_on_h5ad(
     feature_obsm_key: str,
     spatial_x_key: str,
     spatial_y_key: str,
+    spatial_scale: float,
     config: DeepFeatureConfig,
     seed: int = 1337,
 ) -> dict:
@@ -149,6 +153,7 @@ def fit_deep_features_on_h5ad(
         feature_obsm_key=feature_obsm_key,
         spatial_x_key=spatial_x_key,
         spatial_y_key=spatial_y_key,
+        spatial_scale=spatial_scale,
     )
     batch = None
     if config.batch_key is not None:
@@ -168,6 +173,7 @@ def fit_deep_features_on_h5ad(
             feature_obsm_key=feature_obsm_key,
             spatial_x_key=spatial_x_key,
             spatial_y_key=spatial_y_key,
+            spatial_scale=spatial_scale,
         ),
     )
     output_obsm_key = config.output_obsm_key
@@ -217,6 +223,7 @@ def fit_deep_features_on_h5ad(
         "output_obsm_key": output_obsm_key,
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,
+        "spatial_scale": float(spatial_scale),
         "n_cells": int(adata.n_obs),
         "feature_dim": int(features.shape[1]),
         "deep_features": deep_summary,
@@ -241,6 +248,7 @@ def transform_h5ad_with_deep_model(
     feature_obsm_key: str,
     spatial_x_key: str,
     spatial_y_key: str,
+    spatial_scale: float,
     output_obsm_key: str | None = None,
     batch_size: int | None = None,
 ) -> dict:
@@ -256,8 +264,13 @@ def transform_h5ad_with_deep_model(
         feature_obsm_key=feature_obsm_key,
         spatial_x_key=spatial_x_key,
         spatial_y_key=spatial_y_key,
+        spatial_scale=spatial_scale,
     )
-    encoder._validate_transform_schema(input_obsm_key=feature_obsm_key)
+    encoder._validate_transform_schema(
+        input_obsm_key=feature_obsm_key,
+        coordinate_keys=(spatial_x_key, spatial_y_key),
+        spatial_scale=spatial_scale,
+    )
     resolved_output_obsm_key = output_obsm_key or encoder.config.output_obsm_key
     embedding = encoder.transform(features=features, coords_um=coords_um, batch_size=batch_size)
     adata.obsm[resolved_output_obsm_key] = np.asarray(embedding, dtype=np.float32)
@@ -289,6 +302,7 @@ def transform_h5ad_with_deep_model(
         "output_obsm_key": resolved_output_obsm_key,
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,
+        "spatial_scale": float(spatial_scale),
         "n_cells": int(adata.n_obs),
         "feature_dim": int(features.shape[1]),
         "deep_features": deep_summary,

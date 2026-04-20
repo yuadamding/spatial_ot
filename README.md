@@ -88,7 +88,7 @@ Current deep-path capability snapshot:
 | Capability | Status |
 | --- | --- |
 | `autoencoder` | implemented |
-| `graph_autoencoder` | implemented |
+| `graph_autoencoder` | implemented, full-batch only |
 | graph density cap via `graph_max_neighbors` | implemented |
 | deep-only `fit` / `transform` lifecycle | implemented |
 | mini-batch graph training | not implemented |
@@ -131,6 +131,7 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --atoms-per-cluster 8 \
   --radius-um 100 \
   --stride-um 150 \
+  --basic-niche-size-um 200 \
   --min-cells 20 \
   --max-subregions 2000 \
   --lambda-x 0.5 \
@@ -161,6 +162,7 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --atoms-per-cluster 8 \
   --radius-um 100 \
   --stride-um 150 \
+  --basic-niche-size-um 200 \
   --min-cells 20 \
   --max-subregions 2000 \
   --allow-observed-hull-geometry
@@ -193,7 +195,8 @@ conda run -n ml1 python -m spatial_ot deep-fit \
   --config configs/multilevel_deep_example.toml \
   --input-h5ad ../data/cells.h5ad \
   --output-dir ../work/spatial_ot_runs/deep_encoder_only \
-  --feature-obsm-key X_pca
+  --feature-obsm-key X_pca \
+  --spatial-scale 1.0
 ```
 
 That writes:
@@ -214,8 +217,13 @@ conda run -n ml1 python -m spatial_ot deep-transform \
   --output-h5ad ../work/spatial_ot_runs/deep_encoder_only/new_cells_embedded.h5ad \
   --feature-obsm-key X_pca \
   --spatial-x-key cell_x \
-  --spatial-y-key cell_y
+  --spatial-y-key cell_y \
+  --spatial-scale 1.0
 ```
+
+For graph-based deep runs, `spatial_scale` matters: graph radii such as `radius_um`, `short_radius_um`, and `mid_radius_um` are interpreted after applying that scale, so pixel-space coordinates should be converted to microns before training or transform.
+
+For grid-built multilevel OT runs, `basic_niche_size_um` sets the smallest building block used to compose larger subregions. The current default active-path recommendation is a `200 µm` basic niche diameter.
 
 Key artifacts from this path:
 

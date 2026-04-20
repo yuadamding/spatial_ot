@@ -20,6 +20,7 @@ from spatial_ot.multilevel_ot import (
     weighted_similarity_fit,
     sample_geometry_points,
     build_subregions,
+    build_composite_subregions_from_basic_niches,
     fit_multilevel_ot,
     fit_ot_shape_normalizer,
     make_reference_points_unit_disk,
@@ -49,6 +50,28 @@ def test_build_subregions_respects_min_cells() -> None:
     )
     assert centers.shape[0] >= 2
     assert all(len(m) >= 3 for m in members)
+
+
+def test_composite_subregions_are_unions_of_basic_niches() -> None:
+    xs, ys = np.meshgrid(np.arange(0.0, 600.0, 20.0), np.arange(0.0, 600.0, 20.0))
+    coords = np.column_stack([xs.reshape(-1), ys.reshape(-1)]).astype(np.float32)
+    subregion_centers, subregion_members, basic_centers, basic_members, subregion_basic_niche_ids = (
+        build_composite_subregions_from_basic_niches(
+            coords_um=coords,
+            radius_um=240.0,
+            stride_um=200.0,
+            min_cells=5,
+            max_subregions=32,
+            basic_niche_size_um=200.0,
+        )
+    )
+    assert basic_centers.shape[0] >= 4
+    assert len(subregion_members) == len(subregion_basic_niche_ids)
+    assert len(subregion_members) == subregion_centers.shape[0]
+    for members, niche_ids in zip(subregion_members, subregion_basic_niche_ids, strict=False):
+        expected = np.unique(np.concatenate([basic_members[int(niche_id)] for niche_id in niche_ids.tolist()]))
+        assert np.array_equal(np.sort(members), np.sort(expected))
+        assert len(niche_ids) >= 1
 
 
 def test_multilevel_ot_recovers_two_subregion_families() -> None:
@@ -109,6 +132,7 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
         allow_convex_hull_fallback=True,
         max_iter=8,
         tol=1e-4,
+        basic_niche_size_um=None,
         seed=1337,
         compute_device="cpu",
     )
@@ -417,6 +441,7 @@ def test_returned_costs_match_returned_atoms() -> None:
         allow_convex_hull_fallback=True,
         max_iter=3,
         tol=1e-4,
+        basic_niche_size_um=None,
         seed=7,
         compute_device="cpu",
     )
@@ -509,6 +534,7 @@ def test_fit_requires_explicit_fallback_flag_for_observed_hull_geometry() -> Non
             allow_scale=False,
             max_iter=1,
             tol=1e-4,
+            basic_niche_size_um=None,
             seed=0,
             compute_device="cpu",
         )
@@ -563,6 +589,7 @@ def test_multilevel_ot_cuda_smoke_if_available() -> None:
         allow_convex_hull_fallback=True,
         max_iter=2,
         tol=1e-4,
+        basic_niche_size_um=None,
         seed=21,
         compute_device="cuda",
     )

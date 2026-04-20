@@ -14,6 +14,7 @@ from .geometry import (
     _standardize_features,
     _validate_fit_inputs,
     build_subregions,
+    build_composite_subregions_from_basic_niches,
     fit_ot_shape_normalizer,
     make_reference_points_unit_disk,
     sample_geometry_points,
@@ -800,6 +801,7 @@ def fit_multilevel_ot(
     allow_convex_hull_fallback: bool = False,
     max_iter: int = 10,
     tol: float = 1e-4,
+    basic_niche_size_um: float | None = 200.0,
     seed: int = 1337,
     compute_device: str = "auto",
 ) -> MultilevelOTResult:
@@ -813,6 +815,7 @@ def fit_multilevel_ot(
         atoms_per_cluster=atoms_per_cluster,
         radius_um=radius_um,
         stride_um=stride_um,
+        basic_niche_size_um=basic_niche_size_um,
         min_cells=min_cells,
         max_subregions=max_subregions,
         lambda_x=lambda_x,
@@ -831,9 +834,14 @@ def fit_multilevel_ot(
     )
 
     features = _standardize_features(features)
+    used_basic_niches = False
+    basic_niche_centers_um = np.zeros((0, 2), dtype=np.float32)
+    basic_niche_members: list[np.ndarray] = []
+    subregion_basic_niche_ids: list[np.ndarray] = []
     if subregion_members is None:
         if region_geometries is not None:
             subregion_members = [np.asarray(region.members, dtype=np.int32) for region in region_geometries]
+            subregion_basic_niche_ids = [np.asarray([], dtype=np.int32) for _ in subregion_members]
             if subregion_centers_um is None:
                 subregion_centers_um = np.vstack(
                     [
@@ -842,17 +850,36 @@ def fit_multilevel_ot(
                     ]
                 ).astype(np.float32)
         elif build_grid_subregions:
-            subregion_centers_um, subregion_members = build_subregions(
-                coords_um=coords_um,
-                radius_um=radius_um,
-                stride_um=stride_um,
-                min_cells=min_cells,
-                max_subregions=max_subregions,
-            )
+            if basic_niche_size_um is not None:
+                used_basic_niches = True
+                (
+                    subregion_centers_um,
+                    subregion_members,
+                    basic_niche_centers_um,
+                    basic_niche_members,
+                    subregion_basic_niche_ids,
+                ) = build_composite_subregions_from_basic_niches(
+                    coords_um=coords_um,
+                    radius_um=radius_um,
+                    stride_um=stride_um,
+                    min_cells=min_cells,
+                    max_subregions=max_subregions,
+                    basic_niche_size_um=float(basic_niche_size_um),
+                )
+            else:
+                subregion_centers_um, subregion_members = build_subregions(
+                    coords_um=coords_um,
+                    radius_um=radius_um,
+                    stride_um=stride_um,
+                    min_cells=min_cells,
+                    max_subregions=max_subregions,
+                )
+                subregion_basic_niche_ids = [np.asarray([], dtype=np.int32) for _ in subregion_members]
         else:
             raise ValueError("Explicit region_geometries or subregion_members are required when build_grid_subregions=False.")
     else:
         subregion_members = [np.asarray(members, dtype=np.int32) for members in subregion_members]
+        subregion_basic_niche_ids = [np.asarray([], dtype=np.int32) for _ in subregion_members]
         if subregion_centers_um is None:
             subregion_centers_um = np.vstack(
                 [
@@ -1102,6 +1129,10 @@ def fit_multilevel_ot(
     )
 
     return MultilevelOTResult(
+        basic_niche_size_um=float(basic_niche_size_um) if used_basic_niches and basic_niche_size_um is not None else None,
+        basic_niche_centers_um=basic_niche_centers_um.astype(np.float32),
+        basic_niche_members=[np.asarray(members, dtype=np.int32) for members in basic_niche_members],
+        subregion_basic_niche_ids=[np.asarray(niche_ids, dtype=np.int32) for niche_ids in subregion_basic_niche_ids],
         subregion_centers_um=centers_um.astype(np.float32),
         subregion_members=[m.members for m in measures],
         subregion_argmin_labels=argmin_labels_best.astype(np.int32),

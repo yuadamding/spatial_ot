@@ -63,6 +63,10 @@ class SubregionMeasure:
 
 @dataclass
 class MultilevelOTResult:
+    basic_niche_size_um: float | None
+    basic_niche_centers_um: np.ndarray
+    basic_niche_members: list[np.ndarray]
+    subregion_basic_niche_ids: list[np.ndarray]
     subregion_centers_um: np.ndarray
     subregion_members: list[np.ndarray]
     subregion_argmin_labels: np.ndarray

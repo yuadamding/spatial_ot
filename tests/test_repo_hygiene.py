@@ -11,6 +11,7 @@ def test_gitignore_covers_generated_artifacts() -> None:
         "__pycache__/",
         "*.pyc",
         ".pytest_cache/",
+        "work/",
         "*.h5ad",
         "*.pt",
         "*.npz",

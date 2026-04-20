@@ -18,6 +18,7 @@ SPATIAL_SCALE="${SPATIAL_SCALE:-0.2737012522439323}"
 N_CLUSTERS="${N_CLUSTERS:-8}"
 ATOMS_PER_CLUSTER="${ATOMS_PER_CLUSTER:-8}"
 COMPUTE_DEVICE="${COMPUTE_DEVICE:-auto}"
+BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-200}"
 ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"
 
 EXTRA_FLAGS=()
@@ -37,6 +38,7 @@ conda run -n ml1 python -m spatial_ot multilevel-ot \
   --atoms-per-cluster "$ATOMS_PER_CLUSTER" \
   --radius-um 100 \
   --stride-um 150 \
+  --basic-niche-size-um "$BASIC_NICHE_SIZE_UM" \
   --min-cells 20 \
   --max-subregions 2000 \
   --lambda-x 0.5 \

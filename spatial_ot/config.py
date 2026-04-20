@@ -120,6 +120,7 @@ class MultilevelOTConfig:
     atoms_per_cluster: int = 8
     radius_um: float = 100.0
     stride_um: float = 100.0
+    basic_niche_size_um: float | None = 200.0
     min_cells: int = 25
     max_subregions: int = 1500
     lambda_x: float = 0.5
@@ -261,6 +262,8 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.atoms_per_cluster must be at least 1")
     if config.ot.radius_um <= 0 or config.ot.stride_um <= 0:
         raise ValueError("ot.radius_um and ot.stride_um must be > 0")
+    if config.ot.basic_niche_size_um is not None and config.ot.basic_niche_size_um <= 0:
+        raise ValueError("ot.basic_niche_size_um must be > 0 when set")
     if config.ot.min_cells < 1:
         raise ValueError("ot.min_cells must be >= 1")
     if config.ot.max_subregions != 0 and config.ot.max_subregions < 1:

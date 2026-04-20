@@ -257,6 +257,7 @@ def test_fit_deep_features_on_h5ad_outputs_artifacts(tmp_path) -> None:
         feature_obsm_key="X_pca",
         spatial_x_key="cell_x",
         spatial_y_key="cell_y",
+        spatial_scale=2.0,
         config=DeepFeatureConfig(
             method="graph_autoencoder",
             latent_dim=3,
@@ -278,11 +279,15 @@ def test_fit_deep_features_on_h5ad_outputs_artifacts(tmp_path) -> None:
 
     assert summary["deep_features"]["method"] == "graph_autoencoder"
     assert summary["deep_features"]["graph_max_neighbors"] == 5
+    assert summary["spatial_scale"] == 2.0
     assert Path(summary["outputs"]["embedded_h5ad"]).exists()
     assert Path(summary["outputs"]["deep_feature_model"]).exists()
     saved = ad.read_h5ad(summary["outputs"]["embedded_h5ad"])
     assert "X_spatial_ot_deep" in saved.obsm
     assert saved.obsm["X_spatial_ot_deep"].shape == (32, 3)
+    assert saved.uns["deep_features"]["summary_json"]
+    saved_summary = json.loads(saved.uns["deep_features"]["summary_json"])
+    assert saved_summary["deep_features"]["feature_schema"]["spatial_scale"] == 2.0
 
 
 def test_transform_h5ad_with_deep_model_writes_embedding(tmp_path) -> None:
@@ -302,6 +307,7 @@ def test_transform_h5ad_with_deep_model_writes_embedding(tmp_path) -> None:
         feature_obsm_key="X_pca",
         spatial_x_key="cell_x",
         spatial_y_key="cell_y",
+        spatial_scale=1.0,
         config=DeepFeatureConfig(
             method="autoencoder",
             latent_dim=3,
@@ -332,6 +338,7 @@ def test_transform_h5ad_with_deep_model_writes_embedding(tmp_path) -> None:
         feature_obsm_key="X_pca",
         spatial_x_key="cell_x",
         spatial_y_key="cell_y",
+        spatial_scale=1.0,
         output_obsm_key="X_deep_test",
         batch_size=5,
     )
@@ -360,6 +367,7 @@ def test_transform_h5ad_with_deep_model_rejects_mismatched_input_obsm_key(tmp_pa
         feature_obsm_key="X_pca",
         spatial_x_key="cell_x",
         spatial_y_key="cell_y",
+        spatial_scale=1.0,
         config=DeepFeatureConfig(
             method="autoencoder",
             latent_dim=3,
@@ -389,6 +397,62 @@ def test_transform_h5ad_with_deep_model_rejects_mismatched_input_obsm_key(tmp_pa
             feature_obsm_key="X_other",
             spatial_x_key="cell_x",
             spatial_y_key="cell_y",
+            spatial_scale=1.0,
+        )
+
+
+def test_transform_h5ad_with_deep_model_rejects_spatial_scale_mismatch(tmp_path) -> None:
+    rng = np.random.default_rng(80)
+    features = rng.normal(size=(20, 4)).astype(np.float32)
+    coords = rng.normal(size=(20, 2)).astype(np.float32)
+    train = ad.AnnData(X=features.copy())
+    train.obsm["X_pca"] = features.copy()
+    train.obs["cell_x"] = coords[:, 0]
+    train.obs["cell_y"] = coords[:, 1]
+    train_h5ad = tmp_path / "train_scale.h5ad"
+    train.write_h5ad(train_h5ad)
+
+    fit_summary = fit_deep_features_on_h5ad(
+        input_h5ad=train_h5ad,
+        output_dir=tmp_path / "deep_model_scale",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=0.5,
+        config=DeepFeatureConfig(
+            method="graph_autoencoder",
+            latent_dim=3,
+            hidden_dim=12,
+            layers=1,
+            neighbor_k=3,
+            radius_um=1.0,
+            short_radius_um=0.75,
+            mid_radius_um=1.5,
+            graph_layers=1,
+            epochs=2,
+            batch_size=8,
+            validation="none",
+            save_model=True,
+        ),
+        seed=9,
+    )
+
+    new = ad.AnnData(X=features.copy())
+    new.obsm["X_pca"] = features.copy()
+    new.obs["cell_x"] = coords[:, 0]
+    new.obs["cell_y"] = coords[:, 1]
+    new_h5ad = tmp_path / "new_scale.h5ad"
+    new.write_h5ad(new_h5ad)
+
+    with pytest.raises(ValueError, match="Spatial scale mismatch"):
+        transform_h5ad_with_deep_model(
+            model_path=fit_summary["outputs"]["deep_feature_model"],
+            input_h5ad=new_h5ad,
+            output_h5ad=tmp_path / "new_scale_embedded.h5ad",
+            feature_obsm_key="X_pca",
+            spatial_x_key="cell_x",
+            spatial_y_key="cell_y",
+            spatial_scale=1.0,
         )
 
 
@@ -485,6 +549,7 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
         allow_convex_hull_fallback=True,
         max_iter=2,
         tol=1e-4,
+        basic_niche_size_um=None,
         seed=5,
         compute_device="cpu",
         deep_config=DeepFeatureConfig(

@@ -72,6 +72,14 @@ def _subsample_grid_points(points: np.ndarray, target: int) -> np.ndarray:
     return np.sort(selected[:target])
 
 
+def _grid_centers(coords_um: np.ndarray, stride_um: float) -> np.ndarray:
+    x = np.asarray(coords_um[:, 0], dtype=np.float32)
+    y = np.asarray(coords_um[:, 1], dtype=np.float32)
+    x_centers = np.arange(float(x.min()), float(x.max()) + stride_um, stride_um, dtype=np.float32)
+    y_centers = np.arange(float(y.min()), float(y.max()) + stride_um, stride_um, dtype=np.float32)
+    return np.stack(np.meshgrid(x_centers, y_centers), axis=-1).reshape(-1, 2).astype(np.float32)
+
+
 def build_subregions(
     coords_um: np.ndarray,
     radius_um: float,
@@ -79,11 +87,7 @@ def build_subregions(
     min_cells: int,
     max_subregions: int,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
-    x = coords_um[:, 0]
-    y = coords_um[:, 1]
-    x_centers = np.arange(float(x.min()), float(x.max()) + stride_um, stride_um, dtype=np.float32)
-    y_centers = np.arange(float(y.min()), float(y.max()) + stride_um, stride_um, dtype=np.float32)
-    centers = np.stack(np.meshgrid(x_centers, y_centers), axis=-1).reshape(-1, 2)
+    centers = _grid_centers(coords_um=coords_um, stride_um=stride_um)
 
     nn = NearestNeighbors(radius=radius_um, metric="euclidean")
     nn.fit(coords_um)
@@ -107,6 +111,90 @@ def build_subregions(
         kept_members = [kept_members[int(i)] for i in keep_idx.tolist()]
 
     return centers_arr, kept_members
+
+
+def build_composite_subregions_from_basic_niches(
+    coords_um: np.ndarray,
+    radius_um: float,
+    stride_um: float,
+    min_cells: int,
+    max_subregions: int,
+    basic_niche_size_um: float,
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
+    basic_niche_size_um = float(basic_niche_size_um)
+    basic_niche_radius_um = 0.5 * basic_niche_size_um
+    basic_centers_um, basic_members = build_subregions(
+        coords_um=coords_um,
+        radius_um=basic_niche_radius_um,
+        stride_um=basic_niche_size_um,
+        min_cells=1,
+        max_subregions=0,
+    )
+
+    if radius_um <= basic_niche_radius_um + 1e-6:
+        subregion_centers_um = basic_centers_um.astype(np.float32, copy=True)
+        subregion_members = [np.asarray(members, dtype=np.int32) for members in basic_members]
+        subregion_basic_niche_ids = [np.asarray([idx], dtype=np.int32) for idx in range(len(basic_members))]
+        if max_subregions > 0 and subregion_centers_um.shape[0] > max_subregions:
+            keep_idx = _subsample_grid_points(subregion_centers_um, target=max_subregions)
+            subregion_centers_um = subregion_centers_um[keep_idx]
+            subregion_members = [subregion_members[int(i)] for i in keep_idx.tolist()]
+            subregion_basic_niche_ids = [subregion_basic_niche_ids[int(i)] for i in keep_idx.tolist()]
+        return (
+            subregion_centers_um,
+            subregion_members,
+            basic_centers_um.astype(np.float32),
+            [np.asarray(members, dtype=np.int32) for members in basic_members],
+            subregion_basic_niche_ids,
+        )
+
+    candidate_centers_um = _grid_centers(coords_um=coords_um, stride_um=stride_um)
+    composite_radius_um = max(float(radius_um), basic_niche_radius_um)
+    niche_selection_radius_um = composite_radius_um + basic_niche_radius_um
+
+    nn = NearestNeighbors(radius=niche_selection_radius_um, metric="euclidean")
+    nn.fit(basic_centers_um)
+    niche_memberships = nn.radius_neighbors(candidate_centers_um, return_distance=False)
+
+    kept_centers: list[np.ndarray] = []
+    kept_members: list[np.ndarray] = []
+    kept_niche_ids: list[np.ndarray] = []
+    seen_niche_sets: set[tuple[int, ...]] = set()
+    for center_um, niche_ids in zip(candidate_centers_um, niche_memberships, strict=False):
+        if niche_ids.size == 0:
+            continue
+        niche_ids = np.asarray(np.unique(niche_ids), dtype=np.int32)
+        niche_key = tuple(int(x) for x in niche_ids.tolist())
+        if niche_key in seen_niche_sets:
+            continue
+        members = np.unique(np.concatenate([basic_members[int(niche_id)] for niche_id in niche_ids.tolist()])).astype(np.int32)
+        if members.size < min_cells:
+            continue
+        seen_niche_sets.add(niche_key)
+        kept_centers.append(np.asarray(center_um, dtype=np.float32))
+        kept_members.append(members)
+        kept_niche_ids.append(niche_ids)
+
+    if not kept_centers:
+        raise RuntimeError(
+            "No valid composite subregions were created from the basic niches; "
+            "lower min_cells, decrease basic_niche_size_um, or increase the radius."
+        )
+
+    subregion_centers_um = np.vstack(kept_centers).astype(np.float32)
+    if max_subregions > 0 and subregion_centers_um.shape[0] > max_subregions:
+        keep_idx = _subsample_grid_points(subregion_centers_um, target=max_subregions)
+        subregion_centers_um = subregion_centers_um[keep_idx]
+        kept_members = [kept_members[int(i)] for i in keep_idx.tolist()]
+        kept_niche_ids = [kept_niche_ids[int(i)] for i in keep_idx.tolist()]
+
+    return (
+        subregion_centers_um,
+        kept_members,
+        basic_centers_um.astype(np.float32),
+        [np.asarray(members, dtype=np.int32) for members in basic_members],
+        kept_niche_ids,
+    )
 
 
 def _triangle_area(tri: np.ndarray) -> float:
@@ -478,6 +566,7 @@ def _validate_fit_inputs(
     atoms_per_cluster: int,
     radius_um: float,
     stride_um: float,
+    basic_niche_size_um: float | None,
     min_cells: int,
     max_subregions: int,
     lambda_x: float,
@@ -510,6 +599,8 @@ def _validate_fit_inputs(
         raise ValueError("atoms_per_cluster must be at least 1.")
     if radius_um <= 0 or stride_um <= 0:
         raise ValueError("radius_um and stride_um must be positive.")
+    if basic_niche_size_um is not None and basic_niche_size_um <= 0:
+        raise ValueError("basic_niche_size_um must be positive when set.")
     if min_cells < 1:
         raise ValueError("min_cells must be at least 1.")
     if max_subregions != 0 and max_subregions < 1:

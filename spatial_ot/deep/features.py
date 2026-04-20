@@ -576,7 +576,13 @@ class SpatialOTFeatureEncoder:
             self.model.load_state_dict(best_state)
         return self
 
-    def _validate_transform_schema(self, *, input_obsm_key: str | None = None) -> None:
+    def _validate_transform_schema(
+        self,
+        *,
+        input_obsm_key: str | None = None,
+        coordinate_keys: tuple[str, str] | None = None,
+        spatial_scale: float | None = None,
+    ) -> None:
         expected_dim = self.feature_schema.get("input_dim")
         if expected_dim is not None and self.input_dim is not None and int(expected_dim) != int(self.input_dim):
             raise ValueError("Saved feature schema is inconsistent with the loaded encoder input dimension.")
@@ -584,6 +590,16 @@ class SpatialOTFeatureEncoder:
         if expected_key is not None and input_obsm_key is not None and str(expected_key) != str(input_obsm_key):
             raise ValueError(
                 f"Input obsm key mismatch: encoder expects '{expected_key}', got '{input_obsm_key}'."
+            )
+        expected_coord_keys = self.feature_schema.get("coordinate_keys")
+        if expected_coord_keys is not None and coordinate_keys is not None and list(coordinate_keys) != list(expected_coord_keys):
+            raise ValueError(
+                f"Coordinate key mismatch: encoder expects {expected_coord_keys}, got {list(coordinate_keys)}."
+            )
+        expected_scale = self.feature_schema.get("spatial_scale")
+        if expected_scale is not None and spatial_scale is not None and not np.isclose(float(expected_scale), float(spatial_scale), atol=1e-8):
+            raise ValueError(
+                f"Spatial scale mismatch: encoder expects {float(expected_scale)}, got {float(spatial_scale)}."
             )
 
     def transform(self, features: np.ndarray, coords_um: np.ndarray | None = None, batch_size: int | None = None) -> np.ndarray:
