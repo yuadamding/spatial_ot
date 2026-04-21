@@ -73,7 +73,7 @@ def _build_shell_ground(n_shells: int, n_atoms: int) -> np.ndarray:
 
 def fit_state_atoms(z: np.ndarray, n_atoms: int, seed: int, temperature: float) -> tuple[np.ndarray, np.ndarray]:
     kmeans = MiniBatchKMeans(n_clusters=n_atoms, random_state=seed, batch_size=min(2048, len(z)))
-    labels = kmeans.fit_predict(z)
+    kmeans.fit_predict(z)
     centroids = kmeans.cluster_centers_.astype(np.float32)
     distances = pairwise_distances(z, centroids, metric="euclidean").astype(np.float32)
     state_probs = _row_softmax(distances, temperature=temperature)

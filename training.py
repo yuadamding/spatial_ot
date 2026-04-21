@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 from pathlib import Path
 
-import anndata as ad
 import numpy as np
 import pandas as pd
 import torch

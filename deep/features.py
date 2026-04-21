@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from ..config import DeepFeatureConfig
 from .checkpoint import load_encoder_bundle, save_encoder_bundle
 from .graph import MeanGraphLayer, build_context_distribution_targets, build_multiscale_graphs
-from .losses import decorrelation_loss, edge_contrastive_loss, variance_loss
+from .losses import cross_correlation_loss, decorrelation_loss, edge_contrastive_loss, variance_loss
 
 
 def _resolve_device(device: str) -> torch.device:
@@ -133,6 +133,67 @@ def _build_split_context_targets(
     return context
 
 
+def _correlation_summary(a: np.ndarray, b: np.ndarray) -> dict[str, float | bool]:
+    if a.shape[0] < 2 or b.shape[0] < 2:
+        return {
+            "mean_abs_correlation": 0.0,
+            "max_abs_correlation": 0.0,
+            "fro_correlation": 0.0,
+            "mean_cosine_similarity": 0.0,
+            "allclose": bool(np.allclose(a, b)),
+        }
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    a_centered = a - a.mean(axis=0, keepdims=True)
+    b_centered = b - b.mean(axis=0, keepdims=True)
+    a_scale = np.sqrt(np.var(a_centered, axis=0, keepdims=True) + 1e-4)
+    b_scale = np.sqrt(np.var(b_centered, axis=0, keepdims=True) + 1e-4)
+    corr = ((a_centered / a_scale).T @ (b_centered / b_scale)) / max(a.shape[0], 1)
+    a_norm = np.linalg.norm(a, axis=1)
+    b_norm = np.linalg.norm(b, axis=1)
+    cosine = np.sum(a * b, axis=1) / np.maximum(a_norm * b_norm, 1e-6)
+    return {
+        "mean_abs_correlation": float(np.mean(np.abs(corr))),
+        "max_abs_correlation": float(np.max(np.abs(corr))),
+        "fro_correlation": float(np.linalg.norm(corr)),
+        "mean_cosine_similarity": float(np.mean(cosine)),
+        "allclose": bool(np.allclose(a, b, atol=1e-5, rtol=1e-4)),
+    }
+
+
+def _latent_diagnostics(
+    outputs: dict[str, np.ndarray],
+    *,
+    x_std: np.ndarray,
+    context_std: np.ndarray,
+    selected_embedding: str,
+) -> dict[str, float | bool | str]:
+    intrinsic = np.asarray(outputs["intrinsic"], dtype=np.float32)
+    context = np.asarray(outputs["context"], dtype=np.float32)
+    joint = np.asarray(outputs["joint"], dtype=np.float32)
+    selected = np.asarray(outputs[selected_embedding], dtype=np.float32)
+    ic = _correlation_summary(intrinsic, context)
+    ij = _correlation_summary(intrinsic, joint)
+    cj = _correlation_summary(context, joint)
+    return {
+        "selected_embedding": selected_embedding,
+        "selected_mean_norm": float(np.mean(np.linalg.norm(selected, axis=1))),
+        "intrinsic_reconstruction_mse": float(np.mean((np.asarray(outputs["recon"], dtype=np.float32) - x_std) ** 2)),
+        "context_prediction_mse": float(np.mean((np.asarray(outputs["context_pred"], dtype=np.float32) - context_std) ** 2)),
+        "intrinsic_context_mean_abs_correlation": float(ic["mean_abs_correlation"]),
+        "intrinsic_context_max_abs_correlation": float(ic["max_abs_correlation"]),
+        "intrinsic_context_fro_correlation": float(ic["fro_correlation"]),
+        "intrinsic_context_mean_cosine_similarity": float(ic["mean_cosine_similarity"]),
+        "intrinsic_context_allclose": bool(ic["allclose"]),
+        "intrinsic_joint_mean_abs_correlation": float(ij["mean_abs_correlation"]),
+        "intrinsic_joint_max_abs_correlation": float(ij["max_abs_correlation"]),
+        "intrinsic_joint_allclose": bool(ij["allclose"]),
+        "context_joint_mean_abs_correlation": float(cj["mean_abs_correlation"]),
+        "context_joint_max_abs_correlation": float(cj["max_abs_correlation"]),
+        "context_joint_allclose": bool(cj["allclose"]),
+    }
+
+
 class _MLPAutoencoder(nn.Module):
     def __init__(self, input_dim: int, context_dim: int, config: DeepFeatureConfig) -> None:
         super().__init__()
@@ -144,7 +205,13 @@ class _MLPAutoencoder(nn.Module):
             layers.append(nn.ReLU())
             in_dim = hidden_dim
         self.encoder_body = nn.Sequential(*layers)
-        self.encoder_head = nn.Linear(in_dim, int(config.latent_dim))
+        self.intrinsic_head = nn.Linear(in_dim, int(config.latent_dim))
+        self.context_head = nn.Linear(in_dim, int(config.latent_dim))
+        self.fusion = nn.Sequential(
+            nn.Linear(int(config.latent_dim) * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, int(config.latent_dim)),
+        )
 
         decoder_layers = []
         dec_in = int(config.latent_dim)
@@ -162,21 +229,31 @@ class _MLPAutoencoder(nn.Module):
             context_layers.append(nn.ReLU())
             ctx_in = hidden_dim
         context_layers.append(nn.Linear(ctx_in, int(context_dim)))
-        self.context_head = nn.Sequential(*context_layers)
+        self.context_predictor = nn.Sequential(*context_layers)
+
+    def _encode_all(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        h = self.encoder_body(x)
+        intrinsic = self.intrinsic_head(h)
+        context = self.context_head(h)
+        joint = self.fusion(torch.cat([intrinsic, context], dim=-1))
+        return intrinsic, context, joint
 
     def encode(self, x: torch.Tensor, *, output_embedding: str = "joint") -> torch.Tensor:
-        del output_embedding
-        h = self.encoder_body(x)
-        return self.encoder_head(h)
+        intrinsic, context, joint = self._encode_all(x)
+        if output_embedding == "intrinsic":
+            return intrinsic
+        if output_embedding == "context":
+            return context
+        return joint
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        z = self.encode(x)
+        intrinsic, context, joint = self._encode_all(x)
         return {
-            "intrinsic": z,
-            "context": z,
-            "joint": z,
-            "recon": self.decoder(z),
-            "context_pred": self.context_head(z),
+            "intrinsic": intrinsic,
+            "context": context,
+            "joint": joint,
+            "recon": self.decoder(intrinsic),
+            "context_pred": self.context_predictor(context),
         }
 
 
@@ -258,8 +335,8 @@ class _GraphAutoencoder(nn.Module):
             "intrinsic": intrinsic,
             "context": context,
             "joint": joint,
-            "recon": self.decoder(joint),
-            "context_pred": self.context_head(joint),
+            "recon": self.decoder(intrinsic),
+            "context_pred": self.context_head(context),
         }
 
 
@@ -324,6 +401,7 @@ class DeepFeatureResult:
     feature_std: np.ndarray
     feature_schema: dict
     validation_report: dict
+    latent_diagnostics: dict
     model_path: str | None = None
 
 
@@ -338,6 +416,7 @@ class SpatialOTFeatureEncoder:
         self.history: list[dict[str, float]] = []
         self.feature_schema: dict = {}
         self.validation_report: dict = {}
+        self.latent_diagnostics: dict = {}
         self.device = _resolve_device(config.device)
 
     @property
@@ -354,6 +433,40 @@ class SpatialOTFeatureEncoder:
         ):
             raise RuntimeError("SpatialOTFeatureEncoder is not fitted.")
 
+    def _enforce_graph_full_batch_limit(self, n_cells: int, *, stage: str) -> None:
+        limit = int(self.config.full_batch_max_cells)
+        if self.config.method != "graph_autoencoder" or limit <= 0:
+            return
+        if n_cells > limit:
+            raise ValueError(
+                f"graph_autoencoder {stage} requires full-batch execution, but n_cells={int(n_cells)} exceeds "
+                f"deep.full_batch_max_cells={limit}. Increase the limit explicitly or switch to a non-graph encoder."
+            )
+
+    def _collect_output_arrays_std(self, x_std: np.ndarray, coords_um: np.ndarray | None = None) -> dict[str, np.ndarray]:
+        self._check_fitted()
+        assert self.model is not None
+        self.model.eval()
+        if self.config.method == "graph_autoencoder":
+            if coords_um is None:
+                raise ValueError("coords_um is required for graph_autoencoder outputs.")
+            self._enforce_graph_full_batch_limit(x_std.shape[0], stage="transform")
+            short_graph, mid_graph = _tensor_graphs(np.asarray(coords_um, dtype=np.float32), config=self.config, device=self.device)
+            with torch.no_grad():
+                x_tensor = torch.from_numpy(x_std).to(self.device)
+                outputs = self.model(x_tensor, edge_index_short=short_graph, edge_index_mid=mid_graph)
+            return {name: value.detach().cpu().numpy().astype(np.float32) for name, value in outputs.items()}
+
+        batch_size = int(self.config.batch_size)
+        outputs: dict[str, list[np.ndarray]] = {}
+        with torch.no_grad():
+            for x_batch_np in _iter_batches(x_std, batch_size):
+                x_tensor = torch.from_numpy(x_batch_np).to(self.device)
+                batch_outputs = self.model(x_tensor)
+                for name, value in batch_outputs.items():
+                    outputs.setdefault(name, []).append(value.detach().cpu().numpy().astype(np.float32))
+        return {name: np.vstack(chunks) for name, chunks in outputs.items()}
+
     def fit(
         self,
         features: np.ndarray,
@@ -365,6 +478,8 @@ class SpatialOTFeatureEncoder:
     ) -> "SpatialOTFeatureEncoder":
         if self.config.method == "none":
             raise ValueError("SpatialOTFeatureEncoder.fit requires an active deep feature method, not 'none'.")
+        if self.config.output_embedding is None:
+            raise ValueError("SpatialOTFeatureEncoder.fit requires config.output_embedding to be set explicitly.")
         if self.config.count_layer is not None:
             raise NotImplementedError("deep.count_layer is configured but count reconstruction is not implemented yet.")
 
@@ -397,6 +512,7 @@ class SpatialOTFeatureEncoder:
             "context_dim": self.context_dim,
             "method": self.config.method,
             "output_embedding": self.config.output_embedding,
+            "full_batch_max_cells": int(self.config.full_batch_max_cells),
             "uses_absolute_coordinate_features": False,
             "uses_spatial_graph": bool(self.config.method == "graph_autoencoder"),
             "spatial_graph_construction": {
@@ -430,6 +546,7 @@ class SpatialOTFeatureEncoder:
         patience_left = int(self.config.early_stopping_patience)
 
         if self.config.method == "graph_autoencoder":
+            self._enforce_graph_full_batch_limit(int(train_mask.sum()), stage="fit")
             x_train = torch.from_numpy(x_std[train_mask]).to(self.device)
             ctx_train = torch.from_numpy(context_std[train_mask]).to(self.device)
             short_train, mid_train = _tensor_graphs(coords_um[train_mask], config=self.config, device=self.device)
@@ -450,15 +567,17 @@ class SpatialOTFeatureEncoder:
                 z = outputs[self.config.output_embedding]
                 loss_recon = torch.mean((outputs["recon"] - x_train) ** 2)
                 loss_ctx = torch.mean((outputs["context_pred"] - ctx_train) ** 2)
-                loss_contrast = edge_contrastive_loss(outputs["joint"], short_train)
+                loss_contrast = edge_contrastive_loss(outputs["context"], short_train)
                 loss_var = variance_loss(z)
                 loss_decorr = decorrelation_loss(z)
+                loss_indep = cross_correlation_loss(outputs["intrinsic"], outputs["context"])
                 loss = (
                     float(self.config.reconstruction_weight) * loss_recon
                     + float(self.config.context_weight) * loss_ctx
                     + float(self.config.contrastive_weight) * loss_contrast
                     + float(self.config.variance_weight) * loss_var
                     + float(self.config.decorrelation_weight) * loss_decorr
+                    + float(self.config.independence_weight) * loss_indep
                 )
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -467,6 +586,9 @@ class SpatialOTFeatureEncoder:
                 epoch_row = {
                     "epoch": float(epoch + 1),
                     "train_loss": float(loss.detach().cpu()),
+                    "train_recon_loss": float(loss_recon.detach().cpu()),
+                    "train_context_loss": float(loss_ctx.detach().cpu()),
+                    "train_independence_loss": float(loss_indep.detach().cpu()),
                 }
                 current_val = None
                 if x_val is not None and ctx_val is not None and short_val is not None and mid_val is not None:
@@ -474,15 +596,25 @@ class SpatialOTFeatureEncoder:
                     with torch.no_grad():
                         outputs_val = self.model(x_val, edge_index_short=short_val, edge_index_mid=mid_val)
                         z_val = outputs_val[self.config.output_embedding]
+                        val_recon = torch.mean((outputs_val["recon"] - x_val) ** 2)
+                        val_ctx = torch.mean((outputs_val["context_pred"] - ctx_val) ** 2)
+                        val_contrast = edge_contrastive_loss(outputs_val["context"], short_val)
+                        val_var = variance_loss(z_val)
+                        val_decorr = decorrelation_loss(z_val)
+                        val_indep = cross_correlation_loss(outputs_val["intrinsic"], outputs_val["context"])
                         val_loss = (
-                            float(self.config.reconstruction_weight) * torch.mean((outputs_val["recon"] - x_val) ** 2)
-                            + float(self.config.context_weight) * torch.mean((outputs_val["context_pred"] - ctx_val) ** 2)
-                            + float(self.config.contrastive_weight) * edge_contrastive_loss(outputs_val["joint"], short_val)
-                            + float(self.config.variance_weight) * variance_loss(z_val)
-                            + float(self.config.decorrelation_weight) * decorrelation_loss(z_val)
+                            float(self.config.reconstruction_weight) * val_recon
+                            + float(self.config.context_weight) * val_ctx
+                            + float(self.config.contrastive_weight) * val_contrast
+                            + float(self.config.variance_weight) * val_var
+                            + float(self.config.decorrelation_weight) * val_decorr
+                            + float(self.config.independence_weight) * val_indep
                         )
                         current_val = float(val_loss.detach().cpu())
                         epoch_row["val_loss"] = current_val
+                        epoch_row["val_recon_loss"] = float(val_recon.detach().cpu())
+                        epoch_row["val_context_loss"] = float(val_ctx.detach().cpu())
+                        epoch_row["val_independence_loss"] = float(val_indep.detach().cpu())
                 self.history.append(epoch_row)
                 if current_val is None:
                     best_state = copy.deepcopy(self.model.state_dict())
@@ -525,11 +657,13 @@ class SpatialOTFeatureEncoder:
                     loss_ctx = torch.mean((outputs["context_pred"] - batch_ctx) ** 2)
                     loss_var = variance_loss(z)
                     loss_decorr = decorrelation_loss(z)
+                    loss_indep = cross_correlation_loss(outputs["intrinsic"], outputs["context"])
                     loss = (
                         float(self.config.reconstruction_weight) * loss_recon
                         + float(self.config.context_weight) * loss_ctx
                         + float(self.config.variance_weight) * loss_var
                         + float(self.config.decorrelation_weight) * loss_decorr
+                        + float(self.config.independence_weight) * loss_indep
                     )
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
@@ -552,11 +686,17 @@ class SpatialOTFeatureEncoder:
                             c_batch = torch.from_numpy(c_batch_np).to(self.device)
                             outputs = self.model(x_batch)
                             z_val = outputs[self.config.output_embedding]
+                            val_recon = torch.mean((outputs["recon"] - x_batch) ** 2)
+                            val_ctx = torch.mean((outputs["context_pred"] - c_batch) ** 2)
+                            val_var = variance_loss(z_val)
+                            val_decorr = decorrelation_loss(z_val)
+                            val_indep = cross_correlation_loss(outputs["intrinsic"], outputs["context"])
                             val_loss = (
-                                float(self.config.reconstruction_weight) * torch.mean((outputs["recon"] - x_batch) ** 2)
-                                + float(self.config.context_weight) * torch.mean((outputs["context_pred"] - c_batch) ** 2)
-                                + float(self.config.variance_weight) * variance_loss(z_val)
-                                + float(self.config.decorrelation_weight) * decorrelation_loss(z_val)
+                                float(self.config.reconstruction_weight) * val_recon
+                                + float(self.config.context_weight) * val_ctx
+                                + float(self.config.variance_weight) * val_var
+                                + float(self.config.decorrelation_weight) * val_decorr
+                                + float(self.config.independence_weight) * val_indep
                             )
                             val_loss_accum += float(val_loss.detach().cpu()) * int(x_batch.shape[0])
                             n_val += int(x_batch.shape[0])
@@ -577,6 +717,13 @@ class SpatialOTFeatureEncoder:
         if bool(self.config.restore_best) and best_state is not None:
             assert self.model is not None
             self.model.load_state_dict(best_state)
+        outputs_full = self._collect_output_arrays_std(x_std, coords_um=coords_um)
+        self.latent_diagnostics = _latent_diagnostics(
+            outputs_full,
+            x_std=x_std,
+            context_std=context_std,
+            selected_embedding=self.config.output_embedding,
+        )
         return self
 
     def _validate_transform_schema(
@@ -608,33 +755,22 @@ class SpatialOTFeatureEncoder:
     def transform(self, features: np.ndarray, coords_um: np.ndarray | None = None, batch_size: int | None = None) -> np.ndarray:
         self._check_fitted()
         self._validate_transform_schema()
+        if self.config.output_embedding is None:
+            raise ValueError("SpatialOTFeatureEncoder.transform requires config.output_embedding to be set explicitly.")
         assert self.feature_mean is not None and self.feature_std is not None and self.model is not None and self.input_dim is not None
         x_std = _apply_standardization(features, self.feature_mean, self.feature_std)
         if x_std.shape[1] != self.input_dim:
             raise ValueError(f"Expected feature dimension {self.input_dim}, got {x_std.shape[1]}.")
-        self.model.eval()
-        if self.config.method == "graph_autoencoder":
-            if coords_um is None:
-                raise ValueError("coords_um is required for graph_autoencoder transforms.")
-            short_graph, mid_graph = _tensor_graphs(np.asarray(coords_um, dtype=np.float32), config=self.config, device=self.device)
-            with torch.no_grad():
-                x_tensor = torch.from_numpy(x_std).to(self.device)
-                z = self.model.encode(
-                    x_tensor,
-                    edge_index_short=short_graph,
-                    edge_index_mid=mid_graph,
-                    output_embedding=self.config.output_embedding,
-                )
-            return z.detach().cpu().numpy().astype(np.float32)
-
-        batch_size = int(batch_size or self.config.batch_size)
-        outputs: list[np.ndarray] = []
-        with torch.no_grad():
-            for x_batch_np in _iter_batches(x_std, batch_size):
-                x_tensor = torch.from_numpy(x_batch_np).to(self.device)
-                z = self.model.encode(x_tensor, output_embedding=self.config.output_embedding).detach().cpu().numpy().astype(np.float32)
-                outputs.append(z)
-        return np.vstack(outputs) if outputs else np.zeros((0, int(self.config.latent_dim)), dtype=np.float32)
+        if batch_size is not None and self.config.method != "graph_autoencoder":
+            original_batch_size = self.config.batch_size
+            self.config.batch_size = int(batch_size)
+            try:
+                outputs = self._collect_output_arrays_std(x_std, coords_um=coords_um)
+            finally:
+                self.config.batch_size = original_batch_size
+        else:
+            outputs = self._collect_output_arrays_std(x_std, coords_um=coords_um)
+        return np.asarray(outputs[self.config.output_embedding], dtype=np.float32)
 
     def fit_transform(
         self,
@@ -661,6 +797,7 @@ class SpatialOTFeatureEncoder:
             feature_std=np.asarray(self.feature_std, dtype=np.float32),
             feature_schema=dict(self.feature_schema),
             validation_report=dict(self.validation_report),
+            latent_diagnostics=dict(self.latent_diagnostics),
             model_path=None,
         )
 
@@ -677,15 +814,27 @@ class SpatialOTFeatureEncoder:
                 "history": self.history,
                 "feature_schema": self.feature_schema,
                 "validation_report": self.validation_report,
+                "latent_diagnostics": self.latent_diagnostics,
             },
             feature_mean=self.feature_mean,
             feature_std=self.feature_std,
         )
 
     @classmethod
-    def load(cls, path: str | Path, *, map_location: str | None = None) -> "SpatialOTFeatureEncoder":
-        state_dict, metadata, feature_mean, feature_std = load_encoder_bundle(path, map_location=map_location or "cpu")
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        map_location: str | None = None,
+        device: str | None = None,
+    ) -> "SpatialOTFeatureEncoder":
+        resolved_map_location = map_location or "cpu"
+        state_dict, metadata, feature_mean, feature_std = load_encoder_bundle(path, map_location=resolved_map_location)
         config = DeepFeatureConfig(**metadata["config"])
+        if device is not None:
+            config.device = device
+        elif str(resolved_map_location) == "cpu":
+            config.device = "cpu"
         encoder = cls(config=config)
         encoder.feature_mean = feature_mean
         encoder.feature_std = feature_std
@@ -696,6 +845,7 @@ class SpatialOTFeatureEncoder:
         encoder.history = list(metadata.get("history", []))
         encoder.feature_schema = dict(metadata.get("feature_schema", {}))
         encoder.validation_report = dict(metadata.get("validation_report", {}))
+        encoder.latent_diagnostics = dict(metadata.get("latent_diagnostics", {}))
         return encoder
 
 

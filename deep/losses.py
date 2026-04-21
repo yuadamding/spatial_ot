@@ -26,6 +26,17 @@ def decorrelation_loss(z: torch.Tensor) -> torch.Tensor:
     return off_diagonal(cov).pow(2).mean()
 
 
+def cross_correlation_loss(z_a: torch.Tensor, z_b: torch.Tensor) -> torch.Tensor:
+    if z_a.shape[0] < 2 or z_b.shape[0] < 2:
+        return z_a.new_tensor(0.0)
+    za = z_a - z_a.mean(dim=0, keepdim=True)
+    zb = z_b - z_b.mean(dim=0, keepdim=True)
+    za = za / torch.sqrt(za.var(dim=0, unbiased=False, keepdim=True) + 1e-4)
+    zb = zb / torch.sqrt(zb.var(dim=0, unbiased=False, keepdim=True) + 1e-4)
+    cross = (za.T @ zb) / max(z_a.shape[0], 1)
+    return cross.pow(2).mean()
+
+
 def edge_contrastive_loss(
     z: torch.Tensor,
     edge_index: torch.Tensor,

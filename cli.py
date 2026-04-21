@@ -14,6 +14,7 @@ from .deep import fit_deep_features_on_h5ad, transform_h5ad_with_deep_model
 from .legacy.training import run_experiment
 from .legacy.visualization import plot_preprocessed_inputs, plot_result_bundle
 from .multilevel import run_multilevel_ot_with_config
+from .pooling import pool_h5ads_in_directory
 
 
 def _add_deep_args(parser: argparse.ArgumentParser) -> None:
@@ -27,6 +28,7 @@ def _add_deep_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--deep-mid-radius-um", type=float, default=None, help="Mid-range graph radius for graph_autoencoder.")
     parser.add_argument("--deep-graph-layers", type=int, default=None, help="Number of graph message-passing layers per scale for graph_autoencoder.")
     parser.add_argument("--deep-graph-max-neighbors", type=int, default=None, help="Maximum neighbors retained per node when building radius graphs for graph_autoencoder.")
+    parser.add_argument("--deep-full-batch-max-cells", type=int, default=None, help="Maximum cells allowed for graph_autoencoder full-batch fit/transform. Use 0 to disable the guard.")
     parser.add_argument("--deep-validation-context-mode", default=None, choices=["inductive", "transductive"], help="Whether validation context targets are built from held-out cells only or from the full dataset.")
     parser.add_argument("--deep-epochs", type=int, default=None, help="Training epochs for the deep feature adapter.")
     parser.add_argument("--deep-batch-size", type=int, default=None, help="Batch size for the deep feature adapter.")
@@ -62,6 +64,29 @@ def build_parser() -> argparse.ArgumentParser:
     plot_results = sub.add_parser("plot-results", help="Render a visualization bundle from a finished run directory.")
     plot_results.add_argument("--run-dir", required=True, help="Path to a spatial_ot run directory with saved outputs.")
     plot_results.add_argument("--output-dir", help="Optional output directory for the figures.")
+
+    pool_inputs = sub.add_parser(
+        "pool-inputs",
+        help="Pool multiple cohort H5AD files into one non-overlapping AnnData for joint latent learning and niche discovery.",
+    )
+    pool_inputs.add_argument("--input-dir", required=True, help="Directory containing the input H5AD files.")
+    pool_inputs.add_argument("--output-h5ad", required=True, help="Output pooled H5AD path.")
+    pool_inputs.add_argument(
+        "--feature-obsm-key",
+        action="append",
+        required=True,
+        help="obsm key to preserve in the pooled H5AD. Repeat to keep multiple keys.",
+    )
+    pool_inputs.add_argument("--sample-glob", default="*_cells_marker_genes_umap3d.h5ad", help="Glob used to select input H5AD files within --input-dir.")
+    pool_inputs.add_argument("--spatial-x-key", default="cell_x", help="obs key for the original x coordinate.")
+    pool_inputs.add_argument("--spatial-y-key", default="cell_y", help="obs key for the original y coordinate.")
+    pool_inputs.add_argument("--pooled-spatial-x-key", default="pooled_cell_x", help="obs key used for the pooled, sample-separated x coordinate.")
+    pool_inputs.add_argument("--pooled-spatial-y-key", default="pooled_cell_y", help="obs key used for the pooled, sample-separated y coordinate.")
+    pool_inputs.add_argument("--sample-obs-key", default="sample_id", help="obs key storing the sample identifier.")
+    pool_inputs.add_argument("--source-file-obs-key", default="source_h5ad", help="obs key storing the source H5AD filename.")
+    pool_inputs.add_argument("--sample-id-suffix", default="_cells_marker_genes_umap3d", help="Filename suffix stripped when deriving sample IDs.")
+    pool_inputs.add_argument("--layout-columns", type=int, default=None, help="Optional number of columns used to tile samples in pooled coordinate space.")
+    pool_inputs.add_argument("--layout-gap", type=float, default=None, help="Optional gap between sample tiles in pooled coordinate units.")
 
     deep_fit = sub.add_parser(
         "deep-fit",
@@ -102,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--spatial-x-key", default=None, help="obs key for the x coordinate.")
     multilevel.add_argument("--spatial-y-key", default=None, help="obs key for the y coordinate.")
     multilevel.add_argument("--region-obs-key", help="Optional obs column defining explicit subregion membership. If set, spatial_ot clusters those regions instead of building radius windows.")
+    multilevel.add_argument("--allow-umap-as-feature", action=argparse.BooleanOptionalAction, default=None, help="Allow UMAP coordinates as the OT feature space for exploratory runs.")
     multilevel.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value to convert them into microns.")
     multilevel.add_argument("--n-clusters", type=int, default=None, help="Number of subregion clusters.")
     multilevel.add_argument("--atoms-per-cluster", type=int, default=None, help="Number of shared atoms per cluster.")
@@ -148,6 +174,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
     _set_if_not_none(config.paths, "spatial_y_key", args.spatial_y_key)
     _set_if_not_none(config.paths, "spatial_scale", args.spatial_scale)
     _set_if_not_none(config.paths, "region_obs_key", args.region_obs_key)
+    _set_if_not_none(config.paths, "allow_umap_as_feature", args.allow_umap_as_feature)
     _set_if_not_none(config.paths, "spatial_scale", args.spatial_scale)
 
     for name in [
@@ -195,6 +222,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_mid_radius_um": "mid_radius_um",
         "deep_graph_layers": "graph_layers",
         "deep_graph_max_neighbors": "graph_max_neighbors",
+        "deep_full_batch_max_cells": "full_batch_max_cells",
         "deep_validation_context_mode": "validation_context_mode",
         "deep_epochs": "epochs",
         "deep_batch_size": "batch_size",
@@ -238,6 +266,7 @@ def _resolve_deep_fit_config_from_args(args: argparse.Namespace) -> tuple[Multil
         "deep_mid_radius_um": "mid_radius_um",
         "deep_graph_layers": "graph_layers",
         "deep_graph_max_neighbors": "graph_max_neighbors",
+        "deep_full_batch_max_cells": "full_batch_max_cells",
         "deep_validation_context_mode": "validation_context_mode",
         "deep_epochs": "epochs",
         "deep_batch_size": "batch_size",
@@ -282,6 +311,23 @@ def main() -> None:
     elif args.command == "plot-results":
         manifest = plot_result_bundle(run_dir=Path(args.run_dir), output_dir=Path(args.output_dir) if args.output_dir else None)
         print(json.dumps(manifest, indent=2))
+    elif args.command == "pool-inputs":
+        summary = pool_h5ads_in_directory(
+            input_dir=args.input_dir,
+            output_h5ad=args.output_h5ad,
+            feature_obsm_keys=list(args.feature_obsm_key),
+            sample_glob=args.sample_glob,
+            spatial_x_key=args.spatial_x_key,
+            spatial_y_key=args.spatial_y_key,
+            pooled_spatial_x_key=args.pooled_spatial_x_key,
+            pooled_spatial_y_key=args.pooled_spatial_y_key,
+            sample_obs_key=args.sample_obs_key,
+            source_file_obs_key=args.source_file_obs_key,
+            sample_id_suffix=args.sample_id_suffix,
+            layout_columns=args.layout_columns,
+            layout_gap=args.layout_gap,
+        )
+        print(json.dumps(summary, indent=2))
     elif args.command == "deep-fit":
         config, seed = _resolve_deep_fit_config_from_args(args)
         summary = fit_deep_features_on_h5ad(

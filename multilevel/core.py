@@ -645,8 +645,6 @@ def _aligned_semirelaxed_ot_costs_all_clusters_gpu(
         betas_np = np.stack([_normalize_hist(b) for b in betas], axis=0)
         betas_t = torch.as_tensor(betas_np, dtype=dtype, device=dev)
     K = atom_coords_t.shape[0]
-    m = u_t.shape[0]
-    p = atom_coords_t.shape[1]
     # Broadcast u, y to (K, m, *)
     u_kb = u_t.unsqueeze(0).expand(K, -1, -1).contiguous()
     y_kb = y_t.unsqueeze(0).expand(K, -1, -1).contiguous()
@@ -956,8 +954,6 @@ def _compute_assigned_artifacts_r_gpu(
     R = len(measures)
     label_idx = torch.as_tensor(np.asarray(labels, dtype=np.int64), dtype=torch.long, device=dev)
     u_rm, y_rm, a_rm, m_r = _pack_measures_padded(measures, dtype=dtype, device=dev)
-    m = u_rm.shape[1]
-
     atom_coords_t = torch.as_tensor(atom_coords, dtype=dtype, device=dev)          # (K, p, 2)
     atom_features_t = torch.as_tensor(atom_features, dtype=dtype, device=dev)      # (K, p, f)
     betas_np = np.stack([_normalize_hist(b) for b in betas], axis=0)
@@ -968,7 +964,6 @@ def _compute_assigned_artifacts_r_gpu(
     atom_features_r = atom_features_t[label_idx]   # (R, p, f)
     beta_r = beta_k[label_idx]                     # (R, p)
 
-    p = atom_coords_r.shape[1]
     sx = max(float(cost_scale_x), 1e-12)
     sy = max(float(cost_scale_y), 1e-12)
     cy_full = torch.cdist(y_rm, atom_features_r, p=2).pow(2) / sy
@@ -1491,7 +1486,7 @@ def fit_multilevel_ot(
     tol: float = 1e-4,
     basic_niche_size_um: float | None = 200.0,
     seed: int = 1337,
-    compute_device: str = "cuda",
+    compute_device: str = "auto",
 ) -> MultilevelOTResult:
     features = np.asarray(features, dtype=np.float32)
     coords_um = np.asarray(coords_um, dtype=np.float32)

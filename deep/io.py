@@ -12,6 +12,11 @@ import numpy as np
 from ..config import DeepFeatureConfig
 from .features import SpatialOTFeatureEncoder, fit_deep_features, save_deep_feature_history
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
 
 def _package_version() -> str:
     try:
@@ -19,8 +24,6 @@ def _package_version() -> str:
     except PackageNotFoundError:
         pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
         if pyproject.exists():
-            import tomllib
-
             payload = tomllib.loads(pyproject.read_text())
             return str(payload.get("project", {}).get("version", "unknown"))
         return "unknown"
@@ -89,6 +92,7 @@ def _deep_summary(
     history: list[dict[str, float]],
     feature_schema: dict,
     validation_report: dict,
+    latent_diagnostics: dict,
     model_path: str | None,
     pretrained_model_loaded: bool,
     extra: dict | None = None,
@@ -124,6 +128,7 @@ def _deep_summary(
         "validation_used_for_early_stopping": bool(config.validation != "none"),
         "feature_schema": feature_schema,
         "validation_report": validation_report,
+        "latent_diagnostics": latent_diagnostics,
     }
     if extra:
         payload.update(extra)
@@ -210,6 +215,7 @@ def fit_deep_features_on_h5ad(
         history=result.history,
         feature_schema=result.feature_schema,
         validation_report=result.validation_report,
+        latent_diagnostics=result.latent_diagnostics,
         model_path=str(model_path) if model_path is not None else None,
         pretrained_model_loaded=False,
     )
@@ -284,6 +290,7 @@ def transform_h5ad_with_deep_model(
         history=encoder.history,
         feature_schema=encoder.feature_schema,
         validation_report=encoder.validation_report,
+        latent_diagnostics=encoder.latent_diagnostics,
         model_path=str(model_path),
         pretrained_model_loaded=True,
         extra={

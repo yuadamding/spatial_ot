@@ -4,7 +4,11 @@ from dataclasses import asdict, dataclass, field, fields
 import os
 from pathlib import Path
 import json
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 @dataclass
@@ -48,7 +52,7 @@ class ModelConfig:
 
 @dataclass
 class TrainingConfig:
-    device: str = "cuda"
+    device: str = "auto"
     teacher_epochs: int = 8
     intrinsic_epochs: int = 8
     context_epochs: int = 12
@@ -112,6 +116,7 @@ class MultilevelPathConfig:
     spatial_y_key: str = "cell_y"
     spatial_scale: float = 1.0
     region_obs_key: str | None = None
+    allow_umap_as_feature: bool = False
 
 
 @dataclass
@@ -142,7 +147,7 @@ class MultilevelOTConfig:
     max_iter: int = 10
     tol: float = 1e-4
     seed: int = 1337
-    compute_device: str = "cuda"
+    compute_device: str = "auto"
 
 
 @dataclass
@@ -158,6 +163,7 @@ class DeepFeatureConfig:
     graph_layers: int = 2
     graph_aggr: str = "mean"
     graph_max_neighbors: int = 64
+    full_batch_max_cells: int = 50000
     epochs: int = 50
     batch_size: int = 4096
     learning_rate: float = 1e-3
@@ -166,13 +172,14 @@ class DeepFeatureConfig:
     validation_context_mode: str = "inductive"
     batch_key: str | None = None
     count_layer: str | None = None
-    device: str = "cuda"
+    device: str = "auto"
     reconstruction_weight: float = 1.0
     context_weight: float = 0.5
     contrastive_weight: float = 0.1
     variance_weight: float = 0.1
     decorrelation_weight: float = 0.01
-    output_embedding: str = "joint"
+    independence_weight: float = 0.1
+    output_embedding: str | None = None
     early_stopping_patience: int = 10
     min_delta: float = 1e-4
     restore_best: bool = True
@@ -308,6 +315,8 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("deep.graph_layers must be at least 1")
     if config.deep.graph_max_neighbors < 1:
         raise ValueError("deep.graph_max_neighbors must be at least 1")
+    if config.deep.full_batch_max_cells < 0:
+        raise ValueError("deep.full_batch_max_cells must be >= 0")
     if config.deep.neighbor_k < 1:
         raise ValueError("deep.neighbor_k must be at least 1")
     if config.deep.radius_um is not None and config.deep.radius_um <= 0:
@@ -333,11 +342,20 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("deep.learning_rate must be > 0 and deep.weight_decay must be >= 0")
     if config.deep.count_layer is not None:
         raise NotImplementedError("deep.count_layer is configured but count reconstruction is not implemented yet.")
-    for name in ["reconstruction_weight", "context_weight", "contrastive_weight", "variance_weight", "decorrelation_weight"]:
+    for name in [
+        "reconstruction_weight",
+        "context_weight",
+        "contrastive_weight",
+        "variance_weight",
+        "decorrelation_weight",
+        "independence_weight",
+    ]:
         if getattr(config.deep, name) < 0:
             raise ValueError(f"deep.{name} must be >= 0")
     valid_outputs = {"intrinsic", "context", "joint"}
-    if config.deep.output_embedding not in valid_outputs:
+    if config.deep.method != "none" and config.deep.output_embedding is None:
+        raise ValueError("deep.output_embedding must be set explicitly when deep.method is active")
+    if config.deep.output_embedding is not None and config.deep.output_embedding not in valid_outputs:
         raise ValueError(f"deep.output_embedding must be one of {sorted(valid_outputs)}, got '{config.deep.output_embedding}'")
     if config.deep.early_stopping_patience < 1:
         raise ValueError("deep.early_stopping_patience must be at least 1")

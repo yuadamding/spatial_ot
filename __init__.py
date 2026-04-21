@@ -48,6 +48,8 @@ def __getattr__(name: str):
         "make_reference_points_unit_disk",
         "run_multilevel_ot_on_h5ad",
         "run_multilevel_ot_with_config",
+        "pool_h5ad_files",
+        "pool_h5ads_in_directory",
         "transform_h5ad_with_deep_model",
     }:
         if name in {
@@ -60,6 +62,13 @@ def __getattr__(name: str):
             from . import deep
 
             return getattr(deep, name)
+        if name in {
+            "pool_h5ad_files",
+            "pool_h5ads_in_directory",
+        }:
+            from . import pooling
+
+            return getattr(pooling, name)
         from . import multilevel
 
         return getattr(multilevel, name)
