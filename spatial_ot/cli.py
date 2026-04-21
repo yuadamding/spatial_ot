@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .config import (
@@ -13,8 +14,31 @@ from .config import (
 from .deep import fit_deep_features_on_h5ad, transform_h5ad_with_deep_model
 from .legacy.training import run_experiment
 from .legacy.visualization import plot_preprocessed_inputs, plot_result_bundle
-from .multilevel import run_multilevel_ot_with_config
+from .multilevel import plot_sample_niche_maps_from_run_dir, run_multilevel_ot_with_config
 from .pooling import pool_h5ads_in_directory
+
+
+def _configure_runtime_threads_from_env() -> None:
+    torch_threads = os.environ.get("SPATIAL_OT_TORCH_NUM_THREADS")
+    torch_interop_threads = os.environ.get("SPATIAL_OT_TORCH_NUM_INTEROP_THREADS")
+    if torch_threads is None and torch_interop_threads is None:
+        return
+    try:
+        import torch
+    except Exception:
+        return
+
+    if torch_threads is not None:
+        value = int(torch_threads)
+        if value > 0:
+            torch.set_num_threads(value)
+    if torch_interop_threads is not None:
+        value = int(torch_interop_threads)
+        if value > 0:
+            try:
+                torch.set_num_interop_threads(value)
+            except RuntimeError:
+                pass
 
 
 def _add_deep_args(parser: argparse.ArgumentParser) -> None:
@@ -43,6 +67,12 @@ def _add_deep_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--deep-variance-weight", type=float, default=None, help="Variance regularization weight for the deep feature adapter.")
     parser.add_argument("--deep-decorrelation-weight", type=float, default=None, help="Decorrelation regularization weight for the deep feature adapter.")
     parser.add_argument("--deep-output-embedding", default=None, choices=["intrinsic", "context", "joint"], help="Which learned embedding to expose to the OT layer.")
+    parser.add_argument(
+        "--deep-allow-joint-ot-embedding",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Require explicit opt-in before using deep.output_embedding='joint' as the OT feature view.",
+    )
     parser.add_argument("--deep-save-model", action=argparse.BooleanOptionalAction, default=None, help="Save the fitted deep feature model under the output directory.")
     parser.add_argument("--pretrained-deep-model", default=None, help="Path to a previously saved deep feature model for transform-only runs.")
     parser.add_argument("--deep-output-obsm-key", default=None, help="obsm key used to store the learned deep embedding.")
@@ -65,6 +95,22 @@ def build_parser() -> argparse.ArgumentParser:
     plot_results.add_argument("--run-dir", required=True, help="Path to a spatial_ot run directory with saved outputs.")
     plot_results.add_argument("--output-dir", help="Optional output directory for the figures.")
 
+    plot_sample_niches = sub.add_parser(
+        "plot-sample-niches",
+        help="Render one spatial niche map per sample from a finished multilevel OT run directory.",
+    )
+    plot_sample_niches.add_argument("--run-dir", required=True, help="Path to a finished multilevel OT run directory.")
+    plot_sample_niches.add_argument("--output-dir", help="Optional output directory for the sample niche PNG files.")
+    plot_sample_niches.add_argument("--sample-obs-key", default="sample_id", help="obs key storing the sample identifier.")
+    plot_sample_niches.add_argument("--source-file-obs-key", default="source_h5ad", help="obs key storing the source H5AD filename.")
+    plot_sample_niches.add_argument("--cluster-obs-key", default="mlot_cluster_int", help="obs key storing integer niche labels.")
+    plot_sample_niches.add_argument("--cluster-label-obs-key", default="mlot_cluster_id", help="obs key storing display niche labels.")
+    plot_sample_niches.add_argument("--cluster-hex-obs-key", default="mlot_cluster_hex", help="obs key storing display colors.")
+    plot_sample_niches.add_argument("--plot-spatial-x-key", default=None, help="Preferred obs key for x coordinates in per-sample plots.")
+    plot_sample_niches.add_argument("--plot-spatial-y-key", default=None, help="Preferred obs key for y coordinates in per-sample plots.")
+    plot_sample_niches.add_argument("--default-sample-id", default="all_cells", help="Sample label used if the requested sample obs key is absent.")
+    plot_sample_niches.add_argument("--spatial-scale", type=float, default=None, help="Optional override for the coordinate scale applied before plotting.")
+
     pool_inputs = sub.add_parser(
         "pool-inputs",
         help="Pool multiple cohort H5AD files into one non-overlapping AnnData for joint latent learning and niche discovery.",
@@ -75,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--feature-obsm-key",
         action="append",
         required=True,
-        help="obsm key to preserve in the pooled H5AD. Repeat to keep multiple keys.",
+        help="Feature key to preserve in the pooled H5AD. Repeat to keep multiple keys. Use 'X' to preserve the full gene matrix.",
     )
     pool_inputs.add_argument("--sample-glob", default="*_cells_marker_genes_umap3d.h5ad", help="Glob used to select input H5AD files within --input-dir.")
     pool_inputs.add_argument("--spatial-x-key", default="cell_x", help="obs key for the original x coordinate.")
@@ -95,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     deep_fit.add_argument("--config", help="Optional TOML config for the active multilevel/deep path.")
     deep_fit.add_argument("--input-h5ad", help="Input cell-level H5AD.")
     deep_fit.add_argument("--output-dir", help="Output directory for deep feature artifacts.")
-    deep_fit.add_argument("--feature-obsm-key", help="obsm key containing the feature embedding used as input to the deep encoder.")
+    deep_fit.add_argument("--feature-obsm-key", help="Feature source used as input to the deep encoder. Accepts an obsm key or 'X' for the full gene matrix.")
     deep_fit.add_argument("--spatial-x-key", default=None, help="obs key for the x coordinate.")
     deep_fit.add_argument("--spatial-y-key", default=None, help="obs key for the y coordinate.")
     deep_fit.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value before building deep graph neighborhoods.")
@@ -109,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     deep_transform.add_argument("--model", required=True, help="Path to a saved deep feature model bundle.")
     deep_transform.add_argument("--input-h5ad", required=True, help="Input cell-level H5AD.")
     deep_transform.add_argument("--output-h5ad", required=True, help="Output H5AD with the transformed embedding.")
-    deep_transform.add_argument("--feature-obsm-key", required=True, help="obsm key containing the input feature embedding.")
+    deep_transform.add_argument("--feature-obsm-key", required=True, help="Feature source used as input to the saved deep encoder. Accepts an obsm key or 'X' for the full gene matrix.")
     deep_transform.add_argument("--spatial-x-key", default="cell_x", help="obs key for the x coordinate.")
     deep_transform.add_argument("--spatial-y-key", default="cell_y", help="obs key for the y coordinate.")
     deep_transform.add_argument("--spatial-scale", type=float, default=1.0, help="Multiply spatial coordinates by this value before building deep graph neighborhoods.")
@@ -123,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--config", help="Optional TOML config for the active multilevel OT path.")
     multilevel.add_argument("--input-h5ad", help="Input cell-level H5AD.")
     multilevel.add_argument("--output-dir", help="Output directory for multilevel OT artifacts.")
-    multilevel.add_argument("--feature-obsm-key", help="obsm key containing the feature embedding used for the OT ground cost. Prefer PCA or standardized markers; avoid UMAP unless exploratory.")
+    multilevel.add_argument("--feature-obsm-key", help="Feature source used for the OT ground cost. Accepts an obsm key or 'X' for the full gene matrix. Prefer full-gene, PCA, or standardized marker features; avoid UMAP unless exploratory.")
     multilevel.add_argument("--spatial-x-key", default=None, help="obs key for the x coordinate.")
     multilevel.add_argument("--spatial-y-key", default=None, help="obs key for the y coordinate.")
     multilevel.add_argument("--region-obs-key", help="Optional obs column defining explicit subregion membership. If set, spatial_ot clusters those regions instead of building radius windows.")
@@ -237,6 +283,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_variance_weight": "variance_weight",
         "deep_decorrelation_weight": "decorrelation_weight",
         "deep_output_embedding": "output_embedding",
+        "deep_allow_joint_ot_embedding": "allow_joint_ot_embedding",
         "deep_save_model": "save_model",
         "pretrained_deep_model": "pretrained_model",
         "deep_output_obsm_key": "output_obsm_key",
@@ -281,6 +328,7 @@ def _resolve_deep_fit_config_from_args(args: argparse.Namespace) -> tuple[Multil
         "deep_variance_weight": "variance_weight",
         "deep_decorrelation_weight": "decorrelation_weight",
         "deep_output_embedding": "output_embedding",
+        "deep_allow_joint_ot_embedding": "allow_joint_ot_embedding",
         "deep_save_model": "save_model",
         "pretrained_deep_model": "pretrained_model",
         "deep_output_obsm_key": "output_obsm_key",
@@ -293,6 +341,7 @@ def _resolve_deep_fit_config_from_args(args: argparse.Namespace) -> tuple[Multil
 
 
 def main() -> None:
+    _configure_runtime_threads_from_env()
     parser = build_parser()
     args = parser.parse_args()
     if args.command == "train":
@@ -310,6 +359,21 @@ def main() -> None:
         print(json.dumps({"output_path": str(output_path)}, indent=2))
     elif args.command == "plot-results":
         manifest = plot_result_bundle(run_dir=Path(args.run_dir), output_dir=Path(args.output_dir) if args.output_dir else None)
+        print(json.dumps(manifest, indent=2))
+    elif args.command == "plot-sample-niches":
+        manifest = plot_sample_niche_maps_from_run_dir(
+            run_dir=Path(args.run_dir),
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            sample_obs_key=args.sample_obs_key,
+            source_file_obs_key=args.source_file_obs_key,
+            cluster_obs_key=args.cluster_obs_key,
+            cluster_label_obs_key=args.cluster_label_obs_key,
+            cluster_hex_obs_key=args.cluster_hex_obs_key,
+            plot_spatial_x_key=args.plot_spatial_x_key,
+            plot_spatial_y_key=args.plot_spatial_y_key,
+            default_sample_id=args.default_sample_id,
+            spatial_scale=args.spatial_scale,
+        )
         print(json.dumps(manifest, indent=2))
     elif args.command == "pool-inputs":
         summary = pool_h5ads_in_directory(

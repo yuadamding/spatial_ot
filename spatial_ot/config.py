@@ -180,6 +180,7 @@ class DeepFeatureConfig:
     decorrelation_weight: float = 0.01
     independence_weight: float = 0.1
     output_embedding: str | None = None
+    allow_joint_ot_embedding: bool = False
     early_stopping_patience: int = 10
     min_delta: float = 1e-4
     restore_best: bool = True

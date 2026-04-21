@@ -62,6 +62,14 @@ class SubregionMeasure:
 
 
 @dataclass
+class OptimizationMeasure:
+    subregion_id: int
+    canonical_coords: np.ndarray
+    features: np.ndarray
+    weights: np.ndarray
+
+
+@dataclass
 class MultilevelOTResult:
     basic_niche_size_um: float | None
     basic_niche_centers_um: np.ndarray
@@ -95,4 +103,4 @@ class MultilevelOTResult:
     cost_scale_y: float
     objective_history: list[dict[str, float]]
     selected_restart: int
-    restart_summaries: list[dict[str, float | int]]
+    restart_summaries: list[dict[str, object]]
