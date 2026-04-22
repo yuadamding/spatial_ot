@@ -1,90 +1,48 @@
 from __future__ import annotations
 
-from .config import ExperimentConfig, load_config
+from importlib import import_module
 
-__all__ = [
-    "DeepFeatureConfig",
-    "DeepFeatureResult",
-    "ExperimentConfig",
-    "MultilevelExperimentConfig",
-    "MultilevelOTConfig",
-    "MultilevelPathConfig",
-    "RegionGeometry",
-    "SpatialOTFeatureEncoder",
-    "fit_deep_features",
-    "fit_deep_features_on_h5ad",
-    "fit_multilevel_ot",
-    "fit_ot_shape_normalizer",
-    "load_config",
-    "load_multilevel_config",
-    "make_reference_points_unit_disk",
-    "prepare_h5ad_feature_cache",
-    "plot_sample_niche_maps",
-    "plot_sample_niche_maps_from_run_dir",
-    "plot_sample_spatial_maps",
-    "plot_sample_spatial_maps_from_run_dir",
-    "run_multilevel_ot_on_h5ad",
-    "run_multilevel_ot_with_config",
-    "transform_h5ad_with_deep_model",
-]
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    "DeepFeatureConfig": ("config", "DeepFeatureConfig"),
+    "DeepFeatureResult": ("deep", "DeepFeatureResult"),
+    "ExperimentConfig": ("config", "ExperimentConfig"),
+    "MultilevelExperimentConfig": ("config", "MultilevelExperimentConfig"),
+    "MultilevelOTConfig": ("config", "MultilevelOTConfig"),
+    "MultilevelPathConfig": ("config", "MultilevelPathConfig"),
+    "RegionGeometry": ("multilevel", "RegionGeometry"),
+    "SpatialOTFeatureEncoder": ("deep", "SpatialOTFeatureEncoder"),
+    "distribute_pooled_feature_cache_to_inputs": ("pooling", "distribute_pooled_feature_cache_to_inputs"),
+    "fit_deep_features": ("deep", "fit_deep_features"),
+    "fit_deep_features_on_h5ad": ("deep", "fit_deep_features_on_h5ad"),
+    "fit_multilevel_ot": ("multilevel", "fit_multilevel_ot"),
+    "fit_ot_shape_normalizer": ("multilevel", "fit_ot_shape_normalizer"),
+    "load_config": ("config", "load_config"),
+    "load_multilevel_config": ("config", "load_multilevel_config"),
+    "make_reference_points_unit_disk": ("multilevel", "make_reference_points_unit_disk"),
+    "plot_sample_niche_maps": ("multilevel", "plot_sample_niche_maps"),
+    "plot_sample_niche_maps_from_run_dir": ("multilevel", "plot_sample_niche_maps_from_run_dir"),
+    "plot_sample_spatial_maps": ("multilevel", "plot_sample_spatial_maps"),
+    "plot_sample_spatial_maps_from_run_dir": ("multilevel", "plot_sample_spatial_maps_from_run_dir"),
+    "pool_h5ad_files": ("pooling", "pool_h5ad_files"),
+    "pool_h5ads_in_directory": ("pooling", "pool_h5ads_in_directory"),
+    "prepare_h5ad_feature_cache": ("feature_source", "prepare_h5ad_feature_cache"),
+    "run_multilevel_optimal_search": ("optimal_search", "run_multilevel_optimal_search"),
+    "run_multilevel_ot_on_h5ad": ("multilevel", "run_multilevel_ot_on_h5ad"),
+    "run_multilevel_ot_with_config": ("multilevel", "run_multilevel_ot_with_config"),
+    "transform_h5ad_with_deep_model": ("deep", "transform_h5ad_with_deep_model"),
+}
+
+__all__ = list(_LAZY_EXPORTS)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
 
 
 def __getattr__(name: str):
-    if name in {
-        "DeepFeatureConfig",
-        "ExperimentConfig",
-        "MultilevelExperimentConfig",
-        "MultilevelOTConfig",
-        "MultilevelPathConfig",
-        "load_config",
-        "load_multilevel_config",
-    }:
-        from . import config
-
-        return getattr(config, name)
-    if name in {
-        "DeepFeatureResult",
-        "RegionGeometry",
-        "SpatialOTFeatureEncoder",
-        "fit_deep_features",
-        "fit_deep_features_on_h5ad",
-        "fit_multilevel_ot",
-        "fit_ot_shape_normalizer",
-        "make_reference_points_unit_disk",
-        "plot_sample_niche_maps",
-        "plot_sample_niche_maps_from_run_dir",
-        "plot_sample_spatial_maps",
-        "plot_sample_spatial_maps_from_run_dir",
-        "prepare_h5ad_feature_cache",
-        "run_multilevel_ot_on_h5ad",
-        "run_multilevel_ot_with_config",
-        "pool_h5ad_files",
-        "pool_h5ads_in_directory",
-        "transform_h5ad_with_deep_model",
-    }:
-        if name in {
-            "DeepFeatureResult",
-            "SpatialOTFeatureEncoder",
-            "fit_deep_features",
-            "fit_deep_features_on_h5ad",
-            "transform_h5ad_with_deep_model",
-        }:
-            from . import deep
-
-            return getattr(deep, name)
-        if name in {
-            "pool_h5ad_files",
-            "pool_h5ads_in_directory",
-            "prepare_h5ad_feature_cache",
-        }:
-            if name == "prepare_h5ad_feature_cache":
-                from . import feature_source
-
-                return getattr(feature_source, name)
-            from . import pooling
-
-            return getattr(pooling, name)
-        from . import multilevel
-
-        return getattr(multilevel, name)
-    raise AttributeError(f"module 'spatial_ot' has no attribute {name!r}")
+    try:
+        module_name, attr_name = _LAZY_EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module 'spatial_ot' has no attribute {name!r}") from exc
+    module = import_module(f".{module_name}", __name__)
+    return getattr(module, attr_name)

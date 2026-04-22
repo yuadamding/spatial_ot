@@ -125,7 +125,7 @@ class MultilevelOTConfig:
     atoms_per_cluster: int = 8
     radius_um: float = 100.0
     stride_um: float = 100.0
-    basic_niche_size_um: float | None = 200.0
+    basic_niche_size_um: float | None = 50.0
     min_cells: int = 25
     max_subregions: int = 1500
     lambda_x: float = 0.5

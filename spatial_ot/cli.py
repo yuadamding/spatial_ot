@@ -16,6 +16,7 @@ from .feature_source import prepare_h5ad_feature_cache
 from .legacy.training import run_experiment
 from .legacy.visualization import plot_preprocessed_inputs, plot_result_bundle
 from .multilevel import plot_sample_niche_maps_from_run_dir, run_multilevel_ot_with_config
+from .optimal_search import run_multilevel_optimal_search
 from .pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_directory
 
 
@@ -247,6 +248,59 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--seed", type=int, default=None, help="Random seed.")
     multilevel.add_argument("--compute-device", default=None, help="Torch compute device for the active multilevel OT path, or 'auto' to use CUDA when available.")
     _add_deep_args(multilevel)
+
+    optimal_search = sub.add_parser(
+        "optimal-search",
+        help="Run a staged multilevel OT parameter search using summary-level compactness, boundary, and OT-reliability diagnostics.",
+    )
+    optimal_search.add_argument("--config", help="Optional TOML config used as the search baseline.")
+    optimal_search.add_argument("--input-h5ad", help="Input cell-level H5AD.")
+    optimal_search.add_argument("--output-dir", help="Output directory for search artifacts and candidate runs.")
+    optimal_search.add_argument("--feature-obsm-key", help="Feature source used for the OT ground cost. Defaults to the pooled prepared feature cache when omitted.")
+    optimal_search.add_argument("--spatial-x-key", default=None, help="obs key for the x coordinate.")
+    optimal_search.add_argument("--spatial-y-key", default=None, help="obs key for the y coordinate.")
+    optimal_search.add_argument("--region-obs-key", help="Optional obs column defining explicit subregion membership.")
+    optimal_search.add_argument("--allow-umap-as-feature", action=argparse.BooleanOptionalAction, default=None, help="Allow UMAP coordinates as the OT feature space for exploratory runs.")
+    optimal_search.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value to convert them into microns.")
+    optimal_search.add_argument("--n-clusters", type=int, default=None, help="Baseline number of subregion clusters used to seed the search.")
+    optimal_search.add_argument("--atoms-per-cluster", type=int, default=None, help="Number of shared atoms per cluster.")
+    optimal_search.add_argument("--radius-um", type=float, default=None, help="Baseline subregion radius in microns.")
+    optimal_search.add_argument("--stride-um", type=float, default=None, help="Baseline subregion center stride in microns.")
+    optimal_search.add_argument("--basic-niche-size-um", type=float, default=None, help="Diameter in microns for the smallest basic niche blocks used to compose grid-built subregions.")
+    optimal_search.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
+    optimal_search.add_argument("--max-subregions", type=int, default=None, help="Maximum number of subregions retained after grid construction.")
+    optimal_search.add_argument("--lambda-x", type=float, default=None, help="Weight on canonical spatial coordinates in the OT cost.")
+    optimal_search.add_argument("--lambda-y", type=float, default=None, help="Weight on feature coordinates in the OT cost.")
+    optimal_search.add_argument("--geometry-eps", type=float, default=None, help="Entropic OT regularization for geometry-only normalization.")
+    optimal_search.add_argument("--ot-eps", type=float, default=None, help="Entropic regularization for the semi-relaxed OT clustering objective.")
+    optimal_search.add_argument("--rho", type=float, default=None, help="Relaxation strength for the target marginal.")
+    optimal_search.add_argument("--geometry-samples", type=int, default=None, help="Uniform geometry samples used to learn each subregion normalizer.")
+    optimal_search.add_argument("--compressed-support-size", type=int, default=None, help="Maximum compressed support points retained per subregion.")
+    optimal_search.add_argument("--align-iters", type=int, default=None, help="Residual similarity-alignment updates per subregion-cluster match.")
+    optimal_search.add_argument("--allow-reflection", action=argparse.BooleanOptionalAction, default=None, help="Allow reflections in the residual similarity alignment.")
+    optimal_search.add_argument("--allow-scale", action=argparse.BooleanOptionalAction, default=None, help="Allow scaling in the residual similarity alignment.")
+    optimal_search.add_argument("--min-scale", type=float, default=None, help="Lower bound on residual similarity scale when scaling is enabled.")
+    optimal_search.add_argument("--max-scale", type=float, default=None, help="Upper bound on residual similarity scale when scaling is enabled.")
+    optimal_search.add_argument("--scale-penalty", type=float, default=None, help="Penalty on residual scale drift from 1.0.")
+    optimal_search.add_argument("--shift-penalty", type=float, default=None, help="Penalty on residual translation magnitude in canonical space.")
+    optimal_search.add_argument("--n-init", type=int, default=None, help="Random restarts for the final confirmatory fits.")
+    optimal_search.add_argument("--overlap-consistency-weight", type=float, default=None, help="Penalty weight encouraging high-overlap subregions with low feature contrast to keep similar cluster assignments.")
+    optimal_search.add_argument("--overlap-jaccard-min", type=float, default=None, help="Minimum subregion-overlap Jaccard retained by the overlap-consistency graph.")
+    optimal_search.add_argument("--overlap-contrast-scale", type=float, default=None, help="Contrast scale for gating the overlap-consistency penalty.")
+    optimal_search.add_argument("--allow-observed-hull-geometry", action=argparse.BooleanOptionalAction, default=None, help="Allow observed-coordinate convex hull fallback when explicit region geometry is unavailable.")
+    optimal_search.add_argument("--max-iter", type=int, default=None, help="Maximum alternating-optimization iterations for final confirmatory fits.")
+    optimal_search.add_argument("--tol", type=float, default=None, help="Support-shift tolerance for early stopping.")
+    optimal_search.add_argument("--seed", type=int, default=None, help="Random seed.")
+    optimal_search.add_argument("--compute-device", default=None, help="Torch compute device for the active multilevel OT path, or 'auto' to use CUDA when available.")
+    optimal_search.add_argument("--time-budget-hours", type=float, default=20.0, help="Maximum wall-clock budget for the staged search.")
+    optimal_search.add_argument("--keep-top-k", type=int, default=3, help="Number of highest-scoring candidate directories that keep full artifacts during the search.")
+    optimal_search.add_argument("--sample-obs-key", default="sample_id", help="obs key used when writing one best-run niche map per sample.")
+    optimal_search.add_argument("--source-file-obs-key", default="source_h5ad", help="obs key tracking the source H5AD used for pooled runs.")
+    optimal_search.add_argument("--plot-spatial-x-key", default="cell_x", help="obs x key used for best-run per-sample niche plots.")
+    optimal_search.add_argument("--plot-spatial-y-key", default="cell_y", help="obs y key used for best-run per-sample niche plots.")
+    optimal_search.add_argument("--default-sample-id", default="pooled_cohort", help="Fallback sample id for single-sample plotting.")
+    optimal_search.add_argument("--plot-best-sample-maps", action=argparse.BooleanOptionalAction, default=True, help="Render one spatial niche PNG per sample for the highest-scoring run.")
+    _add_deep_args(optimal_search)
     return parser
 
 
@@ -496,6 +550,21 @@ def main() -> None:
     elif args.command == "multilevel-ot":
         config = _resolve_multilevel_config_from_args(args)
         summary = run_multilevel_ot_with_config(config)
+        print(json.dumps(summary, indent=2))
+    elif args.command == "optimal-search":
+        config = _resolve_multilevel_config_from_args(args)
+        summary = run_multilevel_optimal_search(
+            config=config,
+            search_output_dir=args.output_dir or config.paths.output_dir,
+            sample_obs_key=args.sample_obs_key,
+            source_file_obs_key=args.source_file_obs_key,
+            plot_spatial_x_key=args.plot_spatial_x_key,
+            plot_spatial_y_key=args.plot_spatial_y_key,
+            default_sample_id=args.default_sample_id,
+            time_budget_hours=args.time_budget_hours,
+            keep_top_k=args.keep_top_k,
+            plot_best_sample_maps=bool(args.plot_best_sample_maps),
+        )
         print(json.dumps(summary, indent=2))
 
 

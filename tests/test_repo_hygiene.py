@@ -74,10 +74,12 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'COMPUTE_DEVICE="${COMPUTE_DEVICE:-cuda}"' in run_sh
     assert 'RADIUS_UM="${RADIUS_UM:-100}"' in run_sh
     assert 'STRIDE_UM="${STRIDE_UM:-$RADIUS_UM}"' in run_sh
-    assert 'MIN_CELLS="${MIN_CELLS:-1}"' in run_sh
-    assert 'MAX_SUBREGIONS="${MAX_SUBREGIONS:-0}"' in run_sh
+    assert 'BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-50}"' in run_sh
+    assert 'MIN_CELLS="${MIN_CELLS:-25}"' in run_sh
+    assert 'MAX_SUBREGIONS="${MAX_SUBREGIONS:-1500}"' in run_sh
     assert 'REQUIRE_FULL_CELL_COVERAGE="${REQUIRE_FULL_CELL_COVERAGE:-1}"' in run_sh
     assert 'ALLOW_UMAP_AS_FEATURE="${ALLOW_UMAP_AS_FEATURE:-0}"' in run_sh
+    assert 'ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"' in run_sh
     assert 'CPU_THREADS="${CPU_THREADS:-28}"' in run_sh
     assert 'CUDA_DEVICE_LIST="${CUDA_DEVICE_LIST:-all}"' in run_sh
     assert 'PARALLEL_RESTARTS="${PARALLEL_RESTARTS:-auto}"' in run_sh
@@ -88,6 +90,10 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-context}"' in run_sh
     assert 'DEEP_DEVICE="${DEEP_DEVICE:-cuda}"' in run_sh
     assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-32768}"' in run_sh
+    assert 'LAMBDA_X="${LAMBDA_X:-0.5}"' in run_sh
+    assert 'LAMBDA_Y="${LAMBDA_Y:-1.0}"' in run_sh
+    assert 'OT_EPS="${OT_EPS:-0.03}"' in run_sh
+    assert 'OVERLAP_CONSISTENCY_WEIGHT="${OVERLAP_CONSISTENCY_WEIGHT:-0.05}"' in run_sh
     assert 'export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPU_THREADS}"' in run_sh
     assert 'export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CPU_THREADS}"' in run_sh
     assert 'export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$CPU_THREADS}"' in run_sh
@@ -112,6 +118,9 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert '--max-subregions "$MAX_SUBREGIONS"' in run_sh
     assert '--radius-um "$RADIUS_UM"' in run_sh
     assert '--stride-um "$STRIDE_UM"' in run_sh
+    assert '--lambda-x "$LAMBDA_X"' in run_sh
+    assert '--lambda-y "$LAMBDA_Y"' in run_sh
+    assert '--overlap-consistency-weight "$OVERLAP_CONSISTENCY_WEIGHT"' in run_sh
     assert '--deep-feature-method "$DEEP_FEATURE_METHOD"' in run_sh
     assert '--deep-output-embedding "$DEEP_OUTPUT_EMBEDDING"' in run_sh
     assert '--deep-device "$DEEP_DEVICE"' in run_sh
@@ -152,24 +161,73 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-none}"' in exploratory_sh
     assert "exec bash \"$SCRIPT_DIR/run.sh\"" in p2_sh
     assert "exec bash \"$SCRIPT_DIR/run.sh\"" in exploratory_sh
+    optimal_search_sh = (repo_root / "run_optimal_setting_search.sh").read_text()
+    assert "../spatial_ot_input/spatial_ot_input_pooled.h5ad" in optimal_search_sh
+    assert "../work/spatial_ot_runs/cohort_optimal_search" in optimal_search_sh
+    assert "optimal-search" in optimal_search_sh
+    assert 'BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-50}"' in optimal_search_sh
+    assert 'TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-20}"' in optimal_search_sh
     assert "../spatial_ot_input/" in config_toml
     assert "../outputs/" in config_toml
     assert 'feature_obsm_key = "X"' in config_toml
     assert "allow_umap_as_feature = false" in config_toml
     assert 'output_embedding = "context"' in config_toml
-    assert "min_cells = 1" in config_toml
-    assert "max_subregions = 0" in config_toml
-    assert "allow_convex_hull_fallback = true" in config_toml
+    assert "basic_niche_size_um = 50.0" in config_toml
+    assert "min_cells = 25" in config_toml
+    assert "max_subregions = 1500" in config_toml
+    assert "allow_convex_hull_fallback = false" in config_toml
 
-    legacy_training_py = (repo_root / "spatial_ot" / "training.py").read_text()
+    legacy_training_py = (repo_root / "spatial_ot" / "legacy" / "training.py").read_text()
+    legacy_training_facade_py = (repo_root / "spatial_ot" / "training.py").read_text()
     deep_io_py = (repo_root / "spatial_ot" / "deep" / "io.py").read_text()
     multilevel_io_py = (repo_root / "spatial_ot" / "multilevel" / "io.py").read_text()
     assert '"method_family": "legacy_teacher_student"' in legacy_training_py
     assert '"communication_source": "legacy"' in legacy_training_py
+    assert "from .legacy.training import *" in legacy_training_facade_py
     assert '"method_family": "deep_feature_adapter"' in deep_io_py
     assert '"communication_source": "none"' in deep_io_py
     assert '"method_family": "multilevel_ot"' in multilevel_io_py
     assert '"communication_source": "none"' in multilevel_io_py
+
+
+def test_legacy_namespace_is_canonical_and_root_modules_are_facades() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+
+    compatibility_modules = {
+        "communication": "from .legacy.communication import CommunicationResult, _masked_sinkhorn, fit_communication_flows",
+        "nn": "from .legacy.nn import *",
+        "ot": "from .legacy.ot import *",
+        "preprocessing": "from .legacy.preprocessing import *",
+        "programs": "from .legacy.programs import *",
+        "training": "from .legacy.training import *",
+        "visualization": "from .legacy.visualization import *",
+    }
+    for module_name, expected_import in compatibility_modules.items():
+        canonical_path = repo_root / "spatial_ot" / "legacy" / f"{module_name}.py"
+        facade_path = repo_root / "spatial_ot" / f"{module_name}.py"
+        assert canonical_path.exists(), canonical_path
+        facade_text = facade_path.read_text()
+        assert expected_import in facade_text
+
+
+def test_root_package_exports_active_helpers_without_eager_import_failures() -> None:
+    import spatial_ot
+
+    expected_exports = {
+        "fit_deep_features_on_h5ad",
+        "fit_multilevel_ot",
+        "plot_sample_niche_maps_from_run_dir",
+        "pool_h5ad_files",
+        "pool_h5ads_in_directory",
+        "prepare_h5ad_feature_cache",
+        "distribute_pooled_feature_cache_to_inputs",
+        "run_multilevel_optimal_search",
+        "run_multilevel_ot_with_config",
+    }
+
+    assert expected_exports.issubset(set(spatial_ot.__all__))
+    for name in expected_exports:
+        assert hasattr(spatial_ot, name), name
 
 
 def test_module_and_console_entrypoints_resolve_active_cli() -> None:

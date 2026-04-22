@@ -27,12 +27,12 @@ ATOMS_PER_CLUSTER="${ATOMS_PER_CLUSTER:-8}"
 COMPUTE_DEVICE="${COMPUTE_DEVICE:-cuda}"
 RADIUS_UM="${RADIUS_UM:-100}"
 STRIDE_UM="${STRIDE_UM:-$RADIUS_UM}"
-BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-200}"
-MIN_CELLS="${MIN_CELLS:-1}"
-MAX_SUBREGIONS="${MAX_SUBREGIONS:-0}"
+BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-50}"
+MIN_CELLS="${MIN_CELLS:-25}"
+MAX_SUBREGIONS="${MAX_SUBREGIONS:-1500}"
 REQUIRE_FULL_CELL_COVERAGE="${REQUIRE_FULL_CELL_COVERAGE:-1}"
 ALLOW_UMAP_AS_FEATURE="${ALLOW_UMAP_AS_FEATURE:-0}"
-ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-1}"
+ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"
 PLOT_SAMPLE_NICHES="${PLOT_SAMPLE_NICHES:-1}"
 CPU_THREADS="${CPU_THREADS:-28}"
 TORCH_INTRAOP_THREADS="${TORCH_INTRAOP_THREADS:-$CPU_THREADS}"
@@ -70,6 +70,26 @@ DEEP_CONTRASTIVE_WEIGHT="${DEEP_CONTRASTIVE_WEIGHT:-0.1}"
 DEEP_VARIANCE_WEIGHT="${DEEP_VARIANCE_WEIGHT:-0.1}"
 DEEP_DECORRELATION_WEIGHT="${DEEP_DECORRELATION_WEIGHT:-0.01}"
 DEEP_SAVE_MODEL="${DEEP_SAVE_MODEL:-1}"
+LAMBDA_X="${LAMBDA_X:-0.5}"
+LAMBDA_Y="${LAMBDA_Y:-1.0}"
+GEOMETRY_EPS="${GEOMETRY_EPS:-0.03}"
+OT_EPS="${OT_EPS:-0.03}"
+RHO="${RHO:-0.5}"
+GEOMETRY_SAMPLES="${GEOMETRY_SAMPLES:-192}"
+COMPRESSED_SUPPORT_SIZE="${COMPRESSED_SUPPORT_SIZE:-96}"
+ALIGN_ITERS="${ALIGN_ITERS:-4}"
+ALLOW_REFLECTION="${ALLOW_REFLECTION:-0}"
+ALLOW_SCALE="${ALLOW_SCALE:-0}"
+MIN_SCALE="${MIN_SCALE:-0.75}"
+MAX_SCALE="${MAX_SCALE:-1.33}"
+SCALE_PENALTY="${SCALE_PENALTY:-0.05}"
+SHIFT_PENALTY="${SHIFT_PENALTY:-0.05}"
+N_INIT="${N_INIT:-5}"
+OVERLAP_CONSISTENCY_WEIGHT="${OVERLAP_CONSISTENCY_WEIGHT:-0.05}"
+OVERLAP_JACCARD_MIN="${OVERLAP_JACCARD_MIN:-0.15}"
+OVERLAP_CONTRAST_SCALE="${OVERLAP_CONTRAST_SCALE:-1.0}"
+MAX_ITER="${MAX_ITER:-10}"
+TOL="${TOL:-1e-4}"
 
 if [[ -z "$FEATURE_OBSM_KEY" ]]; then
   if [[ "$PREPARE_INPUTS_AHEAD" == "1" ]]; then
@@ -187,6 +207,18 @@ if [[ "$ALLOW_UMAP_AS_FEATURE" == "1" ]]; then
 fi
 if [[ "$ALLOW_OBSERVED_HULL_GEOMETRY" == "1" ]]; then
   EXTRA_FLAGS+=(--allow-observed-hull-geometry)
+else
+  EXTRA_FLAGS+=(--no-allow-observed-hull-geometry)
+fi
+if [[ "$ALLOW_REFLECTION" == "1" ]]; then
+  EXTRA_FLAGS+=(--allow-reflection)
+else
+  EXTRA_FLAGS+=(--no-allow-reflection)
+fi
+if [[ "$ALLOW_SCALE" == "1" ]]; then
+  EXTRA_FLAGS+=(--allow-scale)
+else
+  EXTRA_FLAGS+=(--no-allow-scale)
 fi
 
 DEEP_FLAGS=()
@@ -246,17 +278,24 @@ fi
   --basic-niche-size-um "$BASIC_NICHE_SIZE_UM" \
   --min-cells "$MIN_CELLS" \
   --max-subregions "$MAX_SUBREGIONS" \
-  --lambda-x 0.5 \
-  --lambda-y 1.0 \
-  --geometry-eps 0.03 \
-  --ot-eps 0.03 \
-  --rho 0.5 \
-  --geometry-samples 192 \
-  --compressed-support-size 96 \
-  --align-iters 4 \
-  --n-init 5 \
-  --max-iter 10 \
-  --tol 1e-4 \
+  --lambda-x "$LAMBDA_X" \
+  --lambda-y "$LAMBDA_Y" \
+  --geometry-eps "$GEOMETRY_EPS" \
+  --ot-eps "$OT_EPS" \
+  --rho "$RHO" \
+  --geometry-samples "$GEOMETRY_SAMPLES" \
+  --compressed-support-size "$COMPRESSED_SUPPORT_SIZE" \
+  --align-iters "$ALIGN_ITERS" \
+  --min-scale "$MIN_SCALE" \
+  --max-scale "$MAX_SCALE" \
+  --scale-penalty "$SCALE_PENALTY" \
+  --shift-penalty "$SHIFT_PENALTY" \
+  --n-init "$N_INIT" \
+  --overlap-consistency-weight "$OVERLAP_CONSISTENCY_WEIGHT" \
+  --overlap-jaccard-min "$OVERLAP_JACCARD_MIN" \
+  --overlap-contrast-scale "$OVERLAP_CONTRAST_SCALE" \
+  --max-iter "$MAX_ITER" \
+  --tol "$TOL" \
   --seed 1337 \
   "${DEEP_FLAGS[@]}" \
   "${EXTRA_FLAGS[@]}"

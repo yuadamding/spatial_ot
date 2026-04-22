@@ -52,8 +52,8 @@ Method hierarchy:
 
 - `spatial_ot/multilevel/`: active multilevel OT path, split into a dedicated namespace
 - `spatial_ot/deep/`: reusable deep feature adapter namespace
-- `spatial_ot/legacy/`: earlier teacher-student scaffold, kept for backward-compatible legacy experiments
-- `spatial_ot/`: top-level compatibility shims and shared config/CLI entrypoints
+- `spatial_ot/legacy/`: canonical home of the earlier teacher-student scaffold
+- `spatial_ot/`: shared config/CLI entrypoints plus thin backward-compatible facades for older import paths such as `spatial_ot.training`, `spatial_ot.preprocessing`, and `spatial_ot.multilevel_ot`
 - `configs/`: config files and demo prior programs
 - `tests/`: regression and multilevel OT tests
 
@@ -113,7 +113,7 @@ The current deep feature adapter is still a research-stage component, but it is 
 - using `output_embedding = "joint"` as the OT feature view now requires explicit opt-in; the example config uses `context` instead
 - `validation_context_mode = "inductive"` keeps train and validation neighborhood targets separated to reduce transductive leakage
 - `batch_key` currently supports validation/sample-holdout bookkeeping, not true batch correction
-- `count_layer` is reserved but not implemented for count reconstruction yet
+- `count_layer` now enables count-aware denoising against `X` or a named count layer through a low-rank chunked decoder
 - the packaged shell runner now requests `cuda` explicitly by default, while the Python API and TOML config surface still accept `auto` or an explicit device string such as `cuda:0`
 - the packaged `run.sh` path now defaults to `deep.method = "autoencoder"` with `output_embedding = "context"` over the prepared full-gene SVD cache; set `DEEP_FEATURE_METHOD=none` to disable the deep adapter
 - `graph_autoencoder` remains full-batch only, and `deep.full_batch_max_cells` now guards against accidental oversize runs
@@ -127,8 +127,8 @@ Current deep-path capability snapshot:
 | graph density cap via `graph_max_neighbors` | implemented |
 | deep-only `fit` / `transform` lifecycle | implemented |
 | explicit opt-in required for `joint` OT view | implemented |
+| count reconstruction via `count_layer` | implemented |
 | mini-batch graph training | not implemented |
-| count reconstruction | not implemented |
 | batch adversarial correction | not implemented |
 | OT-aware fine-tuning | not implemented |
 | multilevel OT prediction bundle for new samples | not implemented |
@@ -370,7 +370,7 @@ cd spatial_ot
   --plot-spatial-y-key cell_y
 ```
 
-For grid-built multilevel OT runs, `basic_niche_size_um` sets the smallest building block used to compose larger subregions. The current default active-path recommendation is a `200 µm` basic niche diameter.
+For grid-built multilevel OT runs, `basic_niche_size_um` sets the smallest building block used to compose larger subregions. The packaged default now uses a `50 µm` basic niche diameter so the smallest building block stays local and the larger OT subregions are composed from finer units.
 
 Key artifacts from this path:
 
@@ -405,7 +405,9 @@ Helper scripts:
   It also defaults to `CPU_THREADS=28` and configures BLAS plus Torch CPU threading for that budget.
   It also defaults to `CUDA_DEVICE_LIST=all`, `PARALLEL_RESTARTS=auto`, and `CUDA_TARGET_VRAM_GB=50` to push the OT runtime harder on multi-GPU H100-class nodes.
   It defaults to `FEATURE_OBSM_KEY=X`, so pooled runs learn from the full gene matrix instead of the packaged UMAP coordinates.
-  It defaults to `MIN_CELLS=1` and `MAX_SUBREGIONS=0`, so the packaged run keeps all candidate cells and subregions instead of clipping to a smaller packaged subset.
+  It now defaults to `BASIC_NICHE_SIZE_UM=50`, `MIN_CELLS=25`, and `MAX_SUBREGIONS=1500` so the packaged run is less likely to chase single-cell noise or blow up GPU memory.
+  It now keeps observed-hull geometry fallback off by default; explicitly opt in only for exploratory runs where boundary-shape invariance is not required.
+- `run_optimal_setting_search.sh`: packaged launcher for the staged pooled-cohort search; it uses the prepared pooled feature cache, writes ranked candidate summaries under `../work/spatial_ot_runs/cohort_optimal_search/`, and keeps one full best-run niche map per sample
 - `run_spatial_ot_input.sh`: backward-compatible alias for `run.sh`
 - `run_p2_crc_multilevel_ot.sh`: pinned single-sample alias that defaults `SAMPLE_KEY=p2_crc`
 - `run_p2_crc_multilevel_ot_exploratory_umap.sh`: backward-compatible exploratory single-sample alias for `p2_crc`; it explicitly switches `FEATURE_OBSM_KEY` back to `X_umap_marker_genes_3d`
