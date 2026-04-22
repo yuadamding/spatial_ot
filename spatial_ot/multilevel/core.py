@@ -12,6 +12,19 @@ from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.metrics import pairwise_distances
 import torch
 
+from .._runtime import runtime_memory_snapshot as _runtime_memory_snapshot
+from .runtime import (
+    configure_local_thread_budget as _configure_local_thread_budget,
+    cuda_cdist_row_batch_size as _cuda_cdist_row_batch_size,
+    cuda_target_bytes as _cuda_target_bytes,
+    cuda_target_vram_gb as _cuda_target_vram_gb,
+    env_float as _env_float,
+    env_int as _env_int,
+    relative_change as _relative_change,
+    resolve_compute_device as _resolve_compute_device,
+    resolve_cuda_device_pool as _resolve_cuda_device_pool,
+    resolve_parallel_restart_workers as _resolve_parallel_restart_workers,
+)
 from .geometry import (
     _normalize_hist,
     _softmax_over_negative_costs,
@@ -31,147 +44,6 @@ from .types import MultilevelOTResult, OTSolveDiagnostics, OptimizationMeasure, 
 _RESTART_WORKER_MEASURES: list[OptimizationMeasure] | None = None
 _RESTART_WORKER_SUMMARIES: np.ndarray | None = None
 _RESTART_WORKER_PARAMS: dict[str, object] | None = None
-
-
-def _relative_change(new: np.ndarray, old: np.ndarray) -> float:
-    new = np.asarray(new, dtype=np.float64)
-    old = np.asarray(old, dtype=np.float64)
-    return float(np.linalg.norm(new - old) / max(np.linalg.norm(old), 1e-12))
-
-
-def _resolve_compute_device(device: str) -> torch.device:
-    requested = str(device).strip()
-    if requested == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    resolved = torch.device(requested)
-    if resolved.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA compute was requested for multilevel OT, but torch.cuda.is_available() is False.")
-    return resolved
-
-
-def _runtime_memory_snapshot(device: torch.device) -> dict[str, float | int | bool | str]:
-    snapshot: dict[str, float | int | bool | str] = {
-        "device": str(device),
-        "cuda": bool(device.type == "cuda" and torch.cuda.is_available()),
-    }
-    if device.type != "cuda" or not torch.cuda.is_available():
-        return snapshot
-    try:
-        torch.cuda.synchronize(device)
-    except Exception:
-        pass
-    try:
-        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
-    except Exception:
-        free_bytes, total_bytes = 0, 0
-    snapshot.update(
-        {
-            "memory_allocated_bytes": int(torch.cuda.memory_allocated(device)),
-            "memory_reserved_bytes": int(torch.cuda.memory_reserved(device)),
-            "max_memory_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
-            "max_memory_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
-            "memory_free_bytes": int(free_bytes),
-            "memory_total_bytes": int(total_bytes),
-        }
-    )
-    return snapshot
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return int(default)
-    try:
-        value = int(raw)
-    except ValueError:
-        return int(default)
-    return int(default) if value <= 0 else value
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return float(default)
-    try:
-        value = float(raw)
-    except ValueError:
-        return float(default)
-    return float(default) if value <= 0 else float(value)
-
-
-def _cuda_target_vram_gb() -> float:
-    return _env_float("SPATIAL_OT_CUDA_TARGET_VRAM_GB", 50.0)
-
-
-def _cuda_target_bytes(device: torch.device | None = None) -> int:
-    requested = int(_cuda_target_vram_gb() * (1024**3))
-    if not torch.cuda.is_available():
-        return requested
-    try:
-        dev = device or torch.device("cuda")
-        total_bytes = int(torch.cuda.get_device_properties(dev).total_memory)
-    except Exception:
-        return requested
-    safe_bytes = int(max(total_bytes * 0.8, 1 << 30))
-    return min(requested, safe_bytes)
-
-
-def _cuda_cdist_row_batch_size(
-    *,
-    n_rows: int,
-    n_cols: int,
-    device: torch.device,
-    per_pair_buffers: int = 3,
-    min_batch: int = 256,
-) -> int:
-    if n_rows <= 0:
-        return 1
-    bytes_per = 4
-    denom = max(int(per_pair_buffers) * max(int(n_cols), 1) * bytes_per, 1)
-    batch = _cuda_target_bytes(device=device) // denom
-    batch = max(int(min_batch), min(int(n_rows), int(batch)))
-    return max(batch, 1)
-
-
-def _resolve_cuda_device_pool(requested: str, n_init: int) -> list[str]:
-    normalized = str(requested).strip()
-    if int(n_init) <= 1:
-        return [normalized]
-    if normalized == "auto":
-        normalized = "cuda" if torch.cuda.is_available() else "cpu"
-    if not normalized.startswith("cuda"):
-        return [normalized]
-    if not torch.cuda.is_available():
-        return [normalized]
-
-    explicit = os.environ.get("SPATIAL_OT_CUDA_DEVICE_LIST", "").strip()
-    if explicit and explicit.lower() != "all":
-        devices = []
-        for token in explicit.split(","):
-            token = token.strip()
-            if not token:
-                continue
-            devices.append(token if token.startswith("cuda") else f"cuda:{token}")
-        return devices or [normalized]
-    if normalized.startswith("cuda:"):
-        return [normalized]
-    visible_count = int(torch.cuda.device_count())
-    if visible_count <= 1:
-        return ["cuda:0"]
-    return [f"cuda:{idx}" for idx in range(visible_count)]
-
-
-def _resolve_parallel_restart_workers(device_pool: list[str], n_init: int) -> int:
-    if len(device_pool) <= 1 or int(n_init) <= 1:
-        return 1
-    requested = os.environ.get("SPATIAL_OT_PARALLEL_RESTARTS", "auto").strip().lower()
-    if requested == "auto":
-        return max(1, min(len(device_pool), int(n_init)))
-    try:
-        value = int(requested)
-    except ValueError:
-        return max(1, min(len(device_pool), int(n_init)))
-    return max(1, min(value, len(device_pool), int(n_init)))
 
 
 def _make_optimization_measures(measures: list[SubregionMeasure]) -> list[OptimizationMeasure]:
@@ -297,30 +169,6 @@ def _apply_overlap_consistency_regularization(
     )
     weighted_penalties = float(overlap_consistency_weight) * penalties
     return (costs + weighted_penalties).astype(np.float32), weighted_penalties.astype(np.float32)
-
-
-def _configure_local_thread_budget(torch_threads: int, torch_interop_threads: int) -> None:
-    torch_threads = max(int(torch_threads), 1)
-    torch_interop_threads = max(int(torch_interop_threads), 1)
-    for name in [
-        "OMP_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS",
-        "VECLIB_MAXIMUM_THREADS",
-        "BLIS_NUM_THREADS",
-    ]:
-        os.environ[name] = str(torch_threads)
-    os.environ["SPATIAL_OT_TORCH_NUM_THREADS"] = str(torch_threads)
-    os.environ["SPATIAL_OT_TORCH_NUM_INTEROP_THREADS"] = str(torch_interop_threads)
-    try:
-        torch.set_num_threads(torch_threads)
-    except Exception:
-        pass
-    try:
-        torch.set_num_interop_threads(torch_interop_threads)
-    except Exception:
-        pass
 
 
 def _init_restart_worker(
@@ -1791,14 +1639,31 @@ def _cell_cluster_feature_costs(
         costs_t = torch.empty((n_cells, n_clusters), dtype=dtype, device=compute_device)
         feat_dim = int(features.shape[1]) if features.ndim == 2 else 1
         support_size = int(support_features.shape[1]) if support_features.ndim >= 2 else 1
-        denom = max(n_clusters * max(2 * support_size + feat_dim, 1) * 4, 1)
+        # Score one cluster at a time to avoid duplicating the cell batch K times
+        # on the GPU, then shrink the cell batch if cdist still runs out of memory.
+        denom = max(max(2 * support_size + feat_dim, 1) * 16, 1)
         batch = max(1, min(n_cells, _cuda_target_bytes(device=compute_device) // denom))
         with torch.inference_mode():
             for start in range(0, n_cells, batch):
-                f_chunk = feats_t[start : start + batch].unsqueeze(0).expand(n_clusters, -1, -1)
-                dist = torch.cdist(f_chunk, support_t, p=2).pow(2)                     # (K, B, p)
-                scaled = torch.exp(-dist / temp) * weights_t.unsqueeze(1)              # (K, B, p)
-                costs_t[start : start + batch] = (-temp * torch.log(scaled.sum(dim=-1).clamp_min(1e-8))).transpose(0, 1)
+                stop = min(start + batch, n_cells)
+                chunk_done = False
+                while not chunk_done:
+                    try:
+                        f_chunk = feats_t[start:stop]
+                        for k in range(n_clusters):
+                            dist = torch.cdist(f_chunk, support_t[k], p=2).pow(2)      # (B, p)
+                            scaled = torch.exp(-dist / temp) * weights_t[k].unsqueeze(0)
+                            costs_t[start:stop, k] = -temp * torch.log(scaled.sum(dim=-1).clamp_min(1e-8))
+                        chunk_done = True
+                    except torch.OutOfMemoryError:
+                        if stop - start <= 1:
+                            raise
+                        if torch.cuda.is_available():
+                            try:
+                                torch.cuda.empty_cache()
+                            except Exception:
+                                pass
+                        stop = start + max((stop - start) // 2, 1)
         return costs_t.detach().cpu().numpy().astype(np.float32)
     costs = np.zeros((n_cells, n_clusters), dtype=np.float32)
     for k in range(n_clusters):

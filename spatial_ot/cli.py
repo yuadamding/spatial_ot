@@ -88,6 +88,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run spatial_ot multilevel OT utilities and legacy scaffold commands.")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    doctor = sub.add_parser(
+        "doctor",
+        help="Report package / torch / CUDA state and check run.sh shell defaults against dataclass defaults.",
+    )
+    doctor.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit with non-zero status when the report status is not 'ok'.",
+    )
+
     train = sub.add_parser("train", help="Run a staged training experiment.")
     train.add_argument("--config", required=True, help="Path to a TOML config file.")
 
@@ -453,6 +463,13 @@ def main() -> None:
     _configure_runtime_threads_from_env()
     parser = build_parser()
     args = parser.parse_args()
+    if args.command == "doctor":
+        from .doctor import run_doctor
+
+        report = run_doctor(verbose=True)
+        if args.strict and report.get("status") != "ok":
+            raise SystemExit(1)
+        return
     if args.command == "train":
         config = load_config(args.config)
         summary = run_experiment(config)

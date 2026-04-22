@@ -7,6 +7,7 @@ import pandas as pd
 from sklearn.metrics import pairwise_distances
 
 from ..config import ExperimentConfig
+from ._utils import normalize_mass as _normalize_mass
 from .preprocessing import PreparedSpatialOTData
 
 
@@ -31,13 +32,6 @@ def _ridge_fit(x: np.ndarray, y: np.ndarray, alpha: float) -> tuple[float, float
     denom_r2 = float(np.sum((y - y.mean()) ** 2))
     r2 = 0.0 if denom_r2 <= 0 else 1.0 - float(np.sum((y - pred) ** 2)) / denom_r2
     return beta, r2
-
-
-def _normalize_mass(x: np.ndarray) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float32)
-    x = np.clip(x, 0.0, None)
-    x = x + 1e-6
-    return x / x.sum()
 
 
 def _masked_sinkhorn(

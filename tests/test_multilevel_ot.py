@@ -4,6 +4,7 @@ import numpy as np
 from sklearn.metrics import adjusted_rand_score
 import torch
 
+from spatial_ot.multilevel.core import _cell_cluster_feature_costs
 from spatial_ot.multilevel_ot import (
     RegionGeometry,
     ShapeNormalizer,
@@ -50,6 +51,48 @@ def test_build_subregions_respects_min_cells() -> None:
     )
     assert centers.shape[0] >= 2
     assert all(len(m) >= 3 for m in members)
+
+
+def test_cell_cluster_feature_costs_match_manual_softmin_scores() -> None:
+    features = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    support_features = np.array(
+        [
+            [[0.0, 0.0], [1.0, 0.0]],
+            [[0.0, 1.0], [1.0, 1.0]],
+        ],
+        dtype=np.float32,
+    )
+    prototype_weights = np.array(
+        [
+            [0.6, 0.4],
+            [0.5, 0.5],
+        ],
+        dtype=np.float32,
+    )
+    temperature = 0.3
+
+    observed = _cell_cluster_feature_costs(
+        features=features,
+        support_features=support_features,
+        prototype_weights=prototype_weights,
+        temperature=temperature,
+        compute_device=torch.device("cpu"),
+    )
+
+    expected = np.zeros_like(observed)
+    for k in range(support_features.shape[0]):
+        dist = ((features[:, None, :] - support_features[k][None, :, :]) ** 2).sum(axis=-1)
+        scores = np.exp(-dist / temperature) * prototype_weights[k][None, :]
+        expected[:, k] = -temperature * np.log(np.maximum(scores.sum(axis=1), 1e-8))
+
+    assert np.allclose(observed, expected, atol=1e-6)
 
 
 def test_composite_subregions_are_unions_of_basic_niches() -> None:

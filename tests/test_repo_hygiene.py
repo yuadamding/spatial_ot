@@ -167,6 +167,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "optimal-search" in optimal_search_sh
     assert 'BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-50}"' in optimal_search_sh
     assert 'TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-20}"' in optimal_search_sh
+    assert 'ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-1}"' in optimal_search_sh
     assert "../spatial_ot_input/" in config_toml
     assert "../outputs/" in config_toml
     assert 'feature_obsm_key = "X"' in config_toml

@@ -4,6 +4,25 @@ import torch
 import torch.nn.functional as F
 
 
+def negative_binomial_loss(
+    counts: torch.Tensor,
+    mu: torch.Tensor,
+    theta: torch.Tensor,
+) -> torch.Tensor:
+    counts = counts.to(mu.dtype)
+    mu = mu.clamp_min(1e-6)
+    theta = theta.clamp_min(1e-6)
+    log_mu_theta = torch.log(mu + theta)
+    log_prob = (
+        torch.lgamma(counts + theta)
+        - torch.lgamma(theta)
+        - torch.lgamma(counts + 1.0)
+        + theta * (torch.log(theta) - log_mu_theta)
+        + counts * (torch.log(mu) - log_mu_theta)
+    )
+    return -log_prob.mean()
+
+
 def off_diagonal(x: torch.Tensor) -> torch.Tensor:
     n, m = x.shape
     if n != m:

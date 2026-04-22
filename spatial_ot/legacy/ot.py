@@ -8,6 +8,7 @@ from sklearn.cluster import MiniBatchKMeans
 from sklearn.metrics import pairwise_distances
 
 from ..config import ExperimentConfig
+from ._utils import normalize_mass as _normalize_mass
 from .preprocessing import PreparedSpatialOTData
 
 
@@ -24,13 +25,6 @@ class NicheResult:
     niche_probs: np.ndarray
     niche_labels: np.ndarray
     distance_matrix: np.ndarray
-
-
-def _normalize_mass(x: np.ndarray) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float32)
-    x = np.clip(x, 0.0, None)
-    x = x + 1e-6
-    return x / x.sum()
 
 
 def _row_softmax(x: np.ndarray, temperature: float) -> np.ndarray:
