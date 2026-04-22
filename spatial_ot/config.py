@@ -143,6 +143,9 @@ class MultilevelOTConfig:
     scale_penalty: float = 0.05
     shift_penalty: float = 0.05
     n_init: int = 5
+    overlap_consistency_weight: float = 0.05
+    overlap_jaccard_min: float = 0.15
+    overlap_contrast_scale: float = 1.0
     allow_convex_hull_fallback: bool = False
     max_iter: int = 10
     tol: float = 1e-4
@@ -172,6 +175,9 @@ class DeepFeatureConfig:
     validation_context_mode: str = "inductive"
     batch_key: str | None = None
     count_layer: str | None = None
+    count_decoder_rank: int = 32
+    count_chunk_size: int = 1024
+    count_loss_weight: float = 0.5
     device: str = "auto"
     reconstruction_weight: float = 1.0
     context_weight: float = 0.5
@@ -278,6 +284,12 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.max_subregions must be positive or 0")
     if config.ot.lambda_x < 0 or config.ot.lambda_y < 0:
         raise ValueError("ot.lambda_x and ot.lambda_y must be non-negative")
+    if config.ot.overlap_consistency_weight < 0:
+        raise ValueError("ot.overlap_consistency_weight must be >= 0")
+    if config.ot.overlap_jaccard_min < 0 or config.ot.overlap_jaccard_min > 1:
+        raise ValueError("ot.overlap_jaccard_min must be between 0 and 1")
+    if config.ot.overlap_contrast_scale <= 0:
+        raise ValueError("ot.overlap_contrast_scale must be > 0")
     if config.ot.geometry_eps <= 0 or config.ot.ot_eps <= 0:
         raise ValueError("ot.geometry_eps and ot.ot_eps must be > 0")
     if config.ot.rho <= 0:
@@ -341,8 +353,14 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("deep.batch_size must be at least 1")
     if config.deep.learning_rate <= 0 or config.deep.weight_decay < 0:
         raise ValueError("deep.learning_rate must be > 0 and deep.weight_decay must be >= 0")
-    if config.deep.count_layer is not None:
-        raise NotImplementedError("deep.count_layer is configured but count reconstruction is not implemented yet.")
+    if config.deep.count_layer is not None and not str(config.deep.count_layer).strip():
+        raise ValueError("deep.count_layer must be a non-empty string when set")
+    if config.deep.count_decoder_rank < 1:
+        raise ValueError("deep.count_decoder_rank must be at least 1")
+    if config.deep.count_chunk_size < 1:
+        raise ValueError("deep.count_chunk_size must be at least 1")
+    if config.deep.count_loss_weight < 0:
+        raise ValueError("deep.count_loss_weight must be >= 0")
     for name in [
         "reconstruction_weight",
         "context_weight",

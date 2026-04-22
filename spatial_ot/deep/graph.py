@@ -111,6 +111,25 @@ def aggregate_neighbor_mean_torch(
     return agg
 
 
+def aggregate_neighbor_degree_torch(
+    n_nodes: int,
+    edge_index: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    if edge_index.numel() == 0 or n_nodes <= 0:
+        return torch.zeros((n_nodes, 1), dtype=dtype, device=device)
+    dst = edge_index[1]
+    degree = torch.zeros((n_nodes, 1), dtype=dtype, device=device)
+    degree.index_add_(
+        0,
+        dst,
+        torch.ones((dst.numel(), 1), dtype=dtype, device=device),
+    )
+    return degree
+
+
 def build_context_distribution_targets(
     coords_um: np.ndarray,
     features_std: np.ndarray,
@@ -124,7 +143,7 @@ def build_context_distribution_targets(
 ) -> np.ndarray:
     feats = np.asarray(features_std, dtype=np.float32)
     if feats.shape[0] == 0:
-        return np.zeros((0, feats.shape[1] * 2), dtype=np.float32)
+        return np.zeros((0, feats.shape[1] * 4 + 2), dtype=np.float32)
     short_edges, mid_edges = build_multiscale_graphs(
         coords_um,
         neighbor_k=neighbor_k,
@@ -139,9 +158,28 @@ def build_context_distribution_targets(
     for edges in (short_edges, mid_edges):
         edge_t = torch.as_tensor(edges, dtype=torch.long, device=target_device)
         mean_t = aggregate_neighbor_mean_torch(feats_t, edge_t)
-        target_chunks.append(mean_t.detach().cpu().numpy().astype(np.float32, copy=False))
+        mean_sq_t = aggregate_neighbor_mean_torch(feats_t.pow(2), edge_t)
+        var_t = (mean_sq_t - mean_t.pow(2)).clamp_min(0.0)
+        degree_t = aggregate_neighbor_degree_torch(
+            feats_t.shape[0],
+            edge_t,
+            dtype=feats_t.dtype,
+            device=target_device,
+        )
+        density_t = torch.log1p(degree_t)
+        target_chunks.extend(
+            [
+                mean_t.detach().cpu().numpy().astype(np.float32, copy=False),
+                var_t.detach().cpu().numpy().astype(np.float32, copy=False),
+                density_t.detach().cpu().numpy().astype(np.float32, copy=False),
+            ]
+        )
         del edge_t
         del mean_t
+        del mean_sq_t
+        del var_t
+        del degree_t
+        del density_t
         if target_device.type == "cuda":
             torch.cuda.empty_cache()
     return np.concatenate(target_chunks, axis=1).astype(np.float32, copy=False)

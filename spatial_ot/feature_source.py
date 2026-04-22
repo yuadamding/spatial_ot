@@ -13,6 +13,15 @@ from sklearn.decomposition import TruncatedSVD
 FULL_GENE_FEATURE_KEY = "X"
 PREPARED_FEATURES_UNS_KEY = "spatial_ot_prepared_features"
 PREPARED_X_FEATURE_KEY_PREFIX = "X_spatial_ot_x_svd"
+_VISUALIZATION_LIKE_FEATURE_TOKENS = (
+    "tsne",
+    "t_sne",
+    "t-sne",
+    "phate",
+    "draw_graph",
+    "forceatlas",
+    "force_atlas",
+)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -79,6 +88,16 @@ def default_precomputed_x_feature_key(*, requested_components: int | None = None
     return f"{PREPARED_X_FEATURE_KEY_PREFIX}_{components}"
 
 
+def _feature_space_kind(*, feature_key: str, input_mode: str, preprocessing: str, warning: str | None) -> str:
+    if warning == "umap_exploratory":
+        return "umap_embedding"
+    if warning == "visualization_embedding_like":
+        return "visualization_like_embedding"
+    if input_mode == "X":
+        return "full_gene_runtime_svd" if "truncated_svd" in preprocessing else "full_gene_dense"
+    return "obsm"
+
+
 def _resolve_x_features(adata: ad.AnnData) -> tuple[np.ndarray, dict]:
     if adata.X is None or int(adata.n_vars) <= 0:
         raise ValueError("Feature key 'X' was requested, but the input H5AD does not contain a usable gene matrix.")
@@ -123,6 +142,12 @@ def _resolve_x_features(adata: ad.AnnData) -> tuple[np.ndarray, dict]:
         "svd_n_iter": int(randomized_svd_iters),
         "svd_explained_variance_ratio_sum": explained,
         "feature_embedding_warning": None,
+        "feature_space_kind": _feature_space_kind(
+            feature_key=FULL_GENE_FEATURE_KEY,
+            input_mode="X",
+            preprocessing=preprocessing,
+            warning=None,
+        ),
     }
 
 
@@ -173,6 +198,7 @@ def prepare_h5ad_feature_cache(
             "svd_n_iter": int(existing_metadata.get("svd_n_iter", request["svd_n_iter"])),
             "svd_explained_variance_ratio_sum": existing_metadata.get("svd_explained_variance_ratio_sum"),
             "feature_embedding_warning": None,
+            "feature_space_kind": "prepared_full_gene_svd",
         }
         wrote_output = output_path != input_path
         if wrote_output:
@@ -263,6 +289,18 @@ def resolve_h5ad_features(
         feature_embedding_warning = "umap_exploratory"
 
     features = np.asarray(adata.obsm[feature_obsm_key], dtype=np.float32)
+    if (
+        feature_embedding_warning is None
+        and any(token in feature_obsm_key.lower() for token in _VISUALIZATION_LIKE_FEATURE_TOKENS)
+    ):
+        warnings.warn(
+            "Using a visualization-like embedding as the OT feature space. "
+            "These coordinates are often optimized for plotting rather than metric fidelity; "
+            "prefer full-gene, PCA, or standardized marker/program features for validated runs.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        feature_embedding_warning = "visualization_embedding_like"
     return features, {
         "feature_key": str(feature_obsm_key),
         "requested_feature_key": str(feature_obsm_key),
@@ -277,6 +315,12 @@ def resolve_h5ad_features(
         "svd_n_iter": None,
         "svd_explained_variance_ratio_sum": None,
         "feature_embedding_warning": feature_embedding_warning,
+        "feature_space_kind": _feature_space_kind(
+            feature_key=str(feature_obsm_key),
+            input_mode="obsm",
+            preprocessing="none",
+            warning=feature_embedding_warning,
+        ),
     }
 
 

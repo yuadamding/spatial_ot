@@ -12,8 +12,11 @@ import anndata as ad
 import matplotlib
 import numpy as np
 import pandas as pd
+from scipy import sparse
+from scipy.sparse.csgraph import connected_components
 from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
+from sklearn.neighbors import NearestNeighbors
 import torch
 
 from ..config import DeepFeatureConfig, MultilevelExperimentConfig
@@ -129,6 +132,644 @@ def _latent_source_label(feature_source: dict, deep_summary: dict) -> str:
     return f"obsm:{feature_key}"
 
 
+def _extract_count_target(adata: ad.AnnData, *, count_layer: str | None):
+    if count_layer is None:
+        return None, None
+    layer_key = str(count_layer)
+    if layer_key in {"X", "counts"}:
+        if adata.X is None:
+            raise ValueError("deep.count_layer requested the primary count matrix, but adata.X is missing.")
+        return adata.X, "X"
+    if layer_key not in adata.layers:
+        raise KeyError(f"deep.count_layer '{layer_key}' was not found in adata.layers.")
+    return adata.layers[layer_key], layer_key
+
+
+def _method_stack_summary(
+    *,
+    feature_source: dict,
+    deep_summary: dict,
+    feature_obsm_key: str,
+) -> dict[str, object]:
+    return {
+        "method_family": "multilevel_ot",
+        "active_path": "multilevel-ot",
+        "core_model": "shape_normalized_multilevel_semi_relaxed_ot",
+        "deep_feature_adapter": (
+            str(deep_summary.get("method", "none"))
+            if bool(deep_summary.get("enabled"))
+            else "none"
+        ),
+        "latent_used_for_ot": _latent_source_label(feature_source, deep_summary),
+        "ot_feature_obsm_key": str(feature_obsm_key),
+        "feature_input_mode": str(feature_source.get("input_mode", "obsm")),
+        "feature_space_kind": str(feature_source.get("feature_space_kind", "unknown")),
+        "legacy_teacher_student_used": False,
+        "communication_source": "none",
+        "cell_projection_mode": "approximate_assigned_subregion",
+    }
+
+
+def _assigned_transport_cost_decomposition(result: MultilevelOTResult) -> dict[str, float]:
+    geometry = np.asarray(result.subregion_assigned_geometry_transport_costs, dtype=np.float64)
+    feature = np.asarray(result.subregion_assigned_feature_transport_costs, dtype=np.float64)
+    transform = np.asarray(result.subregion_assigned_transform_penalties, dtype=np.float64)
+    overlap = np.asarray(result.subregion_assigned_overlap_consistency_penalties, dtype=np.float64)
+    transport_plus_transform = geometry + feature + transform
+    assigned_transport_objective = np.asarray(
+        result.subregion_cluster_transport_costs[
+            np.arange(result.subregion_cluster_labels.shape[0], dtype=np.int64),
+            result.subregion_cluster_labels.astype(np.int64),
+        ],
+        dtype=np.float64,
+    )
+    assigned_total_objective = np.asarray(
+        result.subregion_cluster_costs[
+            np.arange(result.subregion_cluster_labels.shape[0], dtype=np.int64),
+            result.subregion_cluster_labels.astype(np.int64),
+        ],
+        dtype=np.float64,
+    )
+    transport_sum = float(np.sum(transport_plus_transform))
+    transport_objective_sum = float(np.sum(assigned_transport_objective))
+    total_objective_sum = float(np.sum(assigned_total_objective))
+    transport_denom = max(transport_sum, 1e-12)
+    transport_objective_denom = max(transport_objective_sum, 1e-12)
+    total_objective_denom = max(total_objective_sum, 1e-12)
+    return {
+        "mean_geometry_transport_cost": float(np.mean(geometry)) if geometry.size else 0.0,
+        "mean_feature_transport_cost": float(np.mean(feature)) if feature.size else 0.0,
+        "mean_transform_penalty": float(np.mean(transform)) if transform.size else 0.0,
+        "mean_overlap_consistency_penalty": float(np.mean(overlap)) if overlap.size else 0.0,
+        "mean_transport_plus_transform_cost": float(np.mean(transport_plus_transform)) if transport_plus_transform.size else 0.0,
+        "mean_regularized_objective": float(np.mean(assigned_transport_objective)) if assigned_transport_objective.size else 0.0,
+        "mean_transport_assignment_objective": float(np.mean(assigned_transport_objective)) if assigned_transport_objective.size else 0.0,
+        "mean_total_assignment_cost": float(np.mean(assigned_total_objective)) if assigned_total_objective.size else 0.0,
+        "mean_ot_regularization_gap": float(np.mean(assigned_transport_objective - transport_plus_transform)) if assigned_transport_objective.size else 0.0,
+        "geometry_transport_fraction": float(np.sum(geometry) / transport_denom),
+        "feature_transport_fraction": float(np.sum(feature) / transport_denom),
+        "transform_penalty_fraction": float(np.sum(transform) / transport_denom),
+        "overlap_consistency_fraction_of_total": float(np.sum(overlap) / total_objective_denom),
+        "ot_regularization_gap_fraction_of_transport_objective": float(
+            np.sum(assigned_transport_objective - transport_plus_transform) / transport_objective_denom
+        ),
+    }
+
+
+def _zscore_columns(x: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] == 0:
+        return arr.astype(np.float32, copy=False)
+    mean = arr.mean(axis=0, keepdims=True)
+    std = arr.std(axis=0, keepdims=True)
+    std[std < 1e-6] = 1.0
+    return ((arr - mean) / std).astype(np.float32, copy=False)
+
+
+def _native_subregion_embedding(result: MultilevelOTResult) -> np.ndarray:
+    summaries = np.asarray(result.subregion_measure_summaries, dtype=np.float32)
+    if summaries.ndim == 2 and summaries.shape[0] == result.subregion_cluster_labels.shape[0] and summaries.shape[1] > 0:
+        return _zscore_columns(summaries)
+    weights = np.asarray(result.subregion_atom_weights, dtype=np.float32)
+    return _zscore_columns(weights)
+
+
+def _subregion_embedding_compactness(result: MultilevelOTResult) -> dict[str, object]:
+    embedding = _native_subregion_embedding(result)
+    labels = np.asarray(result.subregion_cluster_labels, dtype=np.int32)
+    if embedding.shape[0] == 0:
+        return {
+            "native_embedding_dim": 0,
+            "silhouette_native": None,
+            "davies_bouldin_native": None,
+            "calinski_harabasz_native": None,
+            "within_cluster_centroid_distance_mean": None,
+            "within_cluster_centroid_distance_median": None,
+            "between_cluster_centroid_distance_min": None,
+            "between_cluster_centroid_distance_mean": None,
+            "compactness_ratio": None,
+            "within_cluster_assigned_transport_cost_mean": None,
+            "within_cluster_assigned_transport_cost_median": None,
+            "within_cluster_assigned_transport_cost_iqr": None,
+            "within_cluster_assigned_total_cost_mean": None,
+            "within_cluster_assigned_total_cost_median": None,
+            "within_cluster_assigned_cost_mean": None,
+            "within_cluster_assigned_cost_median": None,
+            "within_cluster_assigned_cost_iqr": None,
+            "within_cluster_assigned_cost_by_cluster": {},
+        }
+
+    unique_labels = np.unique(labels)
+    silhouette_native = None
+    davies_bouldin_native = None
+    calinski_harabasz_native = None
+    if unique_labels.size >= 2 and embedding.shape[0] > unique_labels.size:
+        try:
+            silhouette_native = float(silhouette_score(embedding, labels, metric="euclidean"))
+        except Exception:
+            silhouette_native = None
+        try:
+            davies_bouldin_native = float(davies_bouldin_score(embedding, labels))
+        except Exception:
+            davies_bouldin_native = None
+        try:
+            calinski_harabasz_native = float(calinski_harabasz_score(embedding, labels))
+        except Exception:
+            calinski_harabasz_native = None
+
+    within_distances: list[np.ndarray] = []
+    cluster_centroids: list[np.ndarray] = []
+    assigned_transport_cost = np.asarray(
+        result.subregion_cluster_transport_costs[
+            np.arange(result.subregion_cluster_labels.shape[0], dtype=np.int64),
+            result.subregion_cluster_labels.astype(np.int64),
+        ],
+        dtype=np.float64,
+    )
+    assigned_total_cost = np.asarray(
+        result.subregion_cluster_costs[
+            np.arange(result.subregion_cluster_labels.shape[0], dtype=np.int64),
+            result.subregion_cluster_labels.astype(np.int64),
+        ],
+        dtype=np.float64,
+    )
+    cost_by_cluster: dict[str, dict[str, float]] = {}
+    for cid in unique_labels.tolist():
+        mask = labels == int(cid)
+        cluster_embedding = embedding[mask]
+        centroid = cluster_embedding.mean(axis=0)
+        cluster_centroids.append(np.asarray(centroid, dtype=np.float64))
+        dist = np.linalg.norm(cluster_embedding - centroid[None, :], axis=1)
+        within_distances.append(np.asarray(dist, dtype=np.float64))
+        cluster_transport_cost = assigned_transport_cost[mask]
+        cost_by_cluster[f"C{int(cid)}"] = {
+            "transport_mean": float(np.mean(cluster_transport_cost)),
+            "transport_median": float(np.median(cluster_transport_cost)),
+            "transport_iqr": float(np.quantile(cluster_transport_cost, 0.75) - np.quantile(cluster_transport_cost, 0.25)),
+        }
+
+    within_concat = np.concatenate(within_distances) if within_distances else np.zeros(0, dtype=np.float64)
+    if len(cluster_centroids) >= 2:
+        centroid_matrix = np.vstack(cluster_centroids).astype(np.float64)
+        centroid_dist = np.sqrt(np.sum((centroid_matrix[:, None, :] - centroid_matrix[None, :, :]) ** 2, axis=2))
+        tri = centroid_dist[np.triu_indices(centroid_dist.shape[0], k=1)]
+        between_centroid_distance_min = float(np.min(tri)) if tri.size else None
+        between_centroid_distance_mean = float(np.mean(tri)) if tri.size else None
+    else:
+        between_centroid_distance_min = None
+        between_centroid_distance_mean = None
+    compactness_ratio = (
+        float(np.mean(within_concat) / max(float(between_centroid_distance_min), 1e-12))
+        if within_concat.size and between_centroid_distance_min is not None and np.isfinite(between_centroid_distance_min)
+        else None
+    )
+    return {
+        "native_embedding_dim": int(embedding.shape[1]),
+        "silhouette_native": silhouette_native,
+        "davies_bouldin_native": davies_bouldin_native,
+        "calinski_harabasz_native": calinski_harabasz_native,
+        "within_cluster_centroid_distance_mean": float(np.mean(within_concat)) if within_concat.size else None,
+        "within_cluster_centroid_distance_median": float(np.median(within_concat)) if within_concat.size else None,
+        "between_cluster_centroid_distance_min": between_centroid_distance_min,
+        "between_cluster_centroid_distance_mean": between_centroid_distance_mean,
+        "compactness_ratio": compactness_ratio,
+        "within_cluster_assigned_transport_cost_mean": float(np.mean(assigned_transport_cost)) if assigned_transport_cost.size else None,
+        "within_cluster_assigned_transport_cost_median": float(np.median(assigned_transport_cost)) if assigned_transport_cost.size else None,
+        "within_cluster_assigned_transport_cost_iqr": (
+            float(np.quantile(assigned_transport_cost, 0.75) - np.quantile(assigned_transport_cost, 0.25))
+            if assigned_transport_cost.size
+            else None
+        ),
+        "within_cluster_assigned_total_cost_mean": float(np.mean(assigned_total_cost)) if assigned_total_cost.size else None,
+        "within_cluster_assigned_total_cost_median": float(np.median(assigned_total_cost)) if assigned_total_cost.size else None,
+        "within_cluster_assigned_cost_mean": float(np.mean(assigned_total_cost)) if assigned_total_cost.size else None,
+        "within_cluster_assigned_cost_median": float(np.median(assigned_total_cost)) if assigned_total_cost.size else None,
+        "within_cluster_assigned_cost_iqr": (
+            float(np.quantile(assigned_total_cost, 0.75) - np.quantile(assigned_total_cost, 0.25))
+            if assigned_total_cost.size
+            else None
+        ),
+        "within_cluster_assigned_cost_by_cluster": cost_by_cluster,
+    }
+
+
+def _deterministic_subsample_indices(n: int, max_points: int) -> np.ndarray:
+    if n <= max_points:
+        return np.arange(n, dtype=np.int64)
+    return np.linspace(0, n - 1, num=max_points, dtype=np.int64)
+
+
+def _cell_adjacency_same_label_fraction(
+    coords_um: np.ndarray,
+    labels: np.ndarray,
+    *,
+    max_cells: int = 50000,
+    neighbors: int = 6,
+) -> float | None:
+    coords = np.asarray(coords_um, dtype=np.float32)
+    labels_arr = np.asarray(labels, dtype=np.int32)
+    if coords.shape[0] < 2:
+        return None
+    keep = _deterministic_subsample_indices(coords.shape[0], max_cells)
+    coords = coords[keep]
+    labels_arr = labels_arr[keep]
+    n_neighbors = min(int(neighbors) + 1, coords.shape[0])
+    if n_neighbors < 2:
+        return None
+    nn = NearestNeighbors(n_neighbors=n_neighbors, metric="euclidean")
+    nn.fit(coords)
+    neigh = nn.kneighbors(coords, return_distance=False)
+    neigh = neigh[:, 1:]
+    same = labels_arr[:, None] == labels_arr[neigh]
+    return float(np.mean(same.astype(np.float32))) if same.size else None
+
+
+def _subregion_graph_metrics(
+    *,
+    n_cells: int,
+    result: MultilevelOTResult,
+    radius_um: float,
+    stride_um: float,
+    coords_um: np.ndarray,
+) -> dict[str, object]:
+    n_subregions = len(result.subregion_members)
+    labels = np.asarray(result.subregion_cluster_labels, dtype=np.int32)
+    probs = np.asarray(result.subregion_cluster_probs, dtype=np.float64)
+    if n_subregions < 2:
+        return {
+            "subregion_graph_edge_count": 0,
+            "overlap_edge_count": 0,
+            "proximity_only_edge_count": 0,
+            "same_label_edge_fraction": None,
+            "boundary_edge_fraction": None,
+            "boundary_entropy_mean": None,
+            "boundary_entropy_p95": None,
+            "overlap_probability_l2_mean": None,
+            "high_overlap_edge_count": 0,
+            "high_overlap_same_label_fraction": None,
+            "isolated_subregion_fraction": None,
+            "cluster_connected_components": {},
+            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, result.cell_cluster_labels),
+        }
+
+    member_sizes = np.asarray([len(members) for members in result.subregion_members], dtype=np.int64)
+    rows = np.concatenate([np.asarray(members, dtype=np.int64) for members in result.subregion_members], dtype=np.int64)
+    cols = np.concatenate(
+        [np.full(len(members), idx, dtype=np.int64) for idx, members in enumerate(result.subregion_members)],
+        dtype=np.int64,
+    )
+    incidence = sparse.csr_matrix(
+        (np.ones(rows.shape[0], dtype=np.int8), (rows, cols)),
+        shape=(int(n_cells), int(n_subregions)),
+        dtype=np.int8,
+    )
+    overlap = (incidence.T @ incidence).tocoo()
+    edge_info: dict[tuple[int, int], dict[str, float | int | None]] = {}
+    for i, j, intersection in zip(overlap.row.tolist(), overlap.col.tolist(), overlap.data.tolist(), strict=False):
+        if int(i) >= int(j) or int(intersection) <= 0:
+            continue
+        union = int(member_sizes[int(i)] + member_sizes[int(j)] - int(intersection))
+        edge_info[(int(i), int(j))] = {
+            "intersection": int(intersection),
+            "jaccard": float(int(intersection) / max(union, 1)),
+            "distance": None,
+        }
+
+    centers = np.asarray(result.subregion_centers_um, dtype=np.float32)
+    proximity_radius = max(float(stride_um) * 1.5, 1e-6)
+    if centers.shape[0] >= 2:
+        nn = NearestNeighbors(radius=proximity_radius, metric="euclidean")
+        nn.fit(centers)
+        distances, neighbors = nn.radius_neighbors(centers, return_distance=True)
+        for src, (nbrs, dists) in enumerate(zip(neighbors, distances, strict=False)):
+            for dst, dist in zip(np.asarray(nbrs, dtype=np.int64).tolist(), np.asarray(dists, dtype=np.float32).tolist(), strict=False):
+                if int(dst) <= int(src):
+                    continue
+                key = (int(src), int(dst))
+                entry = edge_info.setdefault(key, {"intersection": 0, "jaccard": 0.0, "distance": None})
+                if entry["distance"] is None or float(dist) < float(entry["distance"]):
+                    entry["distance"] = float(dist)
+    if not edge_info and centers.shape[0] >= 2:
+        nn = NearestNeighbors(n_neighbors=min(3, centers.shape[0]), metric="euclidean")
+        nn.fit(centers)
+        distances, neighbors = nn.kneighbors(centers, return_distance=True)
+        for src, (nbrs, dists) in enumerate(zip(neighbors, distances, strict=False)):
+            for dst, dist in zip(np.asarray(nbrs, dtype=np.int64)[1:].tolist(), np.asarray(dists, dtype=np.float32)[1:].tolist(), strict=False):
+                key = tuple(sorted((int(src), int(dst))))
+                entry = edge_info.setdefault(key, {"intersection": 0, "jaccard": 0.0, "distance": None})
+                if entry["distance"] is None or float(dist) < float(entry["distance"]):
+                    entry["distance"] = float(dist)
+
+    if not edge_info:
+        return {
+            "subregion_graph_edge_count": 0,
+            "overlap_edge_count": 0,
+            "proximity_only_edge_count": 0,
+            "same_label_edge_fraction": None,
+            "boundary_edge_fraction": None,
+            "boundary_entropy_mean": None,
+            "boundary_entropy_p95": None,
+            "overlap_probability_l2_mean": None,
+            "high_overlap_edge_count": 0,
+            "high_overlap_same_label_fraction": None,
+            "isolated_subregion_fraction": 1.0,
+            "cluster_connected_components": {f"C{int(cid)}": int(np.sum(labels == int(cid))) for cid in np.unique(labels).tolist()},
+            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, result.cell_cluster_labels),
+        }
+
+    edge_pairs = np.asarray(list(edge_info.keys()), dtype=np.int64)
+    edge_i = edge_pairs[:, 0]
+    edge_j = edge_pairs[:, 1]
+    overlap_jaccard = np.asarray([float(edge_info[key]["jaccard"]) for key in edge_info], dtype=np.float64)
+    distances = np.asarray(
+        [
+            float(edge_info[key]["distance"]) if edge_info[key]["distance"] is not None else np.nan
+            for key in edge_info
+        ],
+        dtype=np.float64,
+    )
+    overlap_mask = overlap_jaccard > 0.0
+    proximity_weight = np.exp(-np.nan_to_num(distances, nan=proximity_radius) / max(proximity_radius, 1e-6))
+    edge_weight = np.where(overlap_mask, np.maximum(overlap_jaccard, proximity_weight), proximity_weight)
+    edge_weight = np.clip(edge_weight.astype(np.float64), 1e-8, None)
+    same_label = labels[edge_i] == labels[edge_j]
+    boundary_mask = ~same_label
+
+    mean_probs = 0.5 * (probs[edge_i] + probs[edge_j])
+    edge_entropy = -np.sum(mean_probs * np.log(np.clip(mean_probs, 1e-8, None)), axis=1)
+    overlap_prob_l2 = np.linalg.norm(probs[edge_i] - probs[edge_j], axis=1)
+    high_overlap_mask = overlap_jaccard >= 0.5
+
+    degree = np.bincount(
+        np.concatenate([edge_i, edge_j]),
+        weights=np.concatenate([edge_weight, edge_weight]),
+        minlength=n_subregions,
+    )
+    adjacency = sparse.csr_matrix(
+        (
+            np.concatenate([edge_weight, edge_weight]),
+            (
+                np.concatenate([edge_i, edge_j]),
+                np.concatenate([edge_j, edge_i]),
+            ),
+        ),
+        shape=(n_subregions, n_subregions),
+        dtype=np.float32,
+    )
+    component_counts: dict[str, int] = {}
+    for cid in np.unique(labels).tolist():
+        nodes = np.flatnonzero(labels == int(cid))
+        if nodes.size == 0:
+            continue
+        if nodes.size == 1:
+            component_counts[f"C{int(cid)}"] = 1
+            continue
+        subgraph = adjacency[nodes][:, nodes]
+        n_components, _ = connected_components(subgraph, directed=False, return_labels=True)
+        component_counts[f"C{int(cid)}"] = int(n_components)
+
+    return {
+        "subregion_graph_edge_count": int(edge_pairs.shape[0]),
+        "overlap_edge_count": int(np.sum(overlap_mask)),
+        "proximity_only_edge_count": int(np.sum(~overlap_mask)),
+        "same_label_edge_fraction": float(np.sum(edge_weight[same_label]) / np.sum(edge_weight)),
+        "boundary_edge_fraction": float(np.sum(edge_weight[boundary_mask]) / np.sum(edge_weight)),
+        "boundary_entropy_mean": float(np.mean(edge_entropy[boundary_mask])) if np.any(boundary_mask) else None,
+        "boundary_entropy_p95": float(np.quantile(edge_entropy[boundary_mask], 0.95)) if np.any(boundary_mask) else None,
+        "overlap_probability_l2_mean": (
+            float(np.sum(overlap_jaccard[overlap_mask] * overlap_prob_l2[overlap_mask]) / np.sum(overlap_jaccard[overlap_mask]))
+            if np.any(overlap_mask)
+            else None
+        ),
+        "high_overlap_edge_count": int(np.sum(high_overlap_mask)),
+        "high_overlap_same_label_fraction": (
+            float(np.mean(same_label[high_overlap_mask].astype(np.float32)))
+            if np.any(high_overlap_mask)
+            else None
+        ),
+        "isolated_subregion_fraction": float(np.mean((degree <= 0).astype(np.float32))),
+        "cluster_connected_components": component_counts,
+        "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, result.cell_cluster_labels),
+    }
+
+
+def _cost_reliability_metrics(result: MultilevelOTResult) -> dict[str, object]:
+    effective_eps = np.asarray(result.subregion_candidate_effective_eps_matrix, dtype=np.float64)
+    used_fallback = np.asarray(result.subregion_candidate_used_ot_fallback_matrix, dtype=bool)
+    sorted_costs = np.sort(np.asarray(result.subregion_cluster_costs, dtype=np.float64), axis=1)
+    margins = (
+        sorted_costs[:, 1] - sorted_costs[:, 0]
+        if sorted_costs.shape[1] >= 2
+        else np.full(sorted_costs.shape[0], np.nan, dtype=np.float64)
+    )
+    finite_margins = margins[np.isfinite(margins)]
+    mixed_eps = np.mean((np.max(effective_eps, axis=1) - np.min(effective_eps, axis=1)) > 1e-8) if effective_eps.size else 0.0
+    mixed_fallback = np.mean(np.any(used_fallback != used_fallback[:, :1], axis=1)) if used_fallback.size else 0.0
+    return {
+        "effective_eps_matrix_available": True,
+        "fallback_fraction_all_costs": float(np.mean(used_fallback.astype(np.float32))) if used_fallback.size else 0.0,
+        "fallback_fraction_assigned": float(np.mean(result.subregion_assigned_used_ot_fallback.astype(np.float32))),
+        "mixed_candidate_effective_eps_fraction": float(mixed_eps),
+        "mixed_candidate_fallback_fraction": float(mixed_fallback),
+        "effective_eps_min": float(np.min(effective_eps)) if effective_eps.size else None,
+        "effective_eps_max": float(np.max(effective_eps)) if effective_eps.size else None,
+        "assignment_margin_mean": float(np.mean(finite_margins)) if finite_margins.size else None,
+        "assignment_margin_median": float(np.median(finite_margins)) if finite_margins.size else None,
+        "assignment_margin_p10": float(np.quantile(finite_margins, 0.10)) if finite_margins.size else None,
+        "fallback_fraction_by_cluster": {
+            f"C{int(cid)}": float(np.mean(used_fallback[:, int(cid)].astype(np.float32)))
+            for cid in range(used_fallback.shape[1])
+        }
+        if used_fallback.ndim == 2
+        else {},
+    }
+
+
+def _transform_diagnostics(result: MultilevelOTResult) -> dict[str, float | None]:
+    rotation = np.asarray(result.subregion_assigned_transform_rotation_deg, dtype=np.float64)
+    reflection = np.asarray(result.subregion_assigned_transform_reflection, dtype=bool)
+    scale = np.asarray(result.subregion_assigned_transform_scale, dtype=np.float64)
+    translation_norm = np.asarray(result.subregion_assigned_transform_translation_norm, dtype=np.float64)
+    if rotation.size == 0:
+        return {
+            "mean_abs_rotation_deg": None,
+            "p95_abs_rotation_deg": None,
+            "reflection_fraction": None,
+            "scale_mean": None,
+            "scale_deviation_mean": None,
+            "scale_deviation_p95": None,
+            "translation_norm_mean": None,
+            "translation_norm_p95": None,
+        }
+    abs_rotation = np.abs(rotation)
+    scale_dev = np.abs(scale - 1.0)
+    return {
+        "mean_abs_rotation_deg": float(np.mean(abs_rotation)),
+        "p95_abs_rotation_deg": float(np.quantile(abs_rotation, 0.95)),
+        "reflection_fraction": float(np.mean(reflection.astype(np.float32))),
+        "scale_mean": float(np.mean(scale)),
+        "scale_deviation_mean": float(np.mean(scale_dev)),
+        "scale_deviation_p95": float(np.quantile(scale_dev, 0.95)),
+        "translation_norm_mean": float(np.mean(translation_norm)),
+        "translation_norm_p95": float(np.quantile(translation_norm, 0.95)),
+    }
+
+
+def _qc_warning(code: str, severity: str, message: str, *, value: float | int | str | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "code": str(code),
+        "severity": str(severity),
+        "message": str(message),
+    }
+    if value is not None:
+        payload["value"] = value
+    return payload
+
+
+def _build_qc_warnings(
+    *,
+    feature_embedding_warning: str | None,
+    fallback_fraction: float,
+    assigned_ot_fallback_fraction: float,
+    assigned_effective_eps_values: list[float],
+    requested_ot_eps: float,
+    coverage_fraction: float,
+    mean_assignment_margin: float | None,
+    assigned_transport_cost_decomposition: dict[str, float],
+    cost_reliability: dict[str, object],
+    transform_diagnostics: dict[str, float | None],
+    forced_label_fraction: float,
+    deep_summary: dict,
+) -> list[dict[str, object]]:
+    warnings_out: list[dict[str, object]] = [
+        _qc_warning(
+            "cell_projection_is_approximate_assigned_subregion",
+            "info",
+            "Cell-level labels are approximate projections from assigned subregions rather than direct cell-level OT posteriors.",
+        )
+    ]
+    if feature_embedding_warning == "umap_exploratory":
+        warnings_out.append(
+            _qc_warning(
+                "umap_feature_space_exploratory",
+                "warning",
+                "UMAP was used as the OT feature space, so the run should be treated as exploratory.",
+            )
+        )
+    elif feature_embedding_warning == "visualization_embedding_like":
+        warnings_out.append(
+            _qc_warning(
+                "visualization_like_feature_space",
+                "warning",
+                "A visualization-like embedding was used as the OT feature space, so the run should be treated as exploratory.",
+            )
+        )
+    if fallback_fraction > 0.0:
+        warnings_out.append(
+            _qc_warning(
+                "observed_hull_geometry_fallback_active",
+                "warning",
+                "Observed-coordinate convex-hull fallback was used for at least one subregion, so boundary-shape invariance is not fully supported.",
+                value=float(fallback_fraction),
+            )
+        )
+    if assigned_ot_fallback_fraction > 0.0:
+        warnings_out.append(
+            _qc_warning(
+                "assigned_ot_regularization_fallback_active",
+                "warning",
+                "At least one assigned OT solve needed a larger effective epsilon than requested.",
+                value=float(assigned_ot_fallback_fraction),
+            )
+        )
+    if assigned_effective_eps_values:
+        max_effective_eps = float(max(assigned_effective_eps_values))
+        if max_effective_eps > float(requested_ot_eps) * 1.5:
+            warnings_out.append(
+                _qc_warning(
+                    "effective_eps_exceeds_requested",
+                    "warning",
+                    "The effective OT epsilon increased substantially above the requested value during fallback.",
+                    value=max_effective_eps,
+                )
+            )
+    if coverage_fraction < 1.0:
+        warnings_out.append(
+            _qc_warning(
+                "incomplete_cell_subregion_coverage",
+                "warning",
+                "Some cells were not covered by any retained subregion.",
+                value=float(coverage_fraction),
+            )
+        )
+    if mean_assignment_margin is not None and np.isfinite(mean_assignment_margin) and mean_assignment_margin < 0.05:
+        warnings_out.append(
+            _qc_warning(
+                "low_mean_assignment_margin",
+                "warning",
+                "Mean subregion assignment margin is low, so niche assignments may be unstable or weakly separated.",
+                value=float(mean_assignment_margin),
+            )
+        )
+    if float(assigned_transport_cost_decomposition.get("geometry_transport_fraction", 0.0)) >= 0.75:
+        warnings_out.append(
+            _qc_warning(
+                "geometry_dominates_assigned_cost",
+                "warning",
+                "Most of the assigned transport cost comes from geometry rather than feature matching.",
+                value=float(assigned_transport_cost_decomposition["geometry_transport_fraction"]),
+            )
+        )
+    if forced_label_fraction > 0.0:
+        warnings_out.append(
+            _qc_warning(
+                "forced_nonempty_cluster_assignment",
+                "warning",
+                "At least one subregion label was forced to keep every requested cluster nonempty.",
+                value=float(forced_label_fraction),
+            )
+        )
+    mixed_candidate_fallback_fraction = float(cost_reliability.get("mixed_candidate_fallback_fraction", 0.0) or 0.0)
+    if mixed_candidate_fallback_fraction > 0.0:
+        warnings_out.append(
+            _qc_warning(
+                "candidate_costs_use_mixed_fallback",
+                "warning",
+                "Some subregions compared candidate clusters under different OT fallback states or effective eps values.",
+                value=mixed_candidate_fallback_fraction,
+            )
+        )
+    reflection_fraction = transform_diagnostics.get("reflection_fraction")
+    if reflection_fraction is not None and float(reflection_fraction) > 0.0:
+        warnings_out.append(
+            _qc_warning(
+                "reflection_used_in_assigned_transforms",
+                "info",
+                "At least one assigned subregion-to-cluster alignment used a reflected transform.",
+                value=float(reflection_fraction),
+            )
+        )
+    scale_deviation_p95 = transform_diagnostics.get("scale_deviation_p95")
+    if scale_deviation_p95 is not None and float(scale_deviation_p95) > 0.25:
+        warnings_out.append(
+            _qc_warning(
+                "large_transform_scale_drift",
+                "warning",
+                "Assigned transforms show substantial scale drift from 1.0 for at least part of the run.",
+                value=float(scale_deviation_p95),
+            )
+        )
+    if bool(deep_summary.get("enabled")) and deep_summary.get("output_embedding") == "joint":
+        warnings_out.append(
+            _qc_warning(
+                "joint_embedding_used_for_ot",
+                "info",
+                "The OT feature view used the deep joint embedding under explicit opt-in.",
+            )
+        )
+    return warnings_out
+
+
 def _probability_diagnostics(probs: np.ndarray, *, prefix: str) -> dict[str, float]:
     probs = np.asarray(probs, dtype=np.float64)
     if probs.ndim != 2 or probs.shape[0] == 0:
@@ -207,7 +848,7 @@ def _resolve_sample_plot_coordinate_keys(
     )
 
 
-def plot_sample_niche_maps(
+def _plot_sample_cluster_maps(
     cells_h5ad: str | Path,
     output_dir: str | Path | None = None,
     *,
@@ -220,12 +861,15 @@ def plot_sample_niche_maps(
     plot_spatial_y_key: str | None = None,
     default_sample_id: str = "all_cells",
     spatial_scale: float | None = None,
+    title_prefix: str,
+    output_filename_suffix: str,
+    manifest_filename: str,
 ) -> dict[str, object]:
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
     cells_h5ad = Path(cells_h5ad)
-    output_dir = Path(output_dir) if output_dir is not None else cells_h5ad.parent / "sample_niche_plots"
+    output_dir = Path(output_dir) if output_dir is not None else cells_h5ad.parent / "sample_plots"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     adata = ad.read_h5ad(cells_h5ad, backed="r")
@@ -264,7 +908,7 @@ def plot_sample_niche_maps(
     elif cluster_obs_key in obs.columns:
         cluster_names = np.asarray([f"C{int(value)}" for value in np.asarray(obs[cluster_obs_key], dtype=np.int32)], dtype=object)
     else:
-        raise KeyError("No cluster label information was available for niche plotting.")
+        raise KeyError("No cluster label information was available for sample plotting.")
 
     if cluster_obs_key in obs.columns:
         cluster_ids = np.asarray(obs[cluster_obs_key], dtype=np.int32)
@@ -327,7 +971,7 @@ def plot_sample_niche_maps(
             elif sources:
                 source_name = sources
 
-        title = f"Spatial niche map: {sample_id}"
+        title = f"{title_prefix}: {sample_id}"
         if isinstance(source_name, str):
             title = f"{title}\n{source_name}"
         ax.set_title(title)
@@ -337,7 +981,7 @@ def plot_sample_niche_maps(
         ax.invert_yaxis()
         ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8, frameon=True)
 
-        output_png = output_dir / f"{_safe_filename_component(sample_id)}_spatial_niche_map.png"
+        output_png = output_dir / f"{_safe_filename_component(sample_id)}{output_filename_suffix}"
         fig.savefig(output_png, dpi=250, bbox_inches="tight")
         plt.close(fig)
 
@@ -362,12 +1006,80 @@ def plot_sample_niche_maps(
         "plot_spatial_x_key": str(resolved_x_key),
         "plot_spatial_y_key": str(resolved_y_key),
         "spatial_scale": float(resolved_scale),
+        "title_prefix": str(title_prefix),
+        "output_filename_suffix": str(output_filename_suffix),
         "plots": plots,
     }
-    manifest_path = output_dir / "sample_niche_plots_manifest.json"
+    manifest_path = output_dir / manifest_filename
     manifest["manifest_json"] = str(manifest_path)
     manifest_path.write_text(json.dumps(manifest, indent=2))
     return manifest
+
+
+def plot_sample_niche_maps(
+    cells_h5ad: str | Path,
+    output_dir: str | Path | None = None,
+    *,
+    sample_obs_key: str = "sample_id",
+    source_file_obs_key: str = "source_h5ad",
+    cluster_obs_key: str = "mlot_cluster_int",
+    cluster_label_obs_key: str = "mlot_cluster_id",
+    cluster_hex_obs_key: str = "mlot_cluster_hex",
+    plot_spatial_x_key: str | None = None,
+    plot_spatial_y_key: str | None = None,
+    default_sample_id: str = "all_cells",
+    spatial_scale: float | None = None,
+) -> dict[str, object]:
+    resolved_output_dir = Path(output_dir) if output_dir is not None else Path(cells_h5ad).parent / "sample_niche_plots"
+    return _plot_sample_cluster_maps(
+        cells_h5ad=cells_h5ad,
+        output_dir=resolved_output_dir,
+        sample_obs_key=sample_obs_key,
+        source_file_obs_key=source_file_obs_key,
+        cluster_obs_key=cluster_obs_key,
+        cluster_label_obs_key=cluster_label_obs_key,
+        cluster_hex_obs_key=cluster_hex_obs_key,
+        plot_spatial_x_key=plot_spatial_x_key,
+        plot_spatial_y_key=plot_spatial_y_key,
+        default_sample_id=default_sample_id,
+        spatial_scale=spatial_scale,
+        title_prefix="Spatial niche map",
+        output_filename_suffix="_spatial_niche_map.png",
+        manifest_filename="sample_niche_plots_manifest.json",
+    )
+
+
+def plot_sample_spatial_maps(
+    cells_h5ad: str | Path,
+    output_dir: str | Path | None = None,
+    *,
+    sample_obs_key: str = "sample_id",
+    source_file_obs_key: str = "source_h5ad",
+    cluster_obs_key: str = "mlot_cluster_int",
+    cluster_label_obs_key: str = "mlot_cluster_id",
+    cluster_hex_obs_key: str = "mlot_cluster_hex",
+    plot_spatial_x_key: str | None = None,
+    plot_spatial_y_key: str | None = None,
+    default_sample_id: str = "all_cells",
+    spatial_scale: float | None = None,
+) -> dict[str, object]:
+    resolved_output_dir = Path(output_dir) if output_dir is not None else Path(cells_h5ad).parent / "sample_spatial_maps"
+    return _plot_sample_cluster_maps(
+        cells_h5ad=cells_h5ad,
+        output_dir=resolved_output_dir,
+        sample_obs_key=sample_obs_key,
+        source_file_obs_key=source_file_obs_key,
+        cluster_obs_key=cluster_obs_key,
+        cluster_label_obs_key=cluster_label_obs_key,
+        cluster_hex_obs_key=cluster_hex_obs_key,
+        plot_spatial_x_key=plot_spatial_x_key,
+        plot_spatial_y_key=plot_spatial_y_key,
+        default_sample_id=default_sample_id,
+        spatial_scale=spatial_scale,
+        title_prefix="Shape-normalized multilevel OT cell labels",
+        output_filename_suffix="_multilevel_ot_spatial_map.png",
+        manifest_filename="sample_spatial_maps_manifest.json",
+    )
 
 
 def plot_sample_niche_maps_from_run_dir(
@@ -390,6 +1102,40 @@ def plot_sample_niche_maps_from_run_dir(
         raise FileNotFoundError(f"Expected multilevel OT cell output under {cells_h5ad}.")
     resolved_output_dir = Path(output_dir) if output_dir is not None else run_dir / "sample_niche_plots"
     return plot_sample_niche_maps(
+        cells_h5ad=cells_h5ad,
+        output_dir=resolved_output_dir,
+        sample_obs_key=sample_obs_key,
+        source_file_obs_key=source_file_obs_key,
+        cluster_obs_key=cluster_obs_key,
+        cluster_label_obs_key=cluster_label_obs_key,
+        cluster_hex_obs_key=cluster_hex_obs_key,
+        plot_spatial_x_key=plot_spatial_x_key,
+        plot_spatial_y_key=plot_spatial_y_key,
+        default_sample_id=default_sample_id,
+        spatial_scale=spatial_scale,
+    )
+
+
+def plot_sample_spatial_maps_from_run_dir(
+    run_dir: str | Path,
+    output_dir: str | Path | None = None,
+    *,
+    sample_obs_key: str = "sample_id",
+    source_file_obs_key: str = "source_h5ad",
+    cluster_obs_key: str = "mlot_cluster_int",
+    cluster_label_obs_key: str = "mlot_cluster_id",
+    cluster_hex_obs_key: str = "mlot_cluster_hex",
+    plot_spatial_x_key: str | None = None,
+    plot_spatial_y_key: str | None = None,
+    default_sample_id: str = "all_cells",
+    spatial_scale: float | None = None,
+) -> dict[str, object]:
+    run_dir = Path(run_dir)
+    cells_h5ad = run_dir / "cells_multilevel_ot.h5ad"
+    if not cells_h5ad.exists():
+        raise FileNotFoundError(f"Expected multilevel OT cell output under {cells_h5ad}.")
+    resolved_output_dir = Path(output_dir) if output_dir is not None else run_dir / "sample_spatial_maps"
+    return plot_sample_spatial_maps(
         cells_h5ad=cells_h5ad,
         output_dir=resolved_output_dir,
         sample_obs_key=sample_obs_key,
@@ -429,6 +1175,7 @@ def _save_multilevel_outputs(
     h5ad_path = output_dir / "cells_multilevel_ot.h5ad"
     subregions_path = output_dir / "subregions_multilevel_ot.parquet"
     supports_path = output_dir / "cluster_supports_multilevel_ot.npz"
+    candidate_diag_path = output_dir / "multilevel_ot_candidate_cost_diagnostics.npz"
     map_path = output_dir / "multilevel_ot_spatial_map.png"
     emb_path = output_dir / "multilevel_ot_subregion_embedding.png"
     atom_path = output_dir / "multilevel_ot_atom_layouts.png"
@@ -437,6 +1184,7 @@ def _save_multilevel_outputs(
         "h5ad": str(h5ad_path),
         "subregions": str(subregions_path),
         "supports": str(supports_path),
+        "candidate_cost_diagnostics": str(candidate_diag_path),
         "spatial_map": str(map_path),
         "subregion_embedding": str(emb_path),
         "atom_layouts": str(atom_path),
@@ -497,12 +1245,32 @@ def _save_multilevel_outputs(
             "argmin_cluster_int": int(result.subregion_argmin_labels[idx]),
             "assigned_effective_eps": float(result.subregion_assigned_effective_eps[idx]),
             "assigned_ot_used_fallback": bool(result.subregion_assigned_used_ot_fallback[idx]),
+            "candidate_effective_eps_min": float(np.min(result.subregion_candidate_effective_eps_matrix[idx])),
+            "candidate_effective_eps_max": float(np.max(result.subregion_candidate_effective_eps_matrix[idx])),
+            "candidate_ot_used_fallback_any": bool(np.any(result.subregion_candidate_used_ot_fallback_matrix[idx])),
             "normalizer_radius_p95": float(result.subregion_normalizer_radius_p95[idx]) if np.isfinite(result.subregion_normalizer_radius_p95[idx]) else np.nan,
             "normalizer_radius_max": float(result.subregion_normalizer_radius_max[idx]) if np.isfinite(result.subregion_normalizer_radius_max[idx]) else np.nan,
             "normalizer_interpolation_residual": float(result.subregion_normalizer_interpolation_residual[idx]) if np.isfinite(result.subregion_normalizer_interpolation_residual[idx]) else np.nan,
             "cluster_id": f"C{int(result.subregion_cluster_labels[idx])}",
             "cluster_int": int(result.subregion_cluster_labels[idx]),
             "objective": float(result.subregion_cluster_costs[idx, result.subregion_cluster_labels[idx]]),
+            "transport_objective": float(result.subregion_cluster_transport_costs[idx, result.subregion_cluster_labels[idx]]),
+            "overlap_consistency_penalty": float(
+                result.subregion_cluster_overlap_penalties[idx, result.subregion_cluster_labels[idx]]
+            ),
+            "assigned_geometry_transport_cost": float(result.subregion_assigned_geometry_transport_costs[idx]),
+            "assigned_feature_transport_cost": float(result.subregion_assigned_feature_transport_costs[idx]),
+            "assigned_transform_penalty": float(result.subregion_assigned_transform_penalties[idx]),
+            "assigned_overlap_consistency_penalty": float(result.subregion_assigned_overlap_consistency_penalties[idx]),
+            "assigned_transform_rotation_deg": float(result.subregion_assigned_transform_rotation_deg[idx]),
+            "assigned_transform_reflection": bool(result.subregion_assigned_transform_reflection[idx]),
+            "assigned_transform_scale": float(result.subregion_assigned_transform_scale[idx]),
+            "assigned_transform_translation_norm": float(result.subregion_assigned_transform_translation_norm[idx]),
+            "assigned_reconstructed_transport_cost": float(
+                result.subregion_assigned_geometry_transport_costs[idx]
+                + result.subregion_assigned_feature_transport_costs[idx]
+                + result.subregion_assigned_transform_penalties[idx]
+            ),
             "assignment_margin": float(subregion_margin[idx]) if np.isfinite(subregion_margin[idx]) else np.nan,
         }
         for j, prob in enumerate(result.subregion_cluster_probs[idx]):
@@ -524,6 +1292,15 @@ def _save_multilevel_outputs(
         cluster_atom_features=result.cluster_atom_features.astype(np.float32),
         cluster_prototype_weights=result.cluster_prototype_weights.astype(np.float32),
         subregion_atom_weights=result.subregion_atom_weights.astype(np.float32),
+    )
+    np.savez_compressed(
+        candidate_diag_path,
+        subregion_cluster_costs=result.subregion_cluster_costs.astype(np.float32),
+        subregion_cluster_transport_costs=result.subregion_cluster_transport_costs.astype(np.float32),
+        subregion_cluster_overlap_penalties=result.subregion_cluster_overlap_penalties.astype(np.float32),
+        subregion_measure_summaries=result.subregion_measure_summaries.astype(np.float32),
+        candidate_effective_eps_matrix=result.subregion_candidate_effective_eps_matrix.astype(np.float32),
+        candidate_used_ot_fallback_matrix=result.subregion_candidate_used_ot_fallback_matrix.astype(bool),
     )
 
     coords = np.stack(
@@ -612,6 +1389,13 @@ def _save_multilevel_outputs(
     fig.savefig(atom_path, dpi=250, bbox_inches="tight")
     plt.close(fig)
 
+    sample_spatial_manifest = plot_sample_spatial_maps(
+        cells_h5ad=h5ad_path,
+        output_dir=output_dir / "sample_spatial_maps",
+    )
+    outputs["sample_spatial_maps_dir"] = str(output_dir / "sample_spatial_maps")
+    outputs["sample_spatial_maps_manifest"] = str(sample_spatial_manifest["manifest_json"])
+
     summary_path.write_text(json.dumps(summary, indent=2))
     return outputs
 
@@ -650,6 +1434,9 @@ def run_multilevel_ot_on_h5ad(
     allow_convex_hull_fallback: bool = False,
     max_iter: int = 10,
     tol: float = 1e-4,
+    overlap_consistency_weight: float = 0.0,
+    overlap_jaccard_min: float = 0.15,
+    overlap_contrast_scale: float = 1.0,
     basic_niche_size_um: float | None = 200.0,
     seed: int = 1337,
     compute_device: str = "auto",
@@ -691,6 +1478,7 @@ def run_multilevel_ot_on_h5ad(
     if deep_config.method != "none":
         active_deep_config = deep_config
         batch = None
+        count_layer_used = None
         if deep_config.batch_key is not None:
             if deep_config.batch_key not in adata.obs:
                 raise KeyError(f"Deep-feature batch key '{deep_config.batch_key}' not found in obs.")
@@ -710,6 +1498,8 @@ def run_multilevel_ot_on_h5ad(
             validation_report = dict(getattr(encoder, "validation_report", {}))
             feature_schema = dict(getattr(encoder, "feature_schema", {}))
             latent_diagnostics = dict(getattr(encoder, "latent_diagnostics", {}))
+            if active_deep_config.count_layer is not None:
+                count_layer_used = str(active_deep_config.count_layer)
         else:
             allow_joint_ot_embedding = bool(deep_config.allow_joint_ot_embedding)
             if deep_config.output_embedding == "joint" and not allow_joint_ot_embedding:
@@ -718,11 +1508,13 @@ def run_multilevel_ot_on_h5ad(
                     "Set deep.allow_joint_ot_embedding=true or pass --deep-allow-joint-ot-embedding."
                 )
             model_path = str(output_dir / "deep_feature_model.pt") if deep_config.save_model else None
+            count_matrix, count_layer_used = _extract_count_target(adata, count_layer=deep_config.count_layer)
             deep_result = fit_deep_features(
                 features=features,
                 coords_um=coords_um,
                 config=deep_config,
                 batch=batch,
+                count_matrix=count_matrix,
                 seed=seed,
                 save_path=model_path,
             )
@@ -750,6 +1542,17 @@ def run_multilevel_ot_on_h5ad(
                 deep_outputs["deep_feature_scaler"] = str(scaler_path)
         final_train_loss = history[-1].get("train_loss") if history else None
         final_val_loss = history[-1].get("val_loss") if history and "val_loss" in history[-1] else None
+        count_reconstruction_summary: str | dict[str, object]
+        if active_deep_config.count_layer is None:
+            count_reconstruction_summary = "disabled"
+        else:
+            count_reconstruction_summary = {
+                "enabled": True,
+                "target_layer": str(count_layer_used or active_deep_config.count_layer),
+                "decoder_rank": int(active_deep_config.count_decoder_rank),
+                "gene_chunk_size": int(active_deep_config.count_chunk_size),
+                "loss_weight": float(active_deep_config.count_loss_weight),
+            }
         deep_summary = {
             "enabled": True,
             "method": active_deep_config.method,
@@ -780,8 +1583,8 @@ def run_multilevel_ot_on_h5ad(
             "final_train_loss": float(final_train_loss) if final_train_loss is not None else None,
             "final_val_loss": float(final_val_loss) if final_val_loss is not None else None,
             "model_path": model_path,
-            "batch_correction": "not_implemented",
-            "count_reconstruction": "not_implemented",
+            "batch_correction": "disabled",
+            "count_reconstruction": count_reconstruction_summary,
             "pretrained_model_loaded": bool(deep_config.pretrained_model is not None),
             "validation_used_for_early_stopping": bool(deep_config.validation != "none"),
             "runtime_memory": latent_diagnostics.get("runtime_memory"),
@@ -837,6 +1640,9 @@ def run_multilevel_ot_on_h5ad(
         allow_convex_hull_fallback=allow_convex_hull_fallback,
         max_iter=max_iter,
         tol=tol,
+        overlap_consistency_weight=overlap_consistency_weight,
+        overlap_jaccard_min=overlap_jaccard_min,
+        overlap_contrast_scale=overlap_contrast_scale,
         seed=seed,
         compute_device=str(resolved_compute_device),
     )
@@ -874,6 +1680,16 @@ def run_multilevel_ot_on_h5ad(
     coverage_summary = _cell_subregion_coverage(int(adata.n_obs), result.subregion_members)
     cell_prob_summary = _probability_diagnostics(result.cell_cluster_probs, prefix="cell")
     subregion_prob_summary = _probability_diagnostics(result.subregion_cluster_probs, prefix="subregion")
+    compactness_summary = _subregion_embedding_compactness(result)
+    boundary_summary = _subregion_graph_metrics(
+        n_cells=int(adata.n_obs),
+        result=result,
+        radius_um=radius_um,
+        stride_um=stride_um,
+        coords_um=coords_um,
+    )
+    cost_reliability = _cost_reliability_metrics(result)
+    transform_summary = _transform_diagnostics(result)
     cost_scale_summary = {
         "coordinate_scale": float(result.cost_scale_x),
         "feature_scale": float(result.cost_scale_y),
@@ -884,7 +1700,28 @@ def run_multilevel_ot_on_h5ad(
             else None
         ),
     }
+    assigned_transport_cost_summary = _assigned_transport_cost_decomposition(result)
     runtime_memory = _runtime_memory_snapshot(resolved_compute_device)
+    assigned_effective_eps_values = [float(x) for x in np.unique(np.round(result.subregion_assigned_effective_eps.astype(np.float64), 8))]
+    method_stack = _method_stack_summary(
+        feature_source=feature_source,
+        deep_summary=deep_summary,
+        feature_obsm_key=feature_obsm_key_used,
+    )
+    qc_warnings = _build_qc_warnings(
+        feature_embedding_warning=feature_embedding_warning,
+        fallback_fraction=float(fallback_fraction),
+        assigned_ot_fallback_fraction=float(np.mean(result.subregion_assigned_used_ot_fallback.astype(np.float32))),
+        assigned_effective_eps_values=assigned_effective_eps_values,
+        requested_ot_eps=float(ot_eps),
+        coverage_fraction=float(coverage_summary["cell_subregion_coverage_fraction"]),
+        mean_assignment_margin=margin,
+        assigned_transport_cost_decomposition=assigned_transport_cost_summary,
+        cost_reliability=cost_reliability,
+        transform_diagnostics=transform_summary,
+        forced_label_fraction=float(result.subregion_forced_label_mask.sum() / max(len(result.subregion_members), 1)),
+        deep_summary=deep_summary,
+    )
     summary = {
         "summary_schema_version": "1",
         "spatial_ot_version": _package_version(),
@@ -913,7 +1750,9 @@ def run_multilevel_ot_on_h5ad(
         "radius_um": float(radius_um),
         "stride_um": float(stride_um),
         "basic_niche_size_um": float(result.basic_niche_size_um) if result.basic_niche_size_um is not None else None,
-        "basic_niche_radius_um": (0.5 * float(result.basic_niche_size_um)) if result.basic_niche_size_um is not None else None,
+        "basic_niche_radius_um": (
+            0.5 * float(result.basic_niche_size_um) * float(np.sqrt(2.0))
+        ) if result.basic_niche_size_um is not None else None,
         "n_basic_niches": int(result.basic_niche_centers_um.shape[0]),
         "mean_basic_niches_per_subregion": (
             float(np.mean([len(niche_ids) for niche_ids in result.subregion_basic_niche_ids]))
@@ -940,6 +1779,9 @@ def run_multilevel_ot_on_h5ad(
         "allow_convex_hull_fallback": bool(allow_convex_hull_fallback),
         "max_iter": int(max_iter),
         "tol": float(tol),
+        "overlap_consistency_weight": float(overlap_consistency_weight),
+        "overlap_jaccard_min": float(overlap_jaccard_min),
+        "overlap_contrast_scale": float(overlap_contrast_scale),
         "seed": int(seed),
         "compute_device_requested": str(compute_device),
         "compute_device_used": str(resolved_compute_device),
@@ -953,9 +1795,15 @@ def run_multilevel_ot_on_h5ad(
         "cost_scale_x": float(result.cost_scale_x),
         "cost_scale_y": float(result.cost_scale_y),
         "cost_scale_diagnostics": cost_scale_summary,
+        "method_stack": method_stack,
         "requested_ot_eps": float(ot_eps),
         "assigned_ot_fallback_fraction": float(np.mean(result.subregion_assigned_used_ot_fallback.astype(np.float32))),
-        "assigned_effective_eps_values": [float(x) for x in np.unique(np.round(result.subregion_assigned_effective_eps.astype(np.float64), 8))],
+        "assigned_effective_eps_values": assigned_effective_eps_values,
+        "assigned_transport_cost_decomposition": assigned_transport_cost_summary,
+        "subregion_embedding_compactness": compactness_summary,
+        "boundary_separation": boundary_summary,
+        "cost_reliability": cost_reliability,
+        "transform_diagnostics": transform_summary,
         "selected_restart": int(result.selected_restart),
         "restart_summaries": result.restart_summaries,
         "subregion_cluster_counts": {f"C{int(k)}": int(v) for k, v in pd.Series(result.subregion_cluster_labels).value_counts().sort_index().items()},
@@ -994,6 +1842,7 @@ def run_multilevel_ot_on_h5ad(
         if "shape_descriptor_source" in shape_df.columns
         else {},
         "forced_label_count": int(result.subregion_forced_label_mask.sum()),
+        "forced_label_fraction": float(result.subregion_forced_label_mask.sum() / max(len(result.subregion_members), 1)),
         "normalizer_radius_p95_mean": float(np.nanmean(result.subregion_normalizer_radius_p95)),
         "normalizer_radius_max_mean": float(np.nanmean(result.subregion_normalizer_radius_max)),
         "normalizer_interpolation_residual_mean": float(np.nanmean(result.subregion_normalizer_interpolation_residual)),
@@ -1007,6 +1856,9 @@ def run_multilevel_ot_on_h5ad(
             if float(np.mean(result.subregion_geometry_used_fallback.astype(np.float32))) == 0.0
             else "not_supported_observed_hull_fallback"
         ),
+        "qc_warnings": qc_warnings,
+        "qc_warning_count": int(len(qc_warnings)),
+        "qc_has_warnings": bool(any(item.get("severity") == "warning" for item in qc_warnings)),
         "runtime_memory": runtime_memory,
         "method_notes": {
             "core": "shape-normalized cluster-specific semi-relaxed Wasserstein dictionary clustering",
@@ -1015,6 +1867,7 @@ def run_multilevel_ot_on_h5ad(
             "basic_niches": "when basic_niche_size_um is set, grid-built subregions are unions of fixed-size basic niches rather than direct raw-cell radius windows",
             "local_measure": "compressed empirical measures over canonical coordinates and standardized cell-level features",
             "local_matching": "semi-relaxed unbalanced Sinkhorn with fixed source marginal and relaxed target marginal",
+            "overlap_consistency": "overlapping subregions can be regularized toward compatible cluster assignments using Jaccard overlap gated by subregion-summary contrast",
             "residual_alignment": "weighted similarity transform is optimized during subregion-to-cluster matching",
             "support_sharing": "subregions assigned to the same cluster reuse the same shared atom dictionary but keep subregion-specific mixture weights",
             "cell_boundary_projection": "cell-level scores are an approximate projection from canonical-coordinate plus feature fit to assigned cluster atoms, modulated by overlapping-subregion cluster evidence; they are not an exact posterior under the OT model",
@@ -1078,6 +1931,9 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         allow_convex_hull_fallback=config.ot.allow_convex_hull_fallback,
         max_iter=config.ot.max_iter,
         tol=config.ot.tol,
+        overlap_consistency_weight=config.ot.overlap_consistency_weight,
+        overlap_jaccard_min=config.ot.overlap_jaccard_min,
+        overlap_contrast_scale=config.ot.overlap_contrast_scale,
         seed=config.ot.seed,
         compute_device=config.ot.compute_device,
         deep_config=config.deep,

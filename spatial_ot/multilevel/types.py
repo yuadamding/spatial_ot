@@ -88,9 +88,22 @@ class MultilevelOTResult:
     subregion_cluster_labels: np.ndarray
     subregion_cluster_probs: np.ndarray
     subregion_cluster_costs: np.ndarray
+    subregion_cluster_transport_costs: np.ndarray
+    subregion_cluster_overlap_penalties: np.ndarray
     subregion_atom_weights: np.ndarray
+    subregion_measure_summaries: np.ndarray
     subregion_assigned_effective_eps: np.ndarray
     subregion_assigned_used_ot_fallback: np.ndarray
+    subregion_candidate_effective_eps_matrix: np.ndarray
+    subregion_candidate_used_ot_fallback_matrix: np.ndarray
+    subregion_assigned_geometry_transport_costs: np.ndarray
+    subregion_assigned_feature_transport_costs: np.ndarray
+    subregion_assigned_transform_penalties: np.ndarray
+    subregion_assigned_overlap_consistency_penalties: np.ndarray
+    subregion_assigned_transform_rotation_deg: np.ndarray
+    subregion_assigned_transform_reflection: np.ndarray
+    subregion_assigned_transform_scale: np.ndarray
+    subregion_assigned_transform_translation_norm: np.ndarray
     cluster_supports: np.ndarray
     cluster_atom_coords: np.ndarray
     cluster_atom_features: np.ndarray

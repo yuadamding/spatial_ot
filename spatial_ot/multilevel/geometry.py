@@ -114,6 +114,54 @@ def build_subregions(
     return centers_arr, kept_members
 
 
+def build_basic_niches(
+    coords_um: np.ndarray,
+    niche_size_um: float,
+    min_cells: int,
+    max_subregions: int,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    coords = np.asarray(coords_um, dtype=np.float32)
+    if coords.shape[0] == 0:
+        raise RuntimeError("No cells were provided, so no basic niches can be created.")
+
+    niche_size_um = float(niche_size_um)
+    x0 = float(coords[:, 0].min())
+    y0 = float(coords[:, 1].min())
+    # Assign each cell to its nearest niche center on the fixed-size grid so the
+    # basic niches tile space without the pi/4 coverage loss from inscribed circles.
+    grid_x = np.floor((coords[:, 0] - x0) / niche_size_um + 0.5).astype(np.int32)
+    grid_y = np.floor((coords[:, 1] - y0) / niche_size_um + 0.5).astype(np.int32)
+
+    niche_members: dict[tuple[int, int], list[int]] = {}
+    for cell_idx, (ix, iy) in enumerate(zip(grid_x.tolist(), grid_y.tolist(), strict=False)):
+        niche_members.setdefault((int(ix), int(iy)), []).append(int(cell_idx))
+
+    kept_centers: list[np.ndarray] = []
+    kept_members: list[np.ndarray] = []
+    for ix, iy in sorted(niche_members):
+        members = np.asarray(niche_members[(ix, iy)], dtype=np.int32)
+        if members.size < min_cells:
+            continue
+        kept_centers.append(
+            np.asarray(
+                [x0 + float(ix) * niche_size_um, y0 + float(iy) * niche_size_um],
+                dtype=np.float32,
+            )
+        )
+        kept_members.append(members)
+
+    if not kept_centers:
+        raise RuntimeError("No valid basic niches were created; lower min_cells or decrease basic_niche_size_um.")
+
+    centers_arr = np.vstack(kept_centers).astype(np.float32)
+    if max_subregions > 0 and centers_arr.shape[0] > max_subregions:
+        keep_idx = _subsample_grid_points(centers_arr, target=max_subregions)
+        centers_arr = centers_arr[keep_idx]
+        kept_members = [kept_members[int(i)] for i in keep_idx.tolist()]
+
+    return centers_arr, kept_members
+
+
 def build_composite_subregions_from_basic_niches(
     coords_um: np.ndarray,
     radius_um: float,
@@ -123,16 +171,16 @@ def build_composite_subregions_from_basic_niches(
     basic_niche_size_um: float,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
     basic_niche_size_um = float(basic_niche_size_um)
-    basic_niche_radius_um = 0.5 * basic_niche_size_um
-    basic_centers_um, basic_members = build_subregions(
+    basic_niche_half_size_um = 0.5 * basic_niche_size_um
+    basic_niche_cover_radius_um = float(np.sqrt(2.0) * basic_niche_half_size_um)
+    basic_centers_um, basic_members = build_basic_niches(
         coords_um=coords_um,
-        radius_um=basic_niche_radius_um,
-        stride_um=basic_niche_size_um,
+        niche_size_um=basic_niche_size_um,
         min_cells=1,
         max_subregions=0,
     )
 
-    if radius_um <= basic_niche_radius_um + 1e-6:
+    if radius_um <= basic_niche_cover_radius_um + 1e-6:
         kept_idx = [idx for idx, members in enumerate(basic_members) if np.asarray(members).size >= min_cells]
         if not kept_idx:
             raise RuntimeError(
@@ -155,8 +203,8 @@ def build_composite_subregions_from_basic_niches(
         )
 
     candidate_centers_um = _grid_centers(coords_um=coords_um, stride_um=stride_um)
-    composite_radius_um = max(float(radius_um), basic_niche_radius_um)
-    niche_selection_radius_um = composite_radius_um + basic_niche_radius_um
+    composite_radius_um = max(float(radius_um), basic_niche_cover_radius_um)
+    niche_selection_radius_um = composite_radius_um + basic_niche_cover_radius_um
 
     nn = NearestNeighbors(radius=niche_selection_radius_um, metric="euclidean")
     nn.fit(basic_centers_um)

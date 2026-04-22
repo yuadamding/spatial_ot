@@ -100,6 +100,19 @@ def _feature_schema_extra(
     return payload
 
 
+def _extract_count_target(adata: ad.AnnData, *, count_layer: str | None):
+    if count_layer is None:
+        return None, None
+    layer_key = str(count_layer)
+    if layer_key in {"X", "counts"}:
+        if adata.X is None:
+            raise ValueError("deep.count_layer requested the primary count matrix, but adata.X is missing.")
+        return adata.X, "X"
+    if layer_key not in adata.layers:
+        raise KeyError(f"deep.count_layer '{layer_key}' was not found in adata.layers.")
+    return adata.layers[layer_key], layer_key
+
+
 def _deep_summary(
     *,
     config: DeepFeatureConfig,
@@ -116,6 +129,7 @@ def _deep_summary(
 ) -> dict:
     final_train_loss = history[-1].get("train_loss") if history else None
     final_val_loss = history[-1].get("val_loss") if history and "val_loss" in history[-1] else None
+    count_layer_used = None if extra is None else extra.get("count_layer_used")
     payload = {
         "enabled": True,
         "method": config.method,
@@ -146,8 +160,18 @@ def _deep_summary(
         "final_train_loss": float(final_train_loss) if final_train_loss is not None else None,
         "final_val_loss": float(final_val_loss) if final_val_loss is not None else None,
         "model_path": model_path,
-        "batch_correction": "not_implemented",
-        "count_reconstruction": "not_implemented",
+        "batch_correction": "disabled",
+        "count_reconstruction": (
+            {
+                "enabled": True,
+                "target_layer": str(count_layer_used or config.count_layer),
+                "decoder_rank": int(config.count_decoder_rank),
+                "gene_chunk_size": int(config.count_chunk_size),
+                "loss_weight": float(config.count_loss_weight),
+            }
+            if config.count_layer is not None
+            else "disabled"
+        ),
         "pretrained_model_loaded": bool(pretrained_model_loaded),
         "validation_used_for_early_stopping": bool(config.validation != "none"),
         "runtime_memory": latent_diagnostics.get("runtime_memory"),
@@ -158,6 +182,60 @@ def _deep_summary(
     if extra:
         payload.update(extra)
     return payload
+
+
+def _deep_method_stack(
+    *,
+    active_path: str,
+    config: DeepFeatureConfig,
+    feature_source: dict,
+    output_obsm_key: str,
+) -> dict[str, object]:
+    return {
+        "method_family": "deep_feature_adapter",
+        "active_path": str(active_path),
+        "deep_feature_adapter": str(config.method),
+        "latent_output": (
+            f"deep_{config.output_embedding}"
+            if config.output_embedding is not None
+            else "deep_unspecified"
+        ),
+        "input_feature_key": str(feature_source.get("requested_feature_key", feature_source.get("feature_key", ""))),
+        "input_feature_mode": str(feature_source.get("input_mode", "obsm")),
+        "feature_space_kind": str(feature_source.get("feature_space_kind", "unknown")),
+        "output_obsm_key": str(output_obsm_key),
+        "legacy_teacher_student_used": False,
+        "communication_source": "none",
+    }
+
+
+def _deep_qc_warnings(*, feature_embedding_warning: str | None, config: DeepFeatureConfig) -> list[dict[str, object]]:
+    warnings_out: list[dict[str, object]] = []
+    if feature_embedding_warning == "umap_exploratory":
+        warnings_out.append(
+            {
+                "code": "umap_feature_space_exploratory",
+                "severity": "warning",
+                "message": "The feature space came from UMAP coordinates, which are exploratory rather than metric-preserving.",
+            }
+        )
+    elif feature_embedding_warning == "visualization_embedding_like":
+        warnings_out.append(
+            {
+                "code": "visualization_like_feature_space",
+                "severity": "warning",
+                "message": "The feature space came from a visualization-like embedding and should be treated as exploratory.",
+            }
+        )
+    if config.method == "graph_autoencoder":
+        warnings_out.append(
+            {
+                "code": "graph_autoencoder_full_batch_only",
+                "severity": "info",
+                "message": "graph_autoencoder remains a full-batch encoder guarded by deep.full_batch_max_cells.",
+            }
+        )
+    return warnings_out
 
 
 def fit_deep_features_on_h5ad(
@@ -190,6 +268,7 @@ def fit_deep_features_on_h5ad(
         if config.batch_key not in adata.obs:
             raise KeyError(f"Deep-feature batch key '{config.batch_key}' not found in obs.")
         batch = np.asarray(adata.obs[config.batch_key].astype(str))
+    count_matrix, count_layer_used = _extract_count_target(adata, count_layer=config.count_layer)
 
     model_path = output_dir / "deep_feature_model.pt" if config.save_model else None
     result = fit_deep_features(
@@ -197,6 +276,7 @@ def fit_deep_features_on_h5ad(
         coords_um=coords_um,
         config=config,
         batch=batch,
+        count_matrix=count_matrix,
         seed=seed,
         save_path=model_path,
         feature_schema_extra=_feature_schema_extra(
@@ -244,6 +324,7 @@ def fit_deep_features_on_h5ad(
         latent_diagnostics=result.latent_diagnostics,
         model_path=str(model_path) if model_path is not None else None,
         pretrained_model_loaded=False,
+        extra={"count_layer_used": count_layer_used},
     )
     summary = {
         "summary_schema_version": "1",
@@ -258,12 +339,23 @@ def fit_deep_features_on_h5ad(
         "feature_obsm_key": feature_obsm_key,
         "feature_input_mode": str(feature_source.get("input_mode", "obsm")),
         "feature_source": dict(feature_source),
+        "feature_embedding_warning": feature_source.get("feature_embedding_warning"),
         "output_obsm_key": output_obsm_key,
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,
         "spatial_scale": float(spatial_scale),
         "n_cells": int(adata.n_obs),
         "feature_dim": int(features.shape[1]),
+        "method_stack": _deep_method_stack(
+            active_path="deep-fit",
+            config=config,
+            feature_source=feature_source,
+            output_obsm_key=output_obsm_key,
+        ),
+        "qc_warnings": _deep_qc_warnings(
+            feature_embedding_warning=feature_source.get("feature_embedding_warning"),
+            config=config,
+        ),
         "deep_features": deep_summary,
         "outputs": outputs,
     }
@@ -348,12 +440,23 @@ def transform_h5ad_with_deep_model(
         "feature_obsm_key": feature_obsm_key,
         "feature_input_mode": str(feature_source.get("input_mode", "obsm")),
         "feature_source": dict(feature_source),
+        "feature_embedding_warning": feature_source.get("feature_embedding_warning"),
         "output_obsm_key": resolved_output_obsm_key,
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,
         "spatial_scale": float(spatial_scale),
         "n_cells": int(adata.n_obs),
         "feature_dim": int(features.shape[1]),
+        "method_stack": _deep_method_stack(
+            active_path="deep-transform",
+            config=encoder.config,
+            feature_source=feature_source,
+            output_obsm_key=resolved_output_obsm_key,
+        ),
+        "qc_warnings": _deep_qc_warnings(
+            feature_embedding_warning=feature_source.get("feature_embedding_warning"),
+            config=encoder.config,
+        ),
         "deep_features": deep_summary,
         "outputs": {
             "embedded_h5ad": str(output_h5ad),

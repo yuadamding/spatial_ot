@@ -61,6 +61,10 @@ def _add_deep_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--deep-weight-decay", type=float, default=None, help="Weight decay for the deep feature adapter.")
     parser.add_argument("--deep-validation", default=None, choices=["none", "spatial_block", "sample_holdout"], help="Validation split mode for the deep feature adapter.")
     parser.add_argument("--deep-batch-key", default=None, help="Optional obs key used for sample-holdout validation and batch-aware metadata.")
+    parser.add_argument("--deep-count-layer", default=None, help="Count matrix source used only as a denoising reconstruction target. Use 'X' or a layer name such as 'counts'.")
+    parser.add_argument("--deep-count-decoder-rank", type=int, default=None, help="Low-rank decoder width used for count-aware reconstruction.")
+    parser.add_argument("--deep-count-chunk-size", type=int, default=None, help="Number of genes reconstructed per optimization step when count-aware reconstruction is enabled.")
+    parser.add_argument("--deep-count-loss-weight", type=float, default=None, help="Count-reconstruction loss weight for the deep feature adapter.")
     parser.add_argument("--deep-device", default=None, help="Torch device for the deep feature adapter, or 'auto'.")
     parser.add_argument("--deep-reconstruction-weight", type=float, default=None, help="Reconstruction loss weight for the deep feature adapter.")
     parser.add_argument("--deep-context-weight", type=float, default=None, help="Neighborhood-context prediction loss weight for the deep feature adapter.")
@@ -234,6 +238,9 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--scale-penalty", type=float, default=None, help="Penalty on residual scale drift from 1.0.")
     multilevel.add_argument("--shift-penalty", type=float, default=None, help="Penalty on residual translation magnitude in canonical space.")
     multilevel.add_argument("--n-init", type=int, default=None, help="Number of random restarts for the nonconvex multilevel OT fit.")
+    multilevel.add_argument("--overlap-consistency-weight", type=float, default=None, help="Penalty weight encouraging high-overlap subregions with low feature contrast to keep similar cluster assignments.")
+    multilevel.add_argument("--overlap-jaccard-min", type=float, default=None, help="Minimum subregion-overlap Jaccard retained by the overlap-consistency graph.")
+    multilevel.add_argument("--overlap-contrast-scale", type=float, default=None, help="Contrast scale for gating the overlap-consistency penalty.")
     multilevel.add_argument("--allow-observed-hull-geometry", action=argparse.BooleanOptionalAction, default=None, help="Allow observed-coordinate convex hull fallback when explicit region geometry is unavailable.")
     multilevel.add_argument("--max-iter", type=int, default=None, help="Maximum alternating-optimization iterations.")
     multilevel.add_argument("--tol", type=float, default=None, help="Support-shift tolerance for early stopping.")
@@ -283,6 +290,9 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "scale_penalty",
         "shift_penalty",
         "n_init",
+        "overlap_consistency_weight",
+        "overlap_jaccard_min",
+        "overlap_contrast_scale",
         "allow_observed_hull_geometry",
         "max_iter",
         "tol",
@@ -313,6 +323,10 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_weight_decay": "weight_decay",
         "deep_validation": "validation",
         "deep_batch_key": "batch_key",
+        "deep_count_layer": "count_layer",
+        "deep_count_decoder_rank": "count_decoder_rank",
+        "deep_count_chunk_size": "count_chunk_size",
+        "deep_count_loss_weight": "count_loss_weight",
         "deep_device": "device",
         "deep_reconstruction_weight": "reconstruction_weight",
         "deep_context_weight": "context_weight",
@@ -358,6 +372,10 @@ def _resolve_deep_fit_config_from_args(args: argparse.Namespace) -> tuple[Multil
         "deep_weight_decay": "weight_decay",
         "deep_validation": "validation",
         "deep_batch_key": "batch_key",
+        "deep_count_layer": "count_layer",
+        "deep_count_decoder_rank": "count_decoder_rank",
+        "deep_count_chunk_size": "count_chunk_size",
+        "deep_count_loss_weight": "count_loss_weight",
         "deep_device": "device",
         "deep_reconstruction_weight": "reconstruction_weight",
         "deep_context_weight": "context_weight",

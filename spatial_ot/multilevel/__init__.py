@@ -26,6 +26,8 @@ from .geometry import (
 from .io import (
     plot_sample_niche_maps,
     plot_sample_niche_maps_from_run_dir,
+    plot_sample_spatial_maps,
+    plot_sample_spatial_maps_from_run_dir,
     run_multilevel_ot_on_h5ad,
     run_multilevel_ot_with_config,
 )
@@ -64,6 +66,8 @@ __all__ = [
     "make_reference_points_unit_disk",
     "plot_sample_niche_maps",
     "plot_sample_niche_maps_from_run_dir",
+    "plot_sample_spatial_maps",
+    "plot_sample_spatial_maps_from_run_dir",
     "run_multilevel_ot_on_h5ad",
     "run_multilevel_ot_with_config",
     "sample_geometry_points",

@@ -7,6 +7,7 @@ import warnings
 
 import numpy as np
 import ot
+from scipy import sparse
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.metrics import pairwise_distances
 import torch
@@ -183,6 +184,119 @@ def _make_optimization_measures(measures: list[SubregionMeasure]) -> list[Optimi
         )
         for measure in measures
     ]
+
+
+def _build_overlap_consistency_graph(
+    measures: list[SubregionMeasure],
+    summaries: np.ndarray,
+    *,
+    min_jaccard: float,
+    contrast_scale: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n_subregions = len(measures)
+    if n_subregions < 2:
+        return (
+            np.zeros(0, dtype=np.int32),
+            np.zeros(0, dtype=np.int32),
+            np.zeros(0, dtype=np.float32),
+        )
+    rows = np.concatenate([np.asarray(measure.members, dtype=np.int64) for measure in measures], dtype=np.int64)
+    cols = np.concatenate(
+        [
+            np.full(np.asarray(measure.members, dtype=np.int64).shape[0], rid, dtype=np.int64)
+            for rid, measure in enumerate(measures)
+        ],
+        dtype=np.int64,
+    )
+    if rows.size == 0:
+        return (
+            np.zeros(0, dtype=np.int32),
+            np.zeros(0, dtype=np.int32),
+            np.zeros(0, dtype=np.float32),
+        )
+    n_cells = int(rows.max()) + 1
+    incidence = sparse.csr_matrix(
+        (np.ones(rows.shape[0], dtype=np.int8), (rows, cols)),
+        shape=(n_cells, n_subregions),
+        dtype=np.int8,
+    )
+    overlap = (incidence.T @ incidence).tocoo()
+    member_sizes = np.asarray([len(measure.members) for measure in measures], dtype=np.int64)
+    summary_arr = np.asarray(summaries, dtype=np.float32)
+    edge_i: list[int] = []
+    edge_j: list[int] = []
+    edge_weight: list[float] = []
+    for i, j, intersection in zip(overlap.row.tolist(), overlap.col.tolist(), overlap.data.tolist(), strict=False):
+        if int(i) >= int(j) or int(intersection) <= 0:
+            continue
+        union = int(member_sizes[int(i)] + member_sizes[int(j)] - int(intersection))
+        if union <= 0:
+            continue
+        jaccard = float(int(intersection) / union)
+        if jaccard < float(min_jaccard):
+            continue
+        weight = jaccard
+        if summary_arr.ndim == 2 and summary_arr.shape[0] == n_subregions and summary_arr.shape[1] > 0:
+            contrast = float(np.linalg.norm(summary_arr[int(i)] - summary_arr[int(j)]))
+            weight *= float(np.exp(-contrast / max(float(contrast_scale), 1e-6)))
+        if weight <= 0:
+            continue
+        edge_i.append(int(i))
+        edge_j.append(int(j))
+        edge_weight.append(float(weight))
+    return (
+        np.asarray(edge_i, dtype=np.int32),
+        np.asarray(edge_j, dtype=np.int32),
+        np.asarray(edge_weight, dtype=np.float32),
+    )
+
+
+def _compute_overlap_penalty_matrix(
+    probs: np.ndarray,
+    edge_i: np.ndarray,
+    edge_j: np.ndarray,
+    edge_weight: np.ndarray,
+) -> np.ndarray:
+    probs_arr = np.asarray(probs, dtype=np.float64)
+    n_subregions, n_clusters = probs_arr.shape
+    if n_subregions == 0 or n_clusters == 0 or edge_weight.size == 0:
+        return np.zeros((n_subregions, n_clusters), dtype=np.float32)
+    penalty = np.zeros((n_subregions, n_clusters), dtype=np.float64)
+    norm = np.zeros(n_subregions, dtype=np.float64)
+    for i, j, weight in zip(edge_i.tolist(), edge_j.tolist(), edge_weight.tolist(), strict=False):
+        w = float(weight)
+        penalty[int(i)] += w * (1.0 - probs_arr[int(j)])
+        penalty[int(j)] += w * (1.0 - probs_arr[int(i)])
+        norm[int(i)] += w
+        norm[int(j)] += w
+    active = norm > 0
+    if np.any(active):
+        penalty[active] /= norm[active, None]
+    return penalty.astype(np.float32)
+
+
+def _apply_overlap_consistency_regularization(
+    transport_costs: np.ndarray,
+    *,
+    edge_i: np.ndarray,
+    edge_j: np.ndarray,
+    edge_weight: np.ndarray,
+    overlap_consistency_weight: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    costs = np.asarray(transport_costs, dtype=np.float32)
+    if float(overlap_consistency_weight) <= 0 or edge_weight.size == 0:
+        zero = np.zeros_like(costs, dtype=np.float32)
+        return costs.astype(np.float32, copy=True), zero
+    temperature = max(float(np.std(costs)), 1e-3)
+    probs = _softmax_over_negative_costs(costs, temperature=temperature)
+    penalties = _compute_overlap_penalty_matrix(
+        probs,
+        np.asarray(edge_i, dtype=np.int32),
+        np.asarray(edge_j, dtype=np.int32),
+        np.asarray(edge_weight, dtype=np.float32),
+    )
+    weighted_penalties = float(overlap_consistency_weight) * penalties
+    return (costs + weighted_penalties).astype(np.float32), weighted_penalties.astype(np.float32)
 
 
 def _configure_local_thread_budget(torch_threads: int, torch_interop_threads: int) -> None:
@@ -553,6 +667,88 @@ def apply_similarity(x: np.ndarray, transform: dict[str, np.ndarray | float]) ->
     scale = float(transform["scale"])
     t = np.asarray(transform["t"], dtype=np.float64)
     return (scale * np.asarray(x, dtype=np.float64) @ r + t).astype(np.float64)
+
+
+def _assignment_cost_breakdown(
+    *,
+    measure: SubregionMeasure,
+    gamma: np.ndarray,
+    transform: dict[str, np.ndarray | float],
+    atom_coords: np.ndarray,
+    atom_features: np.ndarray,
+    lambda_x: float,
+    lambda_y: float,
+    cost_scale_x: float,
+    cost_scale_y: float,
+    scale_penalty: float,
+    shift_penalty: float,
+) -> tuple[float, float, float]:
+    gamma64 = np.asarray(gamma, dtype=np.float64)
+    if gamma64.size == 0:
+        return 0.0, 0.0, _transform_penalty(transform, scale_penalty, shift_penalty)
+    u_aligned = apply_similarity(measure.canonical_coords, transform)
+    cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(float(cost_scale_x), 1e-12)
+    cy = ot.dist(measure.features, atom_features, metric="sqeuclidean") / max(float(cost_scale_y), 1e-12)
+    geometry_cost = float(np.sum(gamma64 * (float(lambda_x) * cx)))
+    feature_cost = float(np.sum(gamma64 * (float(lambda_y) * cy)))
+    transform_penalty = _transform_penalty(transform, scale_penalty, shift_penalty)
+    return geometry_cost, feature_cost, transform_penalty
+
+
+def _compute_assigned_cost_breakdowns(
+    *,
+    measures: list[SubregionMeasure],
+    labels: np.ndarray,
+    plans: list[np.ndarray],
+    transforms: list[dict[str, np.ndarray | float]],
+    atom_coords: np.ndarray,
+    atom_features: np.ndarray,
+    lambda_x: float,
+    lambda_y: float,
+    cost_scale_x: float,
+    cost_scale_y: float,
+    scale_penalty: float,
+    shift_penalty: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    geometry_costs = np.zeros(len(measures), dtype=np.float32)
+    feature_costs = np.zeros(len(measures), dtype=np.float32)
+    transform_penalties = np.zeros(len(measures), dtype=np.float32)
+    for r, measure in enumerate(measures):
+        k = int(labels[r])
+        geometry_cost, feature_cost, transform_penalty = _assignment_cost_breakdown(
+            measure=measure,
+            gamma=plans[r],
+            transform=transforms[r],
+            atom_coords=atom_coords[k],
+            atom_features=atom_features[k],
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            scale_penalty=scale_penalty,
+            shift_penalty=shift_penalty,
+        )
+        geometry_costs[r] = float(geometry_cost)
+        feature_costs[r] = float(feature_cost)
+        transform_penalties[r] = float(transform_penalty)
+    return geometry_costs, feature_costs, transform_penalties
+
+
+def _transform_diagnostic_arrays(
+    transforms: list[dict[str, np.ndarray | float]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    rotation_deg = np.zeros(len(transforms), dtype=np.float32)
+    reflection = np.zeros(len(transforms), dtype=bool)
+    scale = np.zeros(len(transforms), dtype=np.float32)
+    translation_norm = np.zeros(len(transforms), dtype=np.float32)
+    for idx, transform in enumerate(transforms):
+        r = np.asarray(transform["R"], dtype=np.float64)
+        t = np.asarray(transform["t"], dtype=np.float64)
+        rotation_deg[idx] = float(np.degrees(np.arctan2(r[1, 0], r[0, 0])))
+        reflection[idx] = bool(np.linalg.det(r) < 0.0)
+        scale[idx] = float(transform["scale"])
+        translation_norm[idx] = float(np.linalg.norm(t))
+    return rotation_deg, reflection, scale, translation_norm
 
 
 def _transform_penalty(
@@ -1015,7 +1211,9 @@ def _compute_assignment_costs_rk_gpu(
     scale_penalty: float,
     shift_penalty: float,
     compute_device: torch.device,
-) -> np.ndarray:
+    *,
+    return_diagnostics: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Fully batched (R*K, m, *) aligned semi-relaxed OT on GPU.
 
     This amortizes kernel-launch overhead across all (subregion, cluster) pairs.
@@ -1123,12 +1321,17 @@ def _compute_assignment_costs_rk_gpu(
     u_aligned = _apply_similarity_rk_torch(u_rkm, r_mat, scale_t, t_t)
     cx = torch.cdist(u_aligned.reshape(R * K, m, u_aligned.shape[-1]), atom_coords_rk.reshape(R * K, p, u_aligned.shape[-1]), p=2).pow(2).reshape(R, K, m, p) / sx
     cost = float(lambda_x) * cx + cy_scaled
-    _gamma, obj, _reg = _solve(cost)
+    _gamma, obj, eff_reg = _solve(cost)
 
     penalty = float(scale_penalty) * torch.log(scale_t.clamp_min(1e-12)).pow(2) + float(shift_penalty) * (t_t * t_t).sum(dim=-1)
     total = obj + penalty
     total = torch.where(torch.isfinite(total), total, torch.full_like(total, 1e12))
-    return total.detach().cpu().numpy().astype(np.float32)
+    total_np = total.detach().cpu().numpy().astype(np.float32)
+    if not return_diagnostics:
+        return total_np
+    eff_reg_np = eff_reg.detach().cpu().numpy().astype(np.float32)
+    used_fallback_np = ~np.isclose(eff_reg_np, float(eps_base))
+    return total_np, eff_reg_np, used_fallback_np.astype(bool)
 
 
 def _compute_assigned_artifacts_r_gpu(
@@ -1339,10 +1542,14 @@ def _compute_assignment_costs(
     scale_penalty: float,
     shift_penalty: float,
     compute_device: torch.device,
-) -> np.ndarray:
+    *,
+    return_diagnostics: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
     n_subregions = len(measures)
     n_clusters = atom_coords.shape[0]
     costs = np.zeros((n_subregions, n_clusters), dtype=np.float64)
+    effective_eps = np.zeros((n_subregions, n_clusters), dtype=np.float32) if return_diagnostics else None
+    used_fallback = np.zeros((n_subregions, n_clusters), dtype=bool) if return_diagnostics else None
 
     if compute_device.type == "cuda":
         # Fully batched (R*K) GPU solve — amortizes kernel launch latency.
@@ -1365,12 +1572,20 @@ def _compute_assignment_costs(
             scale_penalty=scale_penalty,
             shift_penalty=shift_penalty,
             compute_device=compute_device,
+            return_diagnostics=return_diagnostics,
         )
-        return np.clip(costs_rk, -1e12, 1e12).astype(np.float32)
+        if not return_diagnostics:
+            return np.clip(np.asarray(costs_rk), -1e12, 1e12).astype(np.float32)
+        costs_np, eff_reg_np, used_fallback_np = costs_rk
+        return (
+            np.clip(np.asarray(costs_np), -1e12, 1e12).astype(np.float32),
+            np.asarray(eff_reg_np, dtype=np.float32),
+            np.asarray(used_fallback_np, dtype=bool),
+        )
 
     for r, measure in enumerate(measures):
         for k in range(n_clusters):
-            cost, _, _, _, _ = aligned_semirelaxed_ot_to_cluster(
+            cost, _, _, _, solve_diag = aligned_semirelaxed_ot_to_cluster(
                 u=measure.canonical_coords,
                 y=measure.features,
                 a=measure.weights,
@@ -1393,7 +1608,13 @@ def _compute_assignment_costs(
                 compute_device=compute_device,
             )
             costs[r, k] = float(np.clip(cost, -1e12, 1e12))
-    return costs.astype(np.float32)
+            if return_diagnostics and effective_eps is not None and used_fallback is not None:
+                effective_eps[r, k] = float(solve_diag.effective_eps)
+                used_fallback[r, k] = bool(solve_diag.used_fallback)
+    if not return_diagnostics:
+        return costs.astype(np.float32)
+    assert effective_eps is not None and used_fallback is not None
+    return costs.astype(np.float32), effective_eps.astype(np.float32), used_fallback.astype(bool)
 
 
 def _compute_assigned_artifacts(
@@ -1635,7 +1856,8 @@ def _project_cells_from_subregions(
         cy = _pairwise_sqdist_array(features[members], atom_features[k], device=compute_device) / max(float(cost_scale_y), 1e-5)
         total_cost = float(lambda_x) * cx + float(lambda_y) * cy
         atom_scores = np.exp(-total_cost / max(float(assignment_temperature), 1e-5)) * np.clip(prototype_weights[k], 1e-8, None)[None, :]
-        local_model_probs[members, k] += atom_scores.sum(axis=1).astype(np.float32)
+        local_support = atom_scores.sum(axis=1).astype(np.float32)
+        local_model_probs[members] += local_support[:, None] * subregion_probs[r][None, :]
         local_model_counts[members] += 1.0
     covered = membership_counts[:, 0] > 0
     if np.any(covered):
@@ -1683,6 +1905,10 @@ def _execute_restart(
     tol: float,
     seed: int,
     compute_device: str,
+    overlap_edge_i: np.ndarray | None = None,
+    overlap_edge_j: np.ndarray | None = None,
+    overlap_edge_weight: np.ndarray | None = None,
+    overlap_consistency_weight: float = 0.0,
 ) -> dict[str, object]:
     resolved_compute_device = _resolve_compute_device(compute_device)
     if resolved_compute_device.type == "cuda" and torch.cuda.is_available():
@@ -1703,12 +1929,18 @@ def _execute_restart(
         random_state=run_seed,
     )
     objective_history: list[dict[str, float]] = []
+    overlap_edge_i = np.asarray(overlap_edge_i if overlap_edge_i is not None else np.zeros(0, dtype=np.int32), dtype=np.int32)
+    overlap_edge_j = np.asarray(overlap_edge_j if overlap_edge_j is not None else np.zeros(0, dtype=np.int32), dtype=np.int32)
+    overlap_edge_weight = np.asarray(
+        overlap_edge_weight if overlap_edge_weight is not None else np.zeros(0, dtype=np.float32),
+        dtype=np.float32,
+    )
 
     for iteration in range(int(max_iter)):
         prev_coords = atom_coords.copy()
         prev_features = atom_features.copy()
         prev_labels = labels.copy()
-        costs = _compute_assignment_costs(
+        transport_costs = _compute_assignment_costs(
             measures=measures,
             atom_coords=atom_coords,
             atom_features=atom_features,
@@ -1727,6 +1959,13 @@ def _execute_restart(
             scale_penalty=scale_penalty,
             shift_penalty=shift_penalty,
             compute_device=resolved_compute_device,
+        )
+        costs, overlap_penalties = _apply_overlap_consistency_regularization(
+            transport_costs,
+            edge_i=overlap_edge_i,
+            edge_j=overlap_edge_j,
+            edge_weight=overlap_edge_weight,
+            overlap_consistency_weight=overlap_consistency_weight,
         )
         argmin_labels = costs.argmin(axis=1).astype(np.int32)
         labels, forced_label_mask = _ensure_nonempty_clusters(argmin_labels, costs, n_clusters)
@@ -1751,6 +1990,10 @@ def _execute_restart(
             shift_penalty=shift_penalty,
             compute_device=resolved_compute_device,
         )
+        assigned_overlap_penalties = overlap_penalties[
+            np.arange(labels.shape[0], dtype=np.int64),
+            labels.astype(np.int64),
+        ].astype(np.float32)
         atom_coords, atom_features, betas = _update_atoms(
             measures=measures,
             labels=labels,
@@ -1766,13 +2009,17 @@ def _execute_restart(
         label_change_rate = float(np.mean(labels != prev_labels))
         coord_shift = _relative_change(atom_coords, prev_coords)
         feat_shift = _relative_change(atom_features, prev_features)
-        mean_obj = float(np.mean(assigned_costs))
+        mean_transport_obj = float(np.mean(assigned_costs))
+        mean_overlap_penalty = float(np.mean(assigned_overlap_penalties)) if assigned_overlap_penalties.size else 0.0
+        mean_obj = float(np.mean(assigned_costs + assigned_overlap_penalties))
         sorted_costs = np.sort(costs, axis=1)
         mean_margin = float(np.mean(sorted_costs[:, 1] - sorted_costs[:, 0])) if sorted_costs.shape[1] >= 2 else float("nan")
         objective_history.append(
             {
                 "iteration": int(iteration + 1),
                 "mean_objective": mean_obj,
+                "mean_transport_objective": mean_transport_obj,
+                "mean_overlap_consistency_penalty": mean_overlap_penalty,
                 "label_change_rate": label_change_rate,
                 "coord_shift": coord_shift,
                 "feature_shift": feat_shift,
@@ -1784,7 +2031,7 @@ def _execute_restart(
         if label_change_rate < 0.005 and max(coord_shift, feat_shift) < tol:
             break
 
-    final_costs = _compute_assignment_costs(
+    final_transport_costs, _candidate_effective_eps_matrix, candidate_used_fallback_matrix = _compute_assignment_costs(
         measures=measures,
         atom_coords=atom_coords,
         atom_features=atom_features,
@@ -1803,6 +2050,14 @@ def _execute_restart(
         scale_penalty=scale_penalty,
         shift_penalty=shift_penalty,
         compute_device=resolved_compute_device,
+        return_diagnostics=True,
+    )
+    final_costs, final_overlap_penalties = _apply_overlap_consistency_regularization(
+        final_transport_costs,
+        edge_i=overlap_edge_i,
+        edge_j=overlap_edge_j,
+        edge_weight=overlap_edge_weight,
+        overlap_consistency_weight=overlap_consistency_weight,
     )
     final_argmin_labels = final_costs.argmin(axis=1).astype(np.int32)
     final_labels, _final_forced_label_mask = _ensure_nonempty_clusters(final_argmin_labels, final_costs, n_clusters)
@@ -1827,21 +2082,30 @@ def _execute_restart(
         shift_penalty=shift_penalty,
         compute_device=resolved_compute_device,
     )
-    final_objective = float(np.sum(final_assigned_costs))
+    final_assigned_overlap_penalties = final_overlap_penalties[
+        np.arange(final_labels.shape[0], dtype=np.int64),
+        final_labels.astype(np.int64),
+    ].astype(np.float32)
+    final_objective = float(np.sum(final_assigned_costs + final_assigned_overlap_penalties))
     return {
         "run": int(run),
         "seed": int(run_seed),
         "objective": final_objective,
         "n_iter": int(len(objective_history)),
-        "mean_assigned_cost": float(np.mean(final_assigned_costs)),
+        "mean_assigned_cost": float(np.mean(final_assigned_costs + final_assigned_overlap_penalties)),
+        "mean_assigned_transport_cost": float(np.mean(final_assigned_costs)),
+        "mean_assigned_overlap_penalty": float(np.mean(final_assigned_overlap_penalties)) if final_assigned_overlap_penalties.size else 0.0,
         "labels": final_labels.astype(np.int32),
         "costs": final_costs.astype(np.float32),
+        "transport_costs": final_transport_costs.astype(np.float32),
+        "overlap_penalties": final_overlap_penalties.astype(np.float32),
         "atom_coords": atom_coords.astype(np.float32),
         "atom_features": atom_features.astype(np.float32),
         "betas": betas.astype(np.float32),
         "objective_history": objective_history,
         "device": str(resolved_compute_device),
         "assigned_ot_fallback_fraction": float(np.mean(final_assigned_used_fallback.astype(np.float32))),
+        "candidate_ot_fallback_fraction": float(np.mean(candidate_used_fallback_matrix.astype(np.float32))),
         "runtime_memory": _runtime_memory_snapshot(resolved_compute_device),
     }
 
@@ -1878,6 +2142,9 @@ def fit_multilevel_ot(
     allow_convex_hull_fallback: bool = False,
     max_iter: int = 10,
     tol: float = 1e-4,
+    overlap_consistency_weight: float = 0.0,
+    overlap_jaccard_min: float = 0.15,
+    overlap_contrast_scale: float = 1.0,
     basic_niche_size_um: float | None = 200.0,
     seed: int = 1337,
     compute_device: str = "auto",
@@ -1999,6 +2266,12 @@ def fit_multilevel_ot(
 
     optimization_measures = _make_optimization_measures(measures)
     summaries = np.vstack([_measure_summary(m) for m in optimization_measures])
+    overlap_edge_i, overlap_edge_j, overlap_edge_weight = _build_overlap_consistency_graph(
+        measures=measures,
+        summaries=summaries,
+        min_jaccard=max(float(overlap_jaccard_min), 0.0),
+        contrast_scale=max(float(overlap_contrast_scale), 1e-6),
+    )
     cost_scale_x, cost_scale_y = _estimate_cost_scales(measures, max_points=5000, random_state=seed, compute_device=resolved_compute_device)
     restart_params = {
         "n_clusters": int(n_clusters),
@@ -2019,6 +2292,10 @@ def fit_multilevel_ot(
         "max_iter": int(max_iter),
         "tol": float(tol),
         "seed": int(seed),
+        "overlap_edge_i": overlap_edge_i,
+        "overlap_edge_j": overlap_edge_j,
+        "overlap_edge_weight": overlap_edge_weight,
+        "overlap_consistency_weight": float(overlap_consistency_weight),
     }
     device_pool = _resolve_cuda_device_pool(str(compute_device), int(n_init)) if resolved_compute_device.type == "cuda" else [str(resolved_compute_device)]
     parallel_restart_workers = _resolve_parallel_restart_workers(device_pool, int(n_init))
@@ -2059,23 +2336,52 @@ def fit_multilevel_ot(
             "objective": float(result["objective"]),
             "n_iter": int(result["n_iter"]),
             "mean_assigned_cost": float(result["mean_assigned_cost"]),
+            "mean_assigned_transport_cost": float(result.get("mean_assigned_transport_cost", result["mean_assigned_cost"])),
+            "mean_assigned_overlap_penalty": float(result.get("mean_assigned_overlap_penalty", 0.0)),
             "device": str(result["device"]),
             "assigned_ot_fallback_fraction": float(result["assigned_ot_fallback_fraction"]),
+            "candidate_ot_fallback_fraction": float(result.get("candidate_ot_fallback_fraction", result["assigned_ot_fallback_fraction"])),
             "runtime_memory": dict(result.get("runtime_memory", {})),
         }
         for result in restart_results
     ]
     best_bundle = min(restart_results, key=lambda result: float(result["objective"]))
-    labels = np.asarray(best_bundle["labels"], dtype=np.int32)
-    costs = np.asarray(best_bundle["costs"], dtype=np.float32)
     atom_coords = np.asarray(best_bundle["atom_coords"], dtype=np.float32)
     atom_features = np.asarray(best_bundle["atom_features"], dtype=np.float32)
     betas = np.asarray(best_bundle["betas"], dtype=np.float32)
     objective_history = list(best_bundle["objective_history"])
     best_compute_device = _resolve_compute_device(str(best_bundle["device"]))
-    argmin_labels_best = costs.argmin(axis=1).astype(np.int32)
-    _labels_checked, forced_label_mask_best = _ensure_nonempty_clusters(argmin_labels_best, costs, n_clusters)
-    plans, transforms, thetas, _assigned_costs_best, assigned_effective_eps_best, assigned_used_fallback_best = _compute_assigned_artifacts(
+    final_transport_costs, candidate_effective_eps_matrix_best, candidate_used_fallback_matrix_best = _compute_assignment_costs(
+        measures=measures,
+        atom_coords=atom_coords,
+        atom_features=atom_features,
+        betas=betas,
+        lambda_x=lambda_x,
+        lambda_y=lambda_y,
+        eps=ot_eps,
+        rho=rho,
+        align_iters=align_iters,
+        allow_reflection=allow_reflection,
+        allow_scale=allow_scale,
+        cost_scale_x=cost_scale_x,
+        cost_scale_y=cost_scale_y,
+        min_scale=min_scale,
+        max_scale=max_scale,
+        scale_penalty=scale_penalty,
+        shift_penalty=shift_penalty,
+        compute_device=best_compute_device,
+        return_diagnostics=True,
+    )
+    final_costs, final_overlap_penalties = _apply_overlap_consistency_regularization(
+        final_transport_costs,
+        edge_i=overlap_edge_i,
+        edge_j=overlap_edge_j,
+        edge_weight=overlap_edge_weight,
+        overlap_consistency_weight=overlap_consistency_weight,
+    )
+    final_argmin_labels_best = final_costs.argmin(axis=1).astype(np.int32)
+    labels, forced_label_mask_best = _ensure_nonempty_clusters(final_argmin_labels_best, final_costs, n_clusters)
+    plans, transforms, thetas, _assigned_transport_costs_best, assigned_effective_eps_best, assigned_used_fallback_best = _compute_assigned_artifacts(
         measures=measures,
         labels=labels,
         atom_coords=atom_coords,
@@ -2096,9 +2402,28 @@ def fit_multilevel_ot(
         shift_penalty=shift_penalty,
         compute_device=best_compute_device,
     )
+    assigned_overlap_penalties_best = final_overlap_penalties[
+        np.arange(labels.shape[0], dtype=np.int64),
+        labels.astype(np.int64),
+    ].astype(np.float32)
+    assigned_geometry_transport_costs_best, assigned_feature_transport_costs_best, assigned_transform_penalties_best = _compute_assigned_cost_breakdowns(
+        measures=measures,
+        labels=labels,
+        plans=plans,
+        transforms=transforms,
+        atom_coords=atom_coords,
+        atom_features=atom_features,
+        lambda_x=lambda_x,
+        lambda_y=lambda_y,
+        cost_scale_x=cost_scale_x,
+        cost_scale_y=cost_scale_y,
+        scale_penalty=scale_penalty,
+        shift_penalty=shift_penalty,
+    )
+    assigned_rotation_deg_best, assigned_reflection_best, assigned_scale_best, assigned_translation_norm_best = _transform_diagnostic_arrays(transforms)
 
     thetas_assigned = np.vstack([np.asarray(theta, dtype=np.float32) for theta in thetas]).astype(np.float32)
-    subregion_cluster_probs = _softmax_over_negative_costs(costs, temperature=max(float(np.std(costs)), 1e-3))
+    subregion_cluster_probs = _softmax_over_negative_costs(final_costs, temperature=max(float(np.std(final_costs)), 1e-3))
     cluster_supports = np.concatenate([atom_coords, atom_features], axis=2).astype(np.float32)
 
     cell_cluster_labels, cell_cluster_probs, cell_feature_probs, cell_context_probs = _project_cells_from_subregions(
@@ -2110,7 +2435,7 @@ def fit_multilevel_ot(
         atom_features=atom_features,
         prototype_weights=betas,
         assigned_transforms=transforms,
-        subregion_cluster_costs=costs,
+        subregion_cluster_costs=final_costs,
         lambda_x=lambda_x,
         lambda_y=lambda_y,
         cost_scale_x=cost_scale_x,
@@ -2127,7 +2452,7 @@ def fit_multilevel_ot(
         subregion_basic_niche_ids=[np.asarray(niche_ids, dtype=np.int32) for niche_ids in subregion_basic_niche_ids],
         subregion_centers_um=centers_um.astype(np.float32),
         subregion_members=[m.members for m in measures],
-        subregion_argmin_labels=argmin_labels_best.astype(np.int32),
+        subregion_argmin_labels=final_argmin_labels_best.astype(np.int32),
         subregion_forced_label_mask=forced_label_mask_best.astype(bool),
         subregion_geometry_point_counts=np.asarray([m.geometry_point_count for m in measures], dtype=np.int32),
         subregion_geometry_sources=[m.normalizer_diagnostics.geometry_source for m in measures],
@@ -2137,10 +2462,23 @@ def fit_multilevel_ot(
         subregion_normalizer_interpolation_residual=np.asarray([m.normalizer_diagnostics.interpolation_residual if m.normalizer_diagnostics.interpolation_residual is not None else np.nan for m in measures], dtype=np.float32),
         subregion_cluster_labels=labels,
         subregion_cluster_probs=subregion_cluster_probs.astype(np.float32),
-        subregion_cluster_costs=costs.astype(np.float32),
+        subregion_cluster_costs=final_costs.astype(np.float32),
+        subregion_cluster_transport_costs=final_transport_costs.astype(np.float32),
+        subregion_cluster_overlap_penalties=final_overlap_penalties.astype(np.float32),
         subregion_atom_weights=thetas_assigned.astype(np.float32),
+        subregion_measure_summaries=summaries.astype(np.float32),
         subregion_assigned_effective_eps=assigned_effective_eps_best.astype(np.float32),
         subregion_assigned_used_ot_fallback=assigned_used_fallback_best.astype(bool),
+        subregion_candidate_effective_eps_matrix=candidate_effective_eps_matrix_best.astype(np.float32),
+        subregion_candidate_used_ot_fallback_matrix=candidate_used_fallback_matrix_best.astype(bool),
+        subregion_assigned_geometry_transport_costs=assigned_geometry_transport_costs_best.astype(np.float32),
+        subregion_assigned_feature_transport_costs=assigned_feature_transport_costs_best.astype(np.float32),
+        subregion_assigned_transform_penalties=assigned_transform_penalties_best.astype(np.float32),
+        subregion_assigned_overlap_consistency_penalties=assigned_overlap_penalties_best.astype(np.float32),
+        subregion_assigned_transform_rotation_deg=assigned_rotation_deg_best.astype(np.float32),
+        subregion_assigned_transform_reflection=assigned_reflection_best.astype(bool),
+        subregion_assigned_transform_scale=assigned_scale_best.astype(np.float32),
+        subregion_assigned_transform_translation_norm=assigned_translation_norm_best.astype(np.float32),
         cluster_supports=cluster_supports.astype(np.float32),
         cluster_atom_coords=atom_coords.astype(np.float32),
         cluster_atom_features=atom_features.astype(np.float32),

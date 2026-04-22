@@ -350,6 +350,8 @@ def test_fit_deep_features_on_h5ad_outputs_artifacts(tmp_path) -> None:
     assert summary["active_path"] == "deep-fit"
     assert summary["latent_source"] == "deep_joint"
     assert summary["communication_source"] == "none"
+    assert summary["method_stack"]["deep_feature_adapter"] == "graph_autoencoder"
+    assert summary["method_stack"]["legacy_teacher_student_used"] is False
     assert summary["deep_features"]["graph_max_neighbors"] == 5
     assert summary["deep_features"]["full_batch_max_cells"] == 50000
     assert summary["spatial_scale"] == 2.0
@@ -423,6 +425,8 @@ def test_transform_h5ad_with_deep_model_writes_embedding(tmp_path) -> None:
     assert summary["active_path"] == "deep-transform"
     assert summary["latent_source"] == "deep_intrinsic"
     assert summary["communication_source"] == "none"
+    assert summary["method_stack"]["active_path"] == "deep-transform"
+    assert summary["method_stack"]["legacy_teacher_student_used"] is False
     assert summary["deep_features"]["pretrained_model_loaded"] is True
     assert summary["deep_features"]["graph_inference_mode"] == "batched"
     transformed = ad.read_h5ad(summary["outputs"]["embedded_h5ad"])
@@ -650,7 +654,7 @@ latent_dim = 5
         load_multilevel_config(config_path)
 
 
-def test_count_layer_rejected_until_implemented(tmp_path) -> None:
+def test_count_layer_config_loads_now_that_count_reconstruction_is_supported(tmp_path) -> None:
     config_path = tmp_path / "multilevel_count.toml"
     config_path.write_text(
         """
@@ -669,8 +673,88 @@ atoms_per_cluster = 2
 	count_layer = "counts"
 	"""
     )
-    with pytest.raises(NotImplementedError):
-        load_multilevel_config(config_path)
+    config = load_multilevel_config(config_path)
+    assert config.deep.count_layer == "counts"
+
+
+def test_fit_deep_features_supports_count_reconstruction_targets() -> None:
+    rng = np.random.default_rng(2468)
+    counts = rng.poisson(lam=3.0, size=(28, 9)).astype(np.float32)
+    features = np.log1p(counts[:, :6]).astype(np.float32)
+    coords = rng.normal(size=(28, 2)).astype(np.float32)
+    result = fit_deep_features(
+        features=features,
+        coords_um=coords,
+        config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=4,
+            hidden_dim=20,
+            layers=2,
+            neighbor_k=4,
+            epochs=2,
+            batch_size=14,
+            validation="none",
+            output_embedding="intrinsic",
+            count_layer="X",
+            count_decoder_rank=5,
+            count_chunk_size=4,
+            count_loss_weight=0.25,
+        ),
+        count_matrix=counts,
+        seed=23,
+    )
+    assert result.embedding.shape == (28, 4)
+    assert result.feature_schema["count_dim"] == counts.shape[1]
+    assert result.feature_schema["count_layer"] == "X"
+    assert "count_reconstruction_nb_loss" in result.latent_diagnostics
+    assert result.latent_diagnostics["count_target_dim"] == counts.shape[1]
+
+
+def test_fit_deep_features_on_h5ad_reports_count_reconstruction(tmp_path) -> None:
+    rng = np.random.default_rng(1357)
+    counts = rng.poisson(lam=2.5, size=(24, 8)).astype(np.float32)
+    features = np.log1p(counts[:, :5]).astype(np.float32)
+    coords = rng.normal(size=(24, 2)).astype(np.float32)
+    adata = ad.AnnData(X=counts.copy())
+    adata.obsm["X_pca"] = features.copy()
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    input_h5ad = tmp_path / "count_input.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    summary = fit_deep_features_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=tmp_path / "count_fit_out",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=3,
+            hidden_dim=16,
+            layers=1,
+            neighbor_k=3,
+            epochs=2,
+            batch_size=8,
+            validation="none",
+            output_embedding="intrinsic",
+            count_layer="X",
+            count_decoder_rank=4,
+            count_chunk_size=3,
+            count_loss_weight=0.4,
+            save_model=True,
+        ),
+        seed=31,
+    )
+
+    count_summary = summary["deep_features"]["count_reconstruction"]
+    assert isinstance(count_summary, dict)
+    assert count_summary["enabled"] is True
+    assert count_summary["target_layer"] == "X"
+    assert count_summary["decoder_rank"] == 4
+    assert count_summary["gene_chunk_size"] == 3
+    assert summary["deep_features"]["latent_diagnostics"]["count_target_dim"] == counts.shape[1]
 
 
 def test_deep_fit_cli_spatial_scale_overrides_config(tmp_path) -> None:
@@ -813,16 +897,38 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert summary["deep_features"]["method"] == "graph_autoencoder"
     assert summary["deep_features"]["allow_joint_ot_embedding"] is True
     assert summary["deep_features"]["ot_feature_view_warning"] == "joint_embedding_explicit_opt_in"
+    assert summary["deep_features"]["batch_correction"] == "disabled"
     assert "runtime_memory" in summary["deep_features"]
     assert "deep_feature_model" in summary["outputs"]
     assert "deep_feature_history" in summary["outputs"]
     assert "deep_feature_model_meta" in summary["outputs"]
     assert "deep_feature_scaler" in summary["outputs"]
+    assert "candidate_cost_diagnostics" in summary["outputs"]
     saved_summary = json.loads((output_dir / "summary.json").read_text())
     assert saved_summary["deep_features"]["enabled"] is True
     assert saved_summary["method_family"] == "multilevel_ot"
     assert saved_summary["latent_source"] == "deep_joint"
     assert saved_summary["communication_source"] == "none"
+    assert saved_summary["method_stack"]["deep_feature_adapter"] == "graph_autoencoder"
+    assert saved_summary["method_stack"]["cell_projection_mode"] == "approximate_assigned_subregion"
+    assigned_transport_cost_decomposition = saved_summary["assigned_transport_cost_decomposition"]
+    assert assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"] > 0.0
+    assert assigned_transport_cost_decomposition["mean_transport_assignment_objective"] >= assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"]
+    assert np.isclose(
+        assigned_transport_cost_decomposition["geometry_transport_fraction"]
+        + assigned_transport_cost_decomposition["feature_transport_fraction"]
+        + assigned_transport_cost_decomposition["transform_penalty_fraction"],
+        1.0,
+        atol=1e-5,
+    )
+    assert assigned_transport_cost_decomposition["mean_regularized_objective"] >= assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"]
+    assert saved_summary["cost_reliability"]["effective_eps_matrix_available"] is True
+    assert "subregion_embedding_compactness" in saved_summary
+    assert "boundary_separation" in saved_summary
+    assert "transform_diagnostics" in saved_summary
+    assert Path(saved_summary["outputs"]["candidate_cost_diagnostics"]).exists()
+    assert any(item["code"] == "cell_projection_is_approximate_assigned_subregion" for item in saved_summary["qc_warnings"])
+    assert any(item["code"] == "observed_hull_geometry_fallback_active" for item in saved_summary["qc_warnings"])
     required_summary_keys = {
         "summary_schema_version",
         "method_family",
@@ -849,9 +955,137 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert feature_schema["uses_spatial_graph"] is True
     assert feature_schema["graph_training_mode"] == "full_batch"
     assert feature_schema["short_graph"]["edges"] >= 0
-    assert feature_schema["mid_graph"]["edges"] >= 0
+    diag = np.load(saved_summary["outputs"]["candidate_cost_diagnostics"])
+    assert "subregion_cluster_transport_costs" in diag.files
+    assert "subregion_cluster_overlap_penalties" in diag.files
+    assert "subregion_measure_summaries" in diag.files
+
+
+def test_run_multilevel_ot_on_h5ad_reports_deep_count_reconstruction(tmp_path) -> None:
+    rng = np.random.default_rng(2024)
+    coords_a = rng.normal(loc=[0.0, 0.0], scale=0.5, size=(16, 2))
+    coords_b = rng.normal(loc=[6.0, 6.0], scale=0.5, size=(16, 2))
+    coords = np.vstack([coords_a, coords_b]).astype(np.float32)
+    counts_a = rng.poisson(lam=2.0, size=(16, 7)).astype(np.float32)
+    counts_b = rng.poisson(lam=5.0, size=(16, 7)).astype(np.float32)
+    counts = np.vstack([counts_a, counts_b]).astype(np.float32)
+    features = np.log1p(counts[:, :4]).astype(np.float32)
+
+    adata = ad.AnnData(X=counts.copy())
+    adata.obsm["X_pca"] = features.copy()
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    input_h5ad = tmp_path / "count_multilevel.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    summary = run_multilevel_ot_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=tmp_path / "count_multilevel_out",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=2.0,
+        stride_um=4.0,
+        min_cells=8,
+        max_subregions=8,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=8,
+        align_iters=1,
+        n_init=1,
+        allow_convex_hull_fallback=True,
+        max_iter=2,
+        tol=1e-4,
+        basic_niche_size_um=None,
+        seed=17,
+        compute_device="cpu",
+        deep_config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=3,
+            hidden_dim=16,
+            layers=1,
+            neighbor_k=3,
+            epochs=2,
+            batch_size=8,
+            validation="none",
+            output_embedding="intrinsic",
+            count_layer="X",
+            count_decoder_rank=4,
+            count_chunk_size=3,
+            count_loss_weight=0.3,
+        ),
+    )
+
+    count_summary = summary["deep_features"]["count_reconstruction"]
+    assert isinstance(count_summary, dict)
+    assert count_summary["enabled"] is True
+    assert count_summary["target_layer"] == "X"
+    assert summary["deep_features"]["latent_diagnostics"]["count_target_dim"] == counts.shape[1]
+    saved_summary = json.loads((tmp_path / "count_multilevel_out" / "summary.json").read_text())
+    assert saved_summary["deep_features"]["count_reconstruction"]["target_layer"] == "X"
     assert "latent_diagnostics" in saved_summary["deep_features"]
     assert "runtime_memory" in saved_summary["deep_features"]
+
+
+def test_multilevel_ot_marks_visualization_like_feature_space_in_summary(tmp_path) -> None:
+    rng = np.random.default_rng(222)
+    coords_a = rng.normal(loc=[0.0, 0.0], scale=0.3, size=(16, 2))
+    coords_b = rng.normal(loc=[5.0, 5.0], scale=0.3, size=(16, 2))
+    coords = np.vstack([coords_a, coords_b]).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[-1.0, -1.0], scale=0.15, size=(16, 2)),
+            rng.normal(loc=[1.0, 1.0], scale=0.15, size=(16, 2)),
+        ]
+    ).astype(np.float32)
+
+    adata = ad.AnnData(X=np.zeros((32, 2), dtype=np.float32))
+    adata.obsm["X_tsne_demo"] = features.copy()
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    input_h5ad = tmp_path / "tsne_like_input.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    summary = run_multilevel_ot_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=tmp_path / "out_tsne_like",
+        feature_obsm_key="X_tsne_demo",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=1.5,
+        stride_um=3.0,
+        min_cells=6,
+        max_subregions=6,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=8,
+        align_iters=1,
+        n_init=1,
+        allow_convex_hull_fallback=True,
+        max_iter=2,
+        tol=1e-4,
+        basic_niche_size_um=None,
+        seed=17,
+        compute_device="cpu",
+    )
+
+    assert summary["feature_embedding_warning"] == "visualization_embedding_like"
+    assert summary["method_stack"]["feature_space_kind"] == "visualization_like_embedding"
+    assert any(item["code"] == "visualization_like_feature_space" for item in summary["qc_warnings"])
 
 
 def test_run_multilevel_ot_on_h5ad_with_autoencoder_context_features(tmp_path) -> None:

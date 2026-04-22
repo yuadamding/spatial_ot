@@ -95,6 +95,34 @@ def test_basic_niche_subregions_still_respect_min_cells() -> None:
     assert all(len(niche_ids) == 1 for niche_ids in subregion_basic_niche_ids)
 
 
+def test_basic_niches_cover_all_cells_without_circle_gaps() -> None:
+    xs, ys = np.meshgrid(np.arange(0.0, 150.0, 10.0), np.arange(0.0, 150.0, 10.0))
+    coords = np.column_stack([xs.reshape(-1), ys.reshape(-1)]).astype(np.float32)
+
+    subregion_centers, subregion_members, basic_centers, basic_members, subregion_basic_niche_ids = (
+        build_composite_subregions_from_basic_niches(
+            coords_um=coords,
+            radius_um=100.0,
+            stride_um=100.0,
+            min_cells=1,
+            max_subregions=32,
+            basic_niche_size_um=50.0,
+        )
+    )
+
+    basic_covered = np.zeros(coords.shape[0], dtype=bool)
+    for members in basic_members:
+        basic_covered[members] = True
+    subregion_covered = np.zeros(coords.shape[0], dtype=bool)
+    for members in subregion_members:
+        subregion_covered[members] = True
+
+    assert basic_centers.shape[0] > 0
+    assert len(subregion_basic_niche_ids) == len(subregion_members)
+    assert np.all(basic_covered)
+    assert np.all(subregion_covered)
+
+
 def test_multilevel_ot_recovers_two_subregion_families() -> None:
     rng = np.random.default_rng(1337)
     group_centers = np.array(
@@ -176,6 +204,37 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     assert result.cluster_atom_features.shape == (2, 2, 3)
     assert result.subregion_assigned_effective_eps.shape[0] == len(result.subregion_members)
     assert np.all(result.subregion_assigned_effective_eps > 0)
+    assert result.subregion_candidate_effective_eps_matrix.shape == result.subregion_cluster_costs.shape
+    assert result.subregion_candidate_used_ot_fallback_matrix.shape == result.subregion_cluster_costs.shape
+    assert result.subregion_cluster_transport_costs.shape == result.subregion_cluster_costs.shape
+    assert result.subregion_cluster_overlap_penalties.shape == result.subregion_cluster_costs.shape
+    assert result.subregion_measure_summaries.shape[0] == len(result.subregion_members)
+    assert result.subregion_assigned_geometry_transport_costs.shape[0] == len(result.subregion_members)
+    assert result.subregion_assigned_feature_transport_costs.shape[0] == len(result.subregion_members)
+    assert result.subregion_assigned_transform_penalties.shape[0] == len(result.subregion_members)
+    assert result.subregion_assigned_overlap_consistency_penalties.shape[0] == len(result.subregion_members)
+    assert result.subregion_assigned_transform_rotation_deg.shape[0] == len(result.subregion_members)
+    assert result.subregion_assigned_transform_reflection.shape[0] == len(result.subregion_members)
+    assert result.subregion_assigned_transform_scale.shape[0] == len(result.subregion_members)
+    assert result.subregion_assigned_transform_translation_norm.shape[0] == len(result.subregion_members)
+    reconstructed_transport_cost = (
+        result.subregion_assigned_geometry_transport_costs
+        + result.subregion_assigned_feature_transport_costs
+        + result.subregion_assigned_transform_penalties
+    )
+    assigned_cost = result.subregion_cluster_costs[np.arange(result.subregion_cluster_labels.shape[0]), result.subregion_cluster_labels]
+    assigned_transport_cost = result.subregion_cluster_transport_costs[
+        np.arange(result.subregion_cluster_labels.shape[0]),
+        result.subregion_cluster_labels,
+    ]
+    assert np.all(reconstructed_transport_cost > 0.0)
+    assert np.allclose(
+        result.subregion_cluster_transport_costs + result.subregion_cluster_overlap_penalties,
+        result.subregion_cluster_costs,
+        atol=1e-5,
+    )
+    assert np.all(reconstructed_transport_cost <= assigned_transport_cost + 1e-4)
+    assert np.all(assigned_transport_cost <= assigned_cost + 1e-4)
 
 
 def test_shape_normalizer_reduces_boundary_shape_difference() -> None:
@@ -551,7 +610,7 @@ def test_returned_costs_match_returned_atoms() -> None:
         seed=7,
         allow_convex_hull_fallback=True,
     )
-    recomputed = _compute_assignment_costs(
+    recomputed, effective_eps_matrix, used_fallback_matrix = _compute_assignment_costs(
         measures=measures,
         atom_coords=result.cluster_atom_coords,
         atom_features=result.cluster_atom_features,
@@ -570,11 +629,16 @@ def test_returned_costs_match_returned_atoms() -> None:
         scale_penalty=0.05,
         shift_penalty=0.05,
         compute_device=torch.device("cpu"),
+        return_diagnostics=True,
     )
     assert recomputed.shape == result.subregion_cluster_costs.shape
+    assert effective_eps_matrix.shape == recomputed.shape
+    assert used_fallback_matrix.shape == recomputed.shape
     assert np.array_equal(result.subregion_cluster_labels, result.subregion_cluster_costs.argmin(axis=1))
     assert np.allclose(recomputed, result.subregion_cluster_costs, atol=1e-4)
     assert result.subregion_assigned_used_ot_fallback.shape[0] == len(result.subregion_members)
+    assert np.allclose(effective_eps_matrix, result.subregion_candidate_effective_eps_matrix)
+    assert np.array_equal(used_fallback_matrix, result.subregion_candidate_used_ot_fallback_matrix)
 
 
 def test_empty_mask_geometry_raises() -> None:
