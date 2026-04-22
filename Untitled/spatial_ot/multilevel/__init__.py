@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+from .core import (
+    _build_subregion_measures,
+    _compute_assignment_costs,
+    _ensure_nonempty_clusters,
+    _initialize_cluster_atoms,
+    _project_cells_from_subregions,
+    apply_similarity,
+    aligned_semirelaxed_ot_to_cluster,
+    fit_multilevel_ot,
+    weighted_similarity_fit,
+)
+from .geometry import (
+    _shape_descriptor_frame,
+    _shape_leakage_balanced_accuracy,
+    _shape_leakage_permutation_baseline,
+    _shape_leakage_spatial_block_accuracy,
+    _standardize_features,
+    build_subregions,
+    build_composite_subregions_from_basic_niches,
+    fit_ot_shape_normalizer,
+    make_reference_points_unit_disk,
+    sample_geometry_points,
+)
+from .io import (
+    plot_sample_niche_maps,
+    plot_sample_niche_maps_from_run_dir,
+    run_multilevel_ot_on_h5ad,
+    run_multilevel_ot_with_config,
+)
+from .types import (
+    MultilevelOTResult,
+    OTSolveDiagnostics,
+    RegionGeometry,
+    ShapeNormalizer,
+    ShapeNormalizerDiagnostics,
+    SubregionMeasure,
+)
+
+__all__ = [
+    "MultilevelOTResult",
+    "OTSolveDiagnostics",
+    "RegionGeometry",
+    "ShapeNormalizer",
+    "ShapeNormalizerDiagnostics",
+    "SubregionMeasure",
+    "_build_subregion_measures",
+    "_compute_assignment_costs",
+    "_ensure_nonempty_clusters",
+    "_initialize_cluster_atoms",
+    "_project_cells_from_subregions",
+    "_shape_descriptor_frame",
+    "_shape_leakage_balanced_accuracy",
+    "_shape_leakage_permutation_baseline",
+    "_shape_leakage_spatial_block_accuracy",
+    "_standardize_features",
+    "aligned_semirelaxed_ot_to_cluster",
+    "apply_similarity",
+    "build_subregions",
+    "build_composite_subregions_from_basic_niches",
+    "fit_multilevel_ot",
+    "fit_ot_shape_normalizer",
+    "make_reference_points_unit_disk",
+    "plot_sample_niche_maps",
+    "plot_sample_niche_maps_from_run_dir",
+    "run_multilevel_ot_on_h5ad",
+    "run_multilevel_ot_with_config",
+    "sample_geometry_points",
+    "weighted_similarity_fit",
+]
