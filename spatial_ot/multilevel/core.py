@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
+import os
 import warnings
 
 import numpy as np
@@ -21,7 +24,12 @@ from .geometry import (
     _region_geometries_from_members,
 )
 from .gpu_ot import sinkhorn_semirelaxed_unbalanced_log_torch
-from .types import MultilevelOTResult, OTSolveDiagnostics, RegionGeometry, SubregionMeasure
+from .types import MultilevelOTResult, OTSolveDiagnostics, OptimizationMeasure, RegionGeometry, SubregionMeasure
+
+
+_RESTART_WORKER_MEASURES: list[OptimizationMeasure] | None = None
+_RESTART_WORKER_SUMMARIES: np.ndarray | None = None
+_RESTART_WORKER_PARAMS: dict[str, object] | None = None
 
 
 def _relative_change(new: np.ndarray, old: np.ndarray) -> float:
@@ -38,6 +46,193 @@ def _resolve_compute_device(device: str) -> torch.device:
     if resolved.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA compute was requested for multilevel OT, but torch.cuda.is_available() is False.")
     return resolved
+
+
+def _runtime_memory_snapshot(device: torch.device) -> dict[str, float | int | bool | str]:
+    snapshot: dict[str, float | int | bool | str] = {
+        "device": str(device),
+        "cuda": bool(device.type == "cuda" and torch.cuda.is_available()),
+    }
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return snapshot
+    try:
+        torch.cuda.synchronize(device)
+    except Exception:
+        pass
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    except Exception:
+        free_bytes, total_bytes = 0, 0
+    snapshot.update(
+        {
+            "memory_allocated_bytes": int(torch.cuda.memory_allocated(device)),
+            "memory_reserved_bytes": int(torch.cuda.memory_reserved(device)),
+            "max_memory_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
+            "max_memory_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
+            "memory_free_bytes": int(free_bytes),
+            "memory_total_bytes": int(total_bytes),
+        }
+    )
+    return snapshot
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return int(default)
+    try:
+        value = int(raw)
+    except ValueError:
+        return int(default)
+    return int(default) if value <= 0 else value
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return float(default)
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(default)
+    return float(default) if value <= 0 else float(value)
+
+
+def _cuda_target_vram_gb() -> float:
+    return _env_float("SPATIAL_OT_CUDA_TARGET_VRAM_GB", 50.0)
+
+
+def _cuda_target_bytes(device: torch.device | None = None) -> int:
+    requested = int(_cuda_target_vram_gb() * (1024**3))
+    if not torch.cuda.is_available():
+        return requested
+    try:
+        dev = device or torch.device("cuda")
+        total_bytes = int(torch.cuda.get_device_properties(dev).total_memory)
+    except Exception:
+        return requested
+    safe_bytes = int(max(total_bytes * 0.8, 1 << 30))
+    return min(requested, safe_bytes)
+
+
+def _cuda_cdist_row_batch_size(
+    *,
+    n_rows: int,
+    n_cols: int,
+    device: torch.device,
+    per_pair_buffers: int = 3,
+    min_batch: int = 256,
+) -> int:
+    if n_rows <= 0:
+        return 1
+    bytes_per = 4
+    denom = max(int(per_pair_buffers) * max(int(n_cols), 1) * bytes_per, 1)
+    batch = _cuda_target_bytes(device=device) // denom
+    batch = max(int(min_batch), min(int(n_rows), int(batch)))
+    return max(batch, 1)
+
+
+def _resolve_cuda_device_pool(requested: str, n_init: int) -> list[str]:
+    normalized = str(requested).strip()
+    if int(n_init) <= 1:
+        return [normalized]
+    if normalized == "auto":
+        normalized = "cuda" if torch.cuda.is_available() else "cpu"
+    if not normalized.startswith("cuda"):
+        return [normalized]
+    if not torch.cuda.is_available():
+        return [normalized]
+
+    explicit = os.environ.get("SPATIAL_OT_CUDA_DEVICE_LIST", "").strip()
+    if explicit and explicit.lower() != "all":
+        devices = []
+        for token in explicit.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            devices.append(token if token.startswith("cuda") else f"cuda:{token}")
+        return devices or [normalized]
+    if normalized.startswith("cuda:"):
+        return [normalized]
+    visible_count = int(torch.cuda.device_count())
+    if visible_count <= 1:
+        return ["cuda:0"]
+    return [f"cuda:{idx}" for idx in range(visible_count)]
+
+
+def _resolve_parallel_restart_workers(device_pool: list[str], n_init: int) -> int:
+    if len(device_pool) <= 1 or int(n_init) <= 1:
+        return 1
+    requested = os.environ.get("SPATIAL_OT_PARALLEL_RESTARTS", "auto").strip().lower()
+    if requested == "auto":
+        return max(1, min(len(device_pool), int(n_init)))
+    try:
+        value = int(requested)
+    except ValueError:
+        return max(1, min(len(device_pool), int(n_init)))
+    return max(1, min(value, len(device_pool), int(n_init)))
+
+
+def _make_optimization_measures(measures: list[SubregionMeasure]) -> list[OptimizationMeasure]:
+    return [
+        OptimizationMeasure(
+            subregion_id=int(measure.subregion_id),
+            canonical_coords=np.asarray(measure.canonical_coords, dtype=np.float32),
+            features=np.asarray(measure.features, dtype=np.float32),
+            weights=np.asarray(measure.weights, dtype=np.float32),
+        )
+        for measure in measures
+    ]
+
+
+def _configure_local_thread_budget(torch_threads: int, torch_interop_threads: int) -> None:
+    torch_threads = max(int(torch_threads), 1)
+    torch_interop_threads = max(int(torch_interop_threads), 1)
+    for name in [
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
+    ]:
+        os.environ[name] = str(torch_threads)
+    os.environ["SPATIAL_OT_TORCH_NUM_THREADS"] = str(torch_threads)
+    os.environ["SPATIAL_OT_TORCH_NUM_INTEROP_THREADS"] = str(torch_interop_threads)
+    try:
+        torch.set_num_threads(torch_threads)
+    except Exception:
+        pass
+    try:
+        torch.set_num_interop_threads(torch_interop_threads)
+    except Exception:
+        pass
+
+
+def _init_restart_worker(
+    measures: list[OptimizationMeasure],
+    summaries: np.ndarray,
+    params: dict[str, object],
+    worker_threads: int,
+    worker_interop_threads: int,
+) -> None:
+    global _RESTART_WORKER_MEASURES, _RESTART_WORKER_SUMMARIES, _RESTART_WORKER_PARAMS
+    _configure_local_thread_budget(worker_threads, worker_interop_threads)
+    _RESTART_WORKER_MEASURES = measures
+    _RESTART_WORKER_SUMMARIES = summaries
+    _RESTART_WORKER_PARAMS = params
+
+
+def _run_restart_worker(run: int, compute_device: str) -> dict[str, object]:
+    if _RESTART_WORKER_MEASURES is None or _RESTART_WORKER_SUMMARIES is None or _RESTART_WORKER_PARAMS is None:
+        raise RuntimeError("Restart worker was not initialized.")
+    return _execute_restart(
+        measures=_RESTART_WORKER_MEASURES,
+        summaries=_RESTART_WORKER_SUMMARIES,
+        run=run,
+        compute_device=compute_device,
+        **_RESTART_WORKER_PARAMS,
+    )
 
 
 def _cluster_cost_matrix(
@@ -89,7 +284,16 @@ def _pairwise_sqdist_array(
 
     x_t = torch.as_tensor(x_np, dtype=dtype, device=device)
     y_t = torch.as_tensor(y_np, dtype=dtype, device=device)
-    batch = int(row_batch_size or max(256, min(4096, x_t.shape[0])))
+    batch = int(
+        row_batch_size
+        or _cuda_cdist_row_batch_size(
+            n_rows=int(x_t.shape[0]),
+            n_cols=int(y_t.shape[0]),
+            device=device,
+            per_pair_buffers=3,
+            min_batch=256,
+        )
+    )
     chunks = []
     with torch.inference_mode():
         for start in range(0, x_t.shape[0], batch):
@@ -1364,7 +1568,10 @@ def _cell_cluster_feature_costs(
         support_t = torch.as_tensor(support_features, dtype=dtype, device=compute_device)
         weights_t = torch.as_tensor(np.clip(prototype_weights, 1e-8, None), dtype=dtype, device=compute_device)
         costs_t = torch.empty((n_cells, n_clusters), dtype=dtype, device=compute_device)
-        batch = max(1, min(n_cells, 65536 // max(n_clusters, 1)))
+        feat_dim = int(features.shape[1]) if features.ndim == 2 else 1
+        support_size = int(support_features.shape[1]) if support_features.ndim >= 2 else 1
+        denom = max(n_clusters * max(2 * support_size + feat_dim, 1) * 4, 1)
+        batch = max(1, min(n_cells, _cuda_target_bytes(device=compute_device) // denom))
         with torch.inference_mode():
             for start in range(0, n_cells, batch):
                 f_chunk = feats_t[start : start + batch].unsqueeze(0).expand(n_clusters, -1, -1)
@@ -1450,6 +1657,193 @@ def _project_cells_from_subregions(
     combined = combined / np.maximum(combined.sum(axis=1, keepdims=True), 1e-8)
     labels = combined.argmax(axis=1).astype(np.int32)
     return labels, combined.astype(np.float32), local_model_probs.astype(np.float32), context_probs.astype(np.float32)
+
+
+def _execute_restart(
+    measures: list[OptimizationMeasure],
+    summaries: np.ndarray,
+    *,
+    run: int,
+    n_clusters: int,
+    atoms_per_cluster: int,
+    lambda_x: float,
+    lambda_y: float,
+    ot_eps: float,
+    rho: float,
+    align_iters: int,
+    allow_reflection: bool,
+    allow_scale: bool,
+    cost_scale_x: float,
+    cost_scale_y: float,
+    min_scale: float,
+    max_scale: float,
+    scale_penalty: float,
+    shift_penalty: float,
+    max_iter: int,
+    tol: float,
+    seed: int,
+    compute_device: str,
+) -> dict[str, object]:
+    resolved_compute_device = _resolve_compute_device(compute_device)
+    if resolved_compute_device.type == "cuda" and torch.cuda.is_available():
+        try:
+            torch.cuda.reset_peak_memory_stats(resolved_compute_device)
+        except Exception:
+            pass
+    run_seed = seed + 1000 * int(run)
+    init = KMeans(n_clusters=n_clusters, n_init=20, random_state=run_seed)
+    labels = init.fit_predict(summaries).astype(np.int32)
+    atom_coords, atom_features, betas = _initialize_cluster_atoms(
+        measures=measures,
+        labels=labels,
+        n_clusters=n_clusters,
+        atoms_per_cluster=atoms_per_cluster,
+        lambda_x=lambda_x,
+        lambda_y=lambda_y,
+        random_state=run_seed,
+    )
+    objective_history: list[dict[str, float]] = []
+
+    for iteration in range(int(max_iter)):
+        prev_coords = atom_coords.copy()
+        prev_features = atom_features.copy()
+        prev_labels = labels.copy()
+        costs = _compute_assignment_costs(
+            measures=measures,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            betas=betas,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            eps=ot_eps,
+            rho=rho,
+            align_iters=align_iters,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            scale_penalty=scale_penalty,
+            shift_penalty=shift_penalty,
+            compute_device=resolved_compute_device,
+        )
+        argmin_labels = costs.argmin(axis=1).astype(np.int32)
+        labels, forced_label_mask = _ensure_nonempty_clusters(argmin_labels, costs, n_clusters)
+        plans, transforms, thetas, assigned_costs, _, assigned_used_fallback = _compute_assigned_artifacts(
+            measures=measures,
+            labels=labels,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            betas=betas,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            eps=ot_eps,
+            rho=rho,
+            align_iters=align_iters,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            scale_penalty=scale_penalty,
+            shift_penalty=shift_penalty,
+            compute_device=resolved_compute_device,
+        )
+        atom_coords, atom_features, betas = _update_atoms(
+            measures=measures,
+            labels=labels,
+            plans=plans,
+            transforms=transforms,
+            thetas=thetas,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            beta_smoothing=1e-3,
+            random_state=run_seed + iteration,
+        )
+
+        label_change_rate = float(np.mean(labels != prev_labels))
+        coord_shift = _relative_change(atom_coords, prev_coords)
+        feat_shift = _relative_change(atom_features, prev_features)
+        mean_obj = float(np.mean(assigned_costs))
+        sorted_costs = np.sort(costs, axis=1)
+        mean_margin = float(np.mean(sorted_costs[:, 1] - sorted_costs[:, 0])) if sorted_costs.shape[1] >= 2 else float("nan")
+        objective_history.append(
+            {
+                "iteration": int(iteration + 1),
+                "mean_objective": mean_obj,
+                "label_change_rate": label_change_rate,
+                "coord_shift": coord_shift,
+                "feature_shift": feat_shift,
+                "mean_assignment_margin": mean_margin,
+                "forced_label_count": int(forced_label_mask.sum()),
+                "assigned_ot_fallback_fraction": float(np.mean(assigned_used_fallback.astype(np.float32))),
+            }
+        )
+        if label_change_rate < 0.005 and max(coord_shift, feat_shift) < tol:
+            break
+
+    final_costs = _compute_assignment_costs(
+        measures=measures,
+        atom_coords=atom_coords,
+        atom_features=atom_features,
+        betas=betas,
+        lambda_x=lambda_x,
+        lambda_y=lambda_y,
+        eps=ot_eps,
+        rho=rho,
+        align_iters=align_iters,
+        allow_reflection=allow_reflection,
+        allow_scale=allow_scale,
+        cost_scale_x=cost_scale_x,
+        cost_scale_y=cost_scale_y,
+        min_scale=min_scale,
+        max_scale=max_scale,
+        scale_penalty=scale_penalty,
+        shift_penalty=shift_penalty,
+        compute_device=resolved_compute_device,
+    )
+    final_argmin_labels = final_costs.argmin(axis=1).astype(np.int32)
+    final_labels, _final_forced_label_mask = _ensure_nonempty_clusters(final_argmin_labels, final_costs, n_clusters)
+    _final_plans, _final_transforms, _final_thetas, final_assigned_costs, _final_assigned_effective_eps, final_assigned_used_fallback = _compute_assigned_artifacts(
+        measures=measures,
+        labels=final_labels,
+        atom_coords=atom_coords,
+        atom_features=atom_features,
+        betas=betas,
+        lambda_x=lambda_x,
+        lambda_y=lambda_y,
+        eps=ot_eps,
+        rho=rho,
+        align_iters=align_iters,
+        allow_reflection=allow_reflection,
+        allow_scale=allow_scale,
+        cost_scale_x=cost_scale_x,
+        cost_scale_y=cost_scale_y,
+        min_scale=min_scale,
+        max_scale=max_scale,
+        scale_penalty=scale_penalty,
+        shift_penalty=shift_penalty,
+        compute_device=resolved_compute_device,
+    )
+    final_objective = float(np.sum(final_assigned_costs))
+    return {
+        "run": int(run),
+        "seed": int(run_seed),
+        "objective": final_objective,
+        "n_iter": int(len(objective_history)),
+        "mean_assigned_cost": float(np.mean(final_assigned_costs)),
+        "labels": final_labels.astype(np.int32),
+        "costs": final_costs.astype(np.float32),
+        "atom_coords": atom_coords.astype(np.float32),
+        "atom_features": atom_features.astype(np.float32),
+        "betas": betas.astype(np.float32),
+        "objective_history": objective_history,
+        "device": str(resolved_compute_device),
+        "assigned_ot_fallback_fraction": float(np.mean(final_assigned_used_fallback.astype(np.float32))),
+        "runtime_memory": _runtime_memory_snapshot(resolved_compute_device),
+    }
 
 
 def fit_multilevel_ot(
@@ -1603,191 +1997,105 @@ def fit_multilevel_ot(
         compute_device=resolved_compute_device,
     )
 
-    summaries = np.vstack([_measure_summary(m) for m in measures])
+    optimization_measures = _make_optimization_measures(measures)
+    summaries = np.vstack([_measure_summary(m) for m in optimization_measures])
     cost_scale_x, cost_scale_y = _estimate_cost_scales(measures, max_points=5000, random_state=seed, compute_device=resolved_compute_device)
-    best_bundle: dict[str, object] | None = None
-    restart_summaries: list[dict[str, float | int]] = []
-
-    for run in range(int(n_init)):
-        run_seed = seed + 1000 * run
-        init = KMeans(n_clusters=n_clusters, n_init=20, random_state=run_seed)
-        labels = init.fit_predict(summaries).astype(np.int32)
-        atom_coords, atom_features, betas = _initialize_cluster_atoms(
-            measures=measures,
-            labels=labels,
-            n_clusters=n_clusters,
-            atoms_per_cluster=atoms_per_cluster,
-            lambda_x=lambda_x,
-            lambda_y=lambda_y,
-            random_state=run_seed,
-        )
-        objective_history: list[dict[str, float]] = []
-
-        for iteration in range(int(max_iter)):
-            prev_coords = atom_coords.copy()
-            prev_features = atom_features.copy()
-            prev_labels = labels.copy()
-            costs = _compute_assignment_costs(
-                measures=measures,
-                atom_coords=atom_coords,
-                atom_features=atom_features,
-                betas=betas,
-                lambda_x=lambda_x,
-                lambda_y=lambda_y,
-                eps=ot_eps,
-                rho=rho,
-                align_iters=align_iters,
-                allow_reflection=allow_reflection,
-                allow_scale=allow_scale,
-                cost_scale_x=cost_scale_x,
-                cost_scale_y=cost_scale_y,
-                min_scale=min_scale,
-                max_scale=max_scale,
-                scale_penalty=scale_penalty,
-                shift_penalty=shift_penalty,
-                compute_device=resolved_compute_device,
-            )
-            argmin_labels = costs.argmin(axis=1).astype(np.int32)
-            labels, forced_label_mask = _ensure_nonempty_clusters(argmin_labels, costs, n_clusters)
-            plans, transforms, thetas, assigned_costs, _, assigned_used_fallback = _compute_assigned_artifacts(
-                measures=measures,
-                labels=labels,
-                atom_coords=atom_coords,
-                atom_features=atom_features,
-                betas=betas,
-                lambda_x=lambda_x,
-                lambda_y=lambda_y,
-                eps=ot_eps,
-                rho=rho,
-                align_iters=align_iters,
-                allow_reflection=allow_reflection,
-                allow_scale=allow_scale,
-                cost_scale_x=cost_scale_x,
-                cost_scale_y=cost_scale_y,
-                min_scale=min_scale,
-                max_scale=max_scale,
-                scale_penalty=scale_penalty,
-                shift_penalty=shift_penalty,
-                compute_device=resolved_compute_device,
-            )
-            atom_coords, atom_features, betas = _update_atoms(
-                measures=measures,
-                labels=labels,
-                plans=plans,
-                transforms=transforms,
-                thetas=thetas,
-                atom_coords=atom_coords,
-                atom_features=atom_features,
-                beta_smoothing=1e-3,
-                random_state=run_seed + iteration,
-            )
-
-            label_change_rate = float(np.mean(labels != prev_labels))
-            coord_shift = _relative_change(atom_coords, prev_coords)
-            feat_shift = _relative_change(atom_features, prev_features)
-            mean_obj = float(np.mean(assigned_costs))
-            sorted_costs = np.sort(costs, axis=1)
-            mean_margin = float(np.mean(sorted_costs[:, 1] - sorted_costs[:, 0])) if sorted_costs.shape[1] >= 2 else float("nan")
-            objective_history.append(
-                {
-                    "iteration": int(iteration + 1),
-                    "mean_objective": mean_obj,
-                    "label_change_rate": label_change_rate,
-                    "coord_shift": coord_shift,
-                    "feature_shift": feat_shift,
-                    "mean_assignment_margin": mean_margin,
-                    "forced_label_count": int(forced_label_mask.sum()),
-                    "assigned_ot_fallback_fraction": float(np.mean(assigned_used_fallback.astype(np.float32))),
-                }
-            )
-            if label_change_rate < 0.005 and max(coord_shift, feat_shift) < tol:
-                break
-
-        final_costs = _compute_assignment_costs(
-            measures=measures,
-            atom_coords=atom_coords,
-            atom_features=atom_features,
-            betas=betas,
-            lambda_x=lambda_x,
-            lambda_y=lambda_y,
-            eps=ot_eps,
-            rho=rho,
-            align_iters=align_iters,
-            allow_reflection=allow_reflection,
-            allow_scale=allow_scale,
-            cost_scale_x=cost_scale_x,
-            cost_scale_y=cost_scale_y,
-            min_scale=min_scale,
-            max_scale=max_scale,
-            scale_penalty=scale_penalty,
-            shift_penalty=shift_penalty,
-            compute_device=resolved_compute_device,
-        )
-        final_argmin_labels = final_costs.argmin(axis=1).astype(np.int32)
-        final_labels, final_forced_label_mask = _ensure_nonempty_clusters(final_argmin_labels, final_costs, n_clusters)
-        final_plans, final_transforms, final_thetas, final_assigned_costs, final_assigned_effective_eps, final_assigned_used_fallback = _compute_assigned_artifacts(
-            measures=measures,
-            labels=final_labels,
-            atom_coords=atom_coords,
-            atom_features=atom_features,
-            betas=betas,
-            lambda_x=lambda_x,
-            lambda_y=lambda_y,
-            eps=ot_eps,
-            rho=rho,
-            align_iters=align_iters,
-            allow_reflection=allow_reflection,
-            allow_scale=allow_scale,
-            cost_scale_x=cost_scale_x,
-            cost_scale_y=cost_scale_y,
-            min_scale=min_scale,
-            max_scale=max_scale,
-            scale_penalty=scale_penalty,
-            shift_penalty=shift_penalty,
-            compute_device=resolved_compute_device,
-        )
-        final_objective = float(np.sum(final_assigned_costs))
-        restart_summaries.append(
-            {
-                "run": int(run),
-                "seed": int(run_seed),
-                "objective": final_objective,
-                "n_iter": int(len(objective_history)),
-                "mean_assigned_cost": float(np.mean(final_assigned_costs)),
+    restart_params = {
+        "n_clusters": int(n_clusters),
+        "atoms_per_cluster": int(atoms_per_cluster),
+        "lambda_x": float(lambda_x),
+        "lambda_y": float(lambda_y),
+        "ot_eps": float(ot_eps),
+        "rho": float(rho),
+        "align_iters": int(align_iters),
+        "allow_reflection": bool(allow_reflection),
+        "allow_scale": bool(allow_scale),
+        "cost_scale_x": float(cost_scale_x),
+        "cost_scale_y": float(cost_scale_y),
+        "min_scale": float(min_scale),
+        "max_scale": float(max_scale),
+        "scale_penalty": float(scale_penalty),
+        "shift_penalty": float(shift_penalty),
+        "max_iter": int(max_iter),
+        "tol": float(tol),
+        "seed": int(seed),
+    }
+    device_pool = _resolve_cuda_device_pool(str(compute_device), int(n_init)) if resolved_compute_device.type == "cuda" else [str(resolved_compute_device)]
+    parallel_restart_workers = _resolve_parallel_restart_workers(device_pool, int(n_init))
+    restart_results: list[dict[str, object]] = []
+    if parallel_restart_workers > 1:
+        total_torch_threads = _env_int("SPATIAL_OT_TORCH_NUM_THREADS", max(torch.get_num_threads(), 1))
+        worker_threads = max(1, total_torch_threads // parallel_restart_workers)
+        worker_interop_threads = 1
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=parallel_restart_workers,
+            mp_context=ctx,
+            initializer=_init_restart_worker,
+            initargs=(optimization_measures, summaries, restart_params, worker_threads, worker_interop_threads),
+        ) as executor:
+            future_map = {
+                executor.submit(_run_restart_worker, run, device_pool[run % len(device_pool)]): run
+                for run in range(int(n_init))
             }
-        )
-        if best_bundle is None or final_objective < float(best_bundle["objective"]):
-            best_bundle = {
-                "run": int(run),
-                "objective": final_objective,
-                "labels": final_labels.astype(np.int32),
-                "costs": final_costs.astype(np.float32),
-                "plans": final_plans,
-                "transforms": final_transforms,
-                "thetas": final_thetas,
-                "atom_coords": atom_coords.astype(np.float32),
-                "atom_features": atom_features.astype(np.float32),
-                "betas": betas.astype(np.float32),
-                "objective_history": objective_history,
-                "forced_label_mask": final_forced_label_mask.astype(bool),
-                "argmin_labels": final_argmin_labels.astype(np.int32),
-                "assigned_effective_eps": final_assigned_effective_eps.astype(np.float32),
-                "assigned_used_fallback": final_assigned_used_fallback.astype(bool),
-            }
-
-    assert best_bundle is not None
+            for future in as_completed(future_map):
+                restart_results.append(future.result())
+    else:
+        for run in range(int(n_init)):
+            restart_results.append(
+                _execute_restart(
+                    measures=optimization_measures,
+                    summaries=summaries,
+                    run=run,
+                    compute_device=device_pool[run % len(device_pool)],
+                    **restart_params,
+                )
+            )
+    restart_results.sort(key=lambda result: int(result["run"]))
+    restart_summaries = [
+        {
+            "run": int(result["run"]),
+            "seed": int(result["seed"]),
+            "objective": float(result["objective"]),
+            "n_iter": int(result["n_iter"]),
+            "mean_assigned_cost": float(result["mean_assigned_cost"]),
+            "device": str(result["device"]),
+            "assigned_ot_fallback_fraction": float(result["assigned_ot_fallback_fraction"]),
+            "runtime_memory": dict(result.get("runtime_memory", {})),
+        }
+        for result in restart_results
+    ]
+    best_bundle = min(restart_results, key=lambda result: float(result["objective"]))
     labels = np.asarray(best_bundle["labels"], dtype=np.int32)
     costs = np.asarray(best_bundle["costs"], dtype=np.float32)
     atom_coords = np.asarray(best_bundle["atom_coords"], dtype=np.float32)
     atom_features = np.asarray(best_bundle["atom_features"], dtype=np.float32)
     betas = np.asarray(best_bundle["betas"], dtype=np.float32)
-    transforms = list(best_bundle["transforms"])
-    thetas = list(best_bundle["thetas"])
     objective_history = list(best_bundle["objective_history"])
-    forced_label_mask_best = np.asarray(best_bundle["forced_label_mask"], dtype=bool)
-    argmin_labels_best = np.asarray(best_bundle["argmin_labels"], dtype=np.int32)
-    assigned_effective_eps_best = np.asarray(best_bundle["assigned_effective_eps"], dtype=np.float32)
-    assigned_used_fallback_best = np.asarray(best_bundle["assigned_used_fallback"], dtype=bool)
+    best_compute_device = _resolve_compute_device(str(best_bundle["device"]))
+    argmin_labels_best = costs.argmin(axis=1).astype(np.int32)
+    _labels_checked, forced_label_mask_best = _ensure_nonempty_clusters(argmin_labels_best, costs, n_clusters)
+    plans, transforms, thetas, _assigned_costs_best, assigned_effective_eps_best, assigned_used_fallback_best = _compute_assigned_artifacts(
+        measures=measures,
+        labels=labels,
+        atom_coords=atom_coords,
+        atom_features=atom_features,
+        betas=betas,
+        lambda_x=lambda_x,
+        lambda_y=lambda_y,
+        eps=ot_eps,
+        rho=rho,
+        align_iters=align_iters,
+        allow_reflection=allow_reflection,
+        allow_scale=allow_scale,
+        cost_scale_x=cost_scale_x,
+        cost_scale_y=cost_scale_y,
+        min_scale=min_scale,
+        max_scale=max_scale,
+        scale_penalty=scale_penalty,
+        shift_penalty=shift_penalty,
+        compute_device=best_compute_device,
+    )
 
     thetas_assigned = np.vstack([np.asarray(theta, dtype=np.float32) for theta in thetas]).astype(np.float32)
     subregion_cluster_probs = _softmax_over_negative_costs(costs, temperature=max(float(np.std(costs)), 1e-3))

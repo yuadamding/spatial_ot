@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 from importlib.metadata import PackageNotFoundError, version
+import os
 from pathlib import Path
 import subprocess
 import warnings
@@ -17,6 +18,7 @@ import torch
 
 from ..config import DeepFeatureConfig, MultilevelExperimentConfig
 from ..deep.features import SpatialOTFeatureEncoder, fit_deep_features, save_deep_feature_history
+from ..feature_source import resolve_h5ad_features
 from .core import _resolve_compute_device, fit_multilevel_ot
 from .geometry import (
     _shape_descriptor_frame,
@@ -80,6 +82,71 @@ def _cluster_palette(n_clusters: int) -> np.ndarray:
     cmap = matplotlib.colormaps.get_cmap(cmap_name).resampled(n_clusters)
     rgba = np.asarray([cmap(i) for i in range(n_clusters)], dtype=np.float32)
     return np.clip(np.rint(rgba[:, :3] * 255.0), 0, 255).astype(np.uint8)
+
+
+def _runtime_memory_snapshot(device: torch.device) -> dict[str, float | int | bool | str]:
+    snapshot: dict[str, float | int | bool | str] = {
+        "device": str(device),
+        "cuda": bool(device.type == "cuda" and torch.cuda.is_available()),
+    }
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return snapshot
+    try:
+        torch.cuda.synchronize(device)
+    except Exception:
+        pass
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    except Exception:
+        free_bytes, total_bytes = 0, 0
+    snapshot.update(
+        {
+            "memory_allocated_bytes": int(torch.cuda.memory_allocated(device)),
+            "memory_reserved_bytes": int(torch.cuda.memory_reserved(device)),
+            "max_memory_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
+            "max_memory_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
+            "memory_free_bytes": int(free_bytes),
+            "memory_total_bytes": int(total_bytes),
+        }
+    )
+    return snapshot
+
+
+def _probability_diagnostics(probs: np.ndarray, *, prefix: str) -> dict[str, float]:
+    probs = np.asarray(probs, dtype=np.float64)
+    if probs.ndim != 2 or probs.shape[0] == 0:
+        return {
+            f"{prefix}_assignment_entropy_mean": 0.0,
+            f"{prefix}_assignment_entropy_p95": 0.0,
+            f"{prefix}_assignment_confidence_mean": 0.0,
+            f"{prefix}_assignment_confidence_p05": 0.0,
+        }
+    entropy = -np.sum(probs * np.log(np.clip(probs, 1e-8, None)), axis=1)
+    confidence = np.max(probs, axis=1)
+    return {
+        f"{prefix}_assignment_entropy_mean": float(np.mean(entropy)),
+        f"{prefix}_assignment_entropy_p95": float(np.quantile(entropy, 0.95)),
+        f"{prefix}_assignment_confidence_mean": float(np.mean(confidence)),
+        f"{prefix}_assignment_confidence_p05": float(np.quantile(confidence, 0.05)),
+    }
+
+
+def _cell_subregion_coverage(n_cells: int, subregion_members: list[np.ndarray]) -> dict[str, float | int]:
+    if n_cells <= 0:
+        return {
+            "covered_cell_count": 0,
+            "uncovered_cell_count": 0,
+            "cell_subregion_coverage_fraction": 0.0,
+        }
+    covered = np.zeros(n_cells, dtype=bool)
+    for members in subregion_members:
+        covered[np.asarray(members, dtype=np.int64)] = True
+    covered_count = int(covered.sum())
+    return {
+        "covered_cell_count": covered_count,
+        "uncovered_cell_count": int(n_cells - covered_count),
+        "cell_subregion_coverage_fraction": float(covered_count / max(n_cells, 1)),
+    }
 
 
 def _marker_size(n_points: int, *, low: float = 0.5, high: float = 8.0) -> float:
@@ -378,6 +445,8 @@ def _save_multilevel_outputs(
         cells_out.obsm[deep_obsm_key] = np.asarray(deep_embedding, dtype=np.float32)
     cells_out.uns["multilevel_ot"] = {
         "feature_obsm_key": feature_obsm_key,
+        "feature_input_mode": summary.get("feature_input_mode"),
+        "feature_source": summary.get("feature_source"),
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,
         "spatial_scale": float(spatial_scale),
@@ -573,26 +642,15 @@ def run_multilevel_ot_on_h5ad(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     adata = ad.read_h5ad(input_h5ad)
-    if feature_obsm_key not in adata.obsm:
-        raise KeyError(f"Feature key '{feature_obsm_key}' not found in obsm.")
     if spatial_x_key not in adata.obs or spatial_y_key not in adata.obs:
         raise KeyError(f"Spatial keys '{spatial_x_key}' and/or '{spatial_y_key}' not found in obs.")
-    feature_embedding_warning = None
-    if "umap" in feature_obsm_key.lower():
-        if not allow_umap_as_feature:
-            raise ValueError(
-                "Using UMAP coordinates as the OT feature space requires explicit opt-in. "
-                "Pass allow_umap_as_feature=True or --allow-umap-as-feature for exploratory runs."
-            )
-        warnings.warn(
-            "Using UMAP coordinates as the OT feature space. UMAP is not generally metric-preserving; prefer PCA or standardized markers for validated runs.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        feature_embedding_warning = "umap_exploratory"
-
     deep_config = deep_config or DeepFeatureConfig()
-    features = np.asarray(adata.obsm[feature_obsm_key], dtype=np.float32)
+    features, feature_source = resolve_h5ad_features(
+        adata,
+        feature_obsm_key=feature_obsm_key,
+        allow_umap_as_feature=allow_umap_as_feature,
+    )
+    feature_embedding_warning = feature_source.get("feature_embedding_warning")
     coords_um = np.stack(
         [
             np.asarray(adata.obs[spatial_x_key], dtype=np.float32) * spatial_scale,
@@ -600,8 +658,13 @@ def run_multilevel_ot_on_h5ad(
         ],
         axis=1,
     )
-    feature_obsm_key_used = feature_obsm_key
+    feature_obsm_key_used = str(feature_source.get("feature_key", feature_obsm_key))
     resolved_compute_device = _resolve_compute_device(compute_device)
+    if resolved_compute_device.type == "cuda" and torch.cuda.is_available():
+        try:
+            torch.cuda.reset_peak_memory_stats(resolved_compute_device)
+        except Exception:
+            pass
     deep_embedding: np.ndarray | None = None
     deep_outputs: dict[str, str] = {}
     deep_summary = {
@@ -618,6 +681,12 @@ def run_multilevel_ot_on_h5ad(
         if deep_config.pretrained_model is not None:
             encoder = SpatialOTFeatureEncoder.load(deep_config.pretrained_model)
             active_deep_config = encoder.config
+            allow_joint_ot_embedding = bool(active_deep_config.allow_joint_ot_embedding or deep_config.allow_joint_ot_embedding)
+            if active_deep_config.output_embedding == "joint" and not allow_joint_ot_embedding:
+                raise ValueError(
+                    "Using deep.output_embedding='joint' as the OT feature view requires explicit opt-in. "
+                    "Set deep.allow_joint_ot_embedding=true or pass --deep-allow-joint-ot-embedding."
+                )
             deep_embedding = encoder.transform(features=features, coords_um=coords_um)
             history = list(encoder.history)
             model_path = str(Path(deep_config.pretrained_model))
@@ -625,6 +694,12 @@ def run_multilevel_ot_on_h5ad(
             feature_schema = dict(getattr(encoder, "feature_schema", {}))
             latent_diagnostics = dict(getattr(encoder, "latent_diagnostics", {}))
         else:
+            allow_joint_ot_embedding = bool(deep_config.allow_joint_ot_embedding)
+            if deep_config.output_embedding == "joint" and not allow_joint_ot_embedding:
+                raise ValueError(
+                    "Using deep.output_embedding='joint' as the OT feature view requires explicit opt-in. "
+                    "Set deep.allow_joint_ot_embedding=true or pass --deep-allow-joint-ot-embedding."
+                )
             model_path = str(output_dir / "deep_feature_model.pt") if deep_config.save_model else None
             deep_result = fit_deep_features(
                 features=features,
@@ -676,9 +751,15 @@ def run_multilevel_ot_on_h5ad(
             "full_batch_max_cells": int(active_deep_config.full_batch_max_cells),
             "validation": active_deep_config.validation,
             "validation_context_mode": active_deep_config.validation_context_mode,
+            "allow_joint_ot_embedding": bool(allow_joint_ot_embedding),
             "uses_absolute_coordinate_features": False,
             "uses_spatial_graph": bool(active_deep_config.method == "graph_autoencoder"),
             "output_embedding": active_deep_config.output_embedding,
+            "ot_feature_view_warning": (
+                "joint_embedding_explicit_opt_in"
+                if active_deep_config.output_embedding == "joint"
+                else None
+            ),
             "final_train_loss": float(final_train_loss) if final_train_loss is not None else None,
             "final_val_loss": float(final_val_loss) if final_val_loss is not None else None,
             "model_path": model_path,
@@ -686,6 +767,7 @@ def run_multilevel_ot_on_h5ad(
             "count_reconstruction": "not_implemented",
             "pretrained_model_loaded": bool(deep_config.pretrained_model is not None),
             "validation_used_for_early_stopping": bool(deep_config.validation != "none"),
+            "runtime_memory": latent_diagnostics.get("runtime_memory"),
             "feature_schema": feature_schema,
             "validation_report": validation_report,
             "latent_diagnostics": latent_diagnostics,
@@ -772,6 +854,20 @@ def run_multilevel_ot_on_h5ad(
     margin = None
     if sorted_costs.shape[1] >= 2:
         margin = float(np.mean(sorted_costs[:, 1] - sorted_costs[:, 0]))
+    coverage_summary = _cell_subregion_coverage(int(adata.n_obs), result.subregion_members)
+    cell_prob_summary = _probability_diagnostics(result.cell_cluster_probs, prefix="cell")
+    subregion_prob_summary = _probability_diagnostics(result.subregion_cluster_probs, prefix="subregion")
+    cost_scale_summary = {
+        "coordinate_scale": float(result.cost_scale_x),
+        "feature_scale": float(result.cost_scale_y),
+        "feature_to_coordinate_scale_ratio": float(result.cost_scale_y / max(result.cost_scale_x, 1e-8)),
+        "effective_feature_to_geometry_weight_ratio": (
+            float((lambda_y / max(result.cost_scale_y, 1e-8)) / (lambda_x / max(result.cost_scale_x, 1e-8)))
+            if float(lambda_x) > 0
+            else None
+        ),
+    }
+    runtime_memory = _runtime_memory_snapshot(resolved_compute_device)
     summary = {
         "summary_schema_version": "1",
         "spatial_ot_version": _package_version(),
@@ -780,6 +876,8 @@ def run_multilevel_ot_on_h5ad(
         "output_dir": str(output_dir),
         "feature_obsm_key": feature_obsm_key_used,
         "feature_obsm_key_requested": feature_obsm_key,
+        "feature_input_mode": str(feature_source.get("input_mode", "obsm")),
+        "feature_source": dict(feature_source),
         "feature_embedding_warning": feature_embedding_warning,
         "allow_umap_as_feature": bool(allow_umap_as_feature),
         "spatial_x_key": spatial_x_key,
@@ -825,8 +923,15 @@ def run_multilevel_ot_on_h5ad(
         "compute_device_requested": str(compute_device),
         "compute_device_used": str(resolved_compute_device),
         "torch_cuda_available": bool(torch.cuda.is_available()),
+        "cuda_visible_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+        "cuda_device_list_env": os.environ.get("SPATIAL_OT_CUDA_DEVICE_LIST"),
+        "parallel_restarts_env": os.environ.get("SPATIAL_OT_PARALLEL_RESTARTS"),
+        "cuda_target_vram_gb_env": os.environ.get("SPATIAL_OT_CUDA_TARGET_VRAM_GB"),
+        "torch_num_threads_env": os.environ.get("SPATIAL_OT_TORCH_NUM_THREADS"),
+        "torch_num_interop_threads_env": os.environ.get("SPATIAL_OT_TORCH_NUM_INTEROP_THREADS"),
         "cost_scale_x": float(result.cost_scale_x),
         "cost_scale_y": float(result.cost_scale_y),
+        "cost_scale_diagnostics": cost_scale_summary,
         "requested_ot_eps": float(ot_eps),
         "assigned_ot_fallback_fraction": float(np.mean(result.subregion_assigned_used_ot_fallback.astype(np.float32))),
         "assigned_effective_eps_values": [float(x) for x in np.unique(np.round(result.subregion_assigned_effective_eps.astype(np.float64), 8))],
@@ -846,6 +951,9 @@ def run_multilevel_ot_on_h5ad(
             "spatial_block_accuracy": shape_leakage_block,
             "permutation": shape_leakage_perm,
         },
+        **coverage_summary,
+        **cell_prob_summary,
+        **subregion_prob_summary,
         "geometry_point_count_range": [
             int(result.subregion_geometry_point_counts.min()),
             int(result.subregion_geometry_point_counts.max()),
@@ -876,6 +984,7 @@ def run_multilevel_ot_on_h5ad(
             if float(np.mean(result.subregion_geometry_used_fallback.astype(np.float32))) == 0.0
             else "not_supported_observed_hull_fallback"
         ),
+        "runtime_memory": runtime_memory,
         "method_notes": {
             "core": "shape-normalized cluster-specific semi-relaxed Wasserstein dictionary clustering",
             "geometry_normalization": "uniform geometry samples from each subregion are OT-mapped into a shared unit-disk reference domain before clustering",

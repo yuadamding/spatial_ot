@@ -23,7 +23,12 @@ from .geometry import (
     make_reference_points_unit_disk,
     sample_geometry_points,
 )
-from .io import run_multilevel_ot_on_h5ad, run_multilevel_ot_with_config
+from .io import (
+    plot_sample_niche_maps,
+    plot_sample_niche_maps_from_run_dir,
+    run_multilevel_ot_on_h5ad,
+    run_multilevel_ot_with_config,
+)
 from .types import (
     MultilevelOTResult,
     OTSolveDiagnostics,
@@ -57,6 +62,8 @@ __all__ = [
     "fit_multilevel_ot",
     "fit_ot_shape_normalizer",
     "make_reference_points_unit_disk",
+    "plot_sample_niche_maps",
+    "plot_sample_niche_maps_from_run_dir",
     "run_multilevel_ot_on_h5ad",
     "run_multilevel_ot_with_config",
     "sample_geometry_points",

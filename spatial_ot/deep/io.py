@@ -10,6 +10,7 @@ import anndata as ad
 import numpy as np
 
 from ..config import DeepFeatureConfig
+from ..feature_source import resolve_h5ad_features
 from .features import SpatialOTFeatureEncoder, fit_deep_features, save_deep_feature_history
 
 try:
@@ -50,12 +51,14 @@ def _extract_features_and_coords(
     spatial_x_key: str,
     spatial_y_key: str,
     spatial_scale: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    if feature_obsm_key not in adata.obsm:
-        raise KeyError(f"Feature obsm key '{feature_obsm_key}' not found in the input H5AD.")
+) -> tuple[np.ndarray, np.ndarray, dict]:
     if spatial_x_key not in adata.obs or spatial_y_key not in adata.obs:
         raise KeyError(f"Spatial keys '{spatial_x_key}' and '{spatial_y_key}' must both be present in obs.")
-    features = np.asarray(adata.obsm[feature_obsm_key], dtype=np.float32)
+    features, feature_source = resolve_h5ad_features(
+        adata,
+        feature_obsm_key=feature_obsm_key,
+        allow_umap_as_feature=True,
+    )
     coords_um = np.stack(
         [
             np.asarray(adata.obs[spatial_x_key], dtype=np.float32),
@@ -63,24 +66,38 @@ def _extract_features_and_coords(
         ],
         axis=1,
     ) * float(spatial_scale)
-    return features, coords_um
+    return features, coords_um, feature_source
 
 
 def _feature_schema_extra(
     *,
     feature_obsm_key: str,
+    feature_source: dict,
     spatial_x_key: str,
     spatial_y_key: str,
     spatial_scale: float,
 ) -> dict:
-    return {
-        "input_mode": "obsm",
+    payload = {
+        "input_mode": str(feature_source.get("input_mode", "obsm")),
         "input_obsm_key": str(feature_obsm_key),
+        "input_feature_key": str(feature_obsm_key),
         "coordinate_keys": [str(spatial_x_key), str(spatial_y_key)],
-        "preprocessing": "train_only_standardization",
+        "preprocessing": str(feature_source.get("preprocessing", "train_only_standardization")),
         "spatial_scale": float(spatial_scale),
         "spatial_units_after_scaling": "um",
+        "source_feature_dim": int(feature_source.get("source_feature_dim", feature_source.get("feature_dim", 0))),
+        "feature_dim": int(feature_source.get("feature_dim", 0)),
     }
+    for key in [
+        "target_sum",
+        "svd_components_requested",
+        "svd_components_used",
+        "svd_random_state",
+        "svd_n_iter",
+        "svd_explained_variance_ratio_sum",
+    ]:
+        payload[key] = feature_source.get(key)
+    return payload
 
 
 def _deep_summary(
@@ -126,6 +143,7 @@ def _deep_summary(
         "count_reconstruction": "not_implemented",
         "pretrained_model_loaded": bool(pretrained_model_loaded),
         "validation_used_for_early_stopping": bool(config.validation != "none"),
+        "runtime_memory": latent_diagnostics.get("runtime_memory"),
         "feature_schema": feature_schema,
         "validation_report": validation_report,
         "latent_diagnostics": latent_diagnostics,
@@ -153,7 +171,7 @@ def fit_deep_features_on_h5ad(
         raise ValueError("deep-fit trains a new encoder bundle. Use deep-transform to apply a pretrained model.")
 
     adata = ad.read_h5ad(input_h5ad)
-    features, coords_um = _extract_features_and_coords(
+    features, coords_um, feature_source = _extract_features_and_coords(
         adata,
         feature_obsm_key=feature_obsm_key,
         spatial_x_key=spatial_x_key,
@@ -176,6 +194,7 @@ def fit_deep_features_on_h5ad(
         save_path=model_path,
         feature_schema_extra=_feature_schema_extra(
             feature_obsm_key=feature_obsm_key,
+            feature_source=feature_source,
             spatial_x_key=spatial_x_key,
             spatial_y_key=spatial_y_key,
             spatial_scale=spatial_scale,
@@ -226,6 +245,8 @@ def fit_deep_features_on_h5ad(
         "input_h5ad": str(input_h5ad),
         "output_dir": str(output_dir),
         "feature_obsm_key": feature_obsm_key,
+        "feature_input_mode": str(feature_source.get("input_mode", "obsm")),
+        "feature_source": dict(feature_source),
         "output_obsm_key": output_obsm_key,
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,
@@ -265,7 +286,7 @@ def transform_h5ad_with_deep_model(
 
     encoder = SpatialOTFeatureEncoder.load(model_path)
     adata = ad.read_h5ad(input_h5ad)
-    features, coords_um = _extract_features_and_coords(
+    features, coords_um, feature_source = _extract_features_and_coords(
         adata,
         feature_obsm_key=feature_obsm_key,
         spatial_x_key=spatial_x_key,
@@ -306,6 +327,8 @@ def transform_h5ad_with_deep_model(
         "output_h5ad": str(output_h5ad),
         "model_path": str(model_path),
         "feature_obsm_key": feature_obsm_key,
+        "feature_input_mode": str(feature_source.get("input_mode", "obsm")),
+        "feature_source": dict(feature_source),
         "output_obsm_key": resolved_output_obsm_key,
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,

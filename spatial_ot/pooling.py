@@ -68,18 +68,23 @@ def pool_h5ad_files(
     paths = [Path(path) for path in input_paths]
     if not paths:
         raise ValueError("At least one input H5AD path is required.")
-    if not feature_obsm_keys:
-        raise ValueError("At least one feature obsm key must be provided for pooling.")
+    feature_keys = [str(key) for key in feature_obsm_keys]
+    if not feature_keys:
+        raise ValueError("At least one feature key must be provided for pooling.")
+    preserve_x = "X" in feature_keys
+    obsm_feature_keys = [key for key in feature_keys if key != "X"]
 
     output_path = Path(output_h5ad)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     sample_frames: list[pd.DataFrame] = []
     sample_obsm: list[dict[str, np.ndarray]] = []
+    sample_x: list[sparse.csr_matrix] = []
     sample_ids: list[str] = []
     spans_x: list[float] = []
     spans_y: list[float] = []
     summaries: dict[str, dict[str, object]] = {}
+    reference_var: pd.DataFrame | None = None
 
     for input_path in paths:
         if not input_path.exists():
@@ -90,9 +95,18 @@ def pool_h5ad_files(
             raise KeyError(
                 f"Spatial keys '{spatial_x_key}' and/or '{spatial_y_key}' not found in obs for {input_path.name}."
             )
-        for key in feature_obsm_keys:
+        for key in obsm_feature_keys:
             if key not in adata.obsm:
                 raise KeyError(f"Feature obsm key '{key}' not found in {input_path.name}.")
+        if preserve_x:
+            if adata.X is None or int(adata.n_vars) <= 0:
+                raise ValueError(f"Feature key 'X' was requested, but {input_path.name} does not contain a usable gene matrix.")
+            if reference_var is None:
+                reference_var = adata.var.copy()
+            elif not reference_var.index.equals(adata.var_names):
+                raise ValueError(
+                    f"Gene features do not align across inputs. Expected var_names matching the first sample, but {input_path.name} differs."
+                )
 
         obs = adata.obs.copy()
         obs[sample_obs_key] = str(sample_id)
@@ -109,8 +123,14 @@ def pool_h5ad_files(
 
         obsm_payload = {
             key: np.asarray(adata.obsm[key], dtype=np.float32)
-            for key in feature_obsm_keys
+            for key in obsm_feature_keys
         }
+        if preserve_x:
+            x_matrix = adata.X
+            if sparse.issparse(x_matrix):
+                sample_x.append(x_matrix.tocsr().astype(np.float32))
+            else:
+                sample_x.append(sparse.csr_matrix(np.asarray(x_matrix, dtype=np.float32)))
         sample_frames.append(obs)
         sample_obsm.append(obsm_payload)
         sample_ids.append(sample_id)
@@ -118,6 +138,7 @@ def pool_h5ad_files(
             "sample_id": str(sample_id),
             "source_h5ad": str(input_path.name),
             "n_cells": int(adata.n_obs),
+            "n_genes": int(adata.n_vars),
             "spatial_x_min": float(x.min()) if x.size else None,
             "spatial_x_max": float(x.max()) if x.size else None,
             "spatial_y_min": float(y.min()) if y.size else None,
@@ -133,7 +154,7 @@ def pool_h5ad_files(
     )
 
     pooled_obs_parts: list[pd.DataFrame] = []
-    pooled_obsm_parts: dict[str, list[np.ndarray]] = {key: [] for key in feature_obsm_keys}
+    pooled_obsm_parts: dict[str, list[np.ndarray]] = {key: [] for key in obsm_feature_keys}
     for idx, (obs, obsm_payload) in enumerate(zip(sample_frames, sample_obsm, strict=False)):
         x = np.asarray(obs[spatial_x_key], dtype=np.float32)
         y = np.asarray(obs[spatial_y_key], dtype=np.float32)
@@ -150,17 +171,20 @@ def pool_h5ad_files(
             pooled_obsm_parts[key].append(value)
 
     pooled_obs = pd.concat(pooled_obs_parts, axis=0)
-    pooled = ad.AnnData(
-        X=sparse.csr_matrix((pooled_obs.shape[0], 0), dtype=np.float32),
-        obs=pooled_obs,
-    )
+    pooled_x = sparse.vstack(sample_x, format="csr").astype(np.float32) if preserve_x else sparse.csr_matrix((pooled_obs.shape[0], 0), dtype=np.float32)
+    if reference_var is not None:
+        pooled = ad.AnnData(X=pooled_x, obs=pooled_obs, var=reference_var.copy())
+    else:
+        pooled = ad.AnnData(X=pooled_x, obs=pooled_obs)
     for key, chunks in pooled_obsm_parts.items():
         pooled.obsm[key] = np.vstack(chunks).astype(np.float32)
     pooled.uns["pooled_inputs"] = {
         "n_samples": int(len(sample_ids)),
         "n_cells": int(pooled.n_obs),
+        "n_genes": int(pooled.n_vars),
         "input_files": [str(path.name) for path in paths],
         "sample_ids": [str(sample_id) for sample_id in sample_ids],
+        "feature_keys": [str(key) for key in feature_keys],
         "feature_obsm_keys": [str(key) for key in feature_obsm_keys],
         "spatial_keys": {
             "original_x": str(spatial_x_key),
@@ -184,7 +208,9 @@ def pool_h5ad_files(
         "output_h5ad": str(output_path),
         "n_samples": int(len(sample_ids)),
         "n_cells": int(pooled.n_obs),
+        "n_genes": int(pooled.n_vars),
         "sample_ids": [str(sample_id) for sample_id in sample_ids],
+        "feature_keys": [str(key) for key in feature_keys],
         "feature_obsm_keys": [str(key) for key in feature_obsm_keys],
         "spatial_x_key": str(pooled_spatial_x_key),
         "spatial_y_key": str(pooled_spatial_y_key),

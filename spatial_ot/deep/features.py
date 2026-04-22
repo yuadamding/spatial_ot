@@ -161,13 +161,90 @@ def _correlation_summary(a: np.ndarray, b: np.ndarray) -> dict[str, float | bool
     }
 
 
+def _linear_r2(source: np.ndarray, target: np.ndarray) -> float:
+    source = np.asarray(source, dtype=np.float32)
+    target = np.asarray(target, dtype=np.float32)
+    if source.ndim == 1:
+        source = source[:, None]
+    if target.ndim == 1:
+        target = target[:, None]
+    if source.shape[0] < 2 or source.shape[1] == 0 or target.shape[1] == 0:
+        return 0.0
+    design = np.concatenate([source, np.ones((source.shape[0], 1), dtype=np.float32)], axis=1).astype(np.float64, copy=False)
+    target64 = target.astype(np.float64, copy=False)
+    coef, *_ = np.linalg.lstsq(design, target64, rcond=None)
+    pred = design @ coef
+    residual = np.mean((target64 - pred) ** 2)
+    baseline = np.mean((target64 - target64.mean(axis=0, keepdims=True)) ** 2)
+    if not np.isfinite(residual) or baseline <= 1e-8:
+        return 0.0
+    return float(np.clip(1.0 - residual / baseline, -1.0, 1.0))
+
+
+def _top_canonical_correlation(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if a.ndim == 1:
+        a = a[:, None]
+    if b.ndim == 1:
+        b = b[:, None]
+    if a.shape[0] < 2 or a.shape[1] == 0 or b.shape[1] == 0:
+        return 0.0
+    a0 = a - a.mean(axis=0, keepdims=True)
+    b0 = b - b.mean(axis=0, keepdims=True)
+    denom = max(a.shape[0] - 1, 1)
+    cov_aa = (a0.T @ a0) / denom
+    cov_bb = (b0.T @ b0) / denom
+    cov_ab = (a0.T @ b0) / denom
+    eps_a = 1e-4 * np.eye(cov_aa.shape[0], dtype=np.float64)
+    eps_b = 1e-4 * np.eye(cov_bb.shape[0], dtype=np.float64)
+    evals_a, evecs_a = np.linalg.eigh(cov_aa + eps_a)
+    evals_b, evecs_b = np.linalg.eigh(cov_bb + eps_b)
+    inv_sqrt_a = evecs_a @ np.diag(1.0 / np.sqrt(np.maximum(evals_a, 1e-8))) @ evecs_a.T
+    inv_sqrt_b = evecs_b @ np.diag(1.0 / np.sqrt(np.maximum(evals_b, 1e-8))) @ evecs_b.T
+    whitened = inv_sqrt_a @ cov_ab @ inv_sqrt_b
+    singular_values = np.linalg.svd(whitened, compute_uv=False)
+    if singular_values.size == 0:
+        return 0.0
+    return float(np.clip(singular_values[0], 0.0, 1.0))
+
+
+def _runtime_memory_snapshot(device: torch.device) -> dict[str, float | int | bool | str]:
+    snapshot: dict[str, float | int | bool | str] = {
+        "device": str(device),
+        "cuda": bool(device.type == "cuda" and torch.cuda.is_available()),
+    }
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return snapshot
+    try:
+        torch.cuda.synchronize(device)
+    except Exception:
+        pass
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    except Exception:
+        free_bytes, total_bytes = 0, 0
+    snapshot.update(
+        {
+            "memory_allocated_bytes": int(torch.cuda.memory_allocated(device)),
+            "memory_reserved_bytes": int(torch.cuda.memory_reserved(device)),
+            "max_memory_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
+            "max_memory_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
+            "memory_free_bytes": int(free_bytes),
+            "memory_total_bytes": int(total_bytes),
+        }
+    )
+    return snapshot
+
+
 def _latent_diagnostics(
     outputs: dict[str, np.ndarray],
     *,
     x_std: np.ndarray,
     context_std: np.ndarray,
+    coords_um: np.ndarray,
     selected_embedding: str,
-) -> dict[str, float | bool | str]:
+) -> dict[str, object]:
     intrinsic = np.asarray(outputs["intrinsic"], dtype=np.float32)
     context = np.asarray(outputs["context"], dtype=np.float32)
     joint = np.asarray(outputs["joint"], dtype=np.float32)
@@ -175,6 +252,15 @@ def _latent_diagnostics(
     ic = _correlation_summary(intrinsic, context)
     ij = _correlation_summary(intrinsic, joint)
     cj = _correlation_summary(context, joint)
+    intrinsic_input_r2 = _linear_r2(intrinsic, x_std)
+    context_input_r2 = _linear_r2(context, x_std)
+    joint_input_r2 = _linear_r2(joint, x_std)
+    intrinsic_context_r2 = _linear_r2(intrinsic, context_std)
+    context_context_r2 = _linear_r2(context, context_std)
+    joint_context_r2 = _linear_r2(joint, context_std)
+    intrinsic_coord_r2 = _linear_r2(intrinsic, coords_um)
+    context_coord_r2 = _linear_r2(context, coords_um)
+    joint_coord_r2 = _linear_r2(joint, coords_um)
     return {
         "selected_embedding": selected_embedding,
         "selected_mean_norm": float(np.mean(np.linalg.norm(selected, axis=1))),
@@ -185,12 +271,26 @@ def _latent_diagnostics(
         "intrinsic_context_fro_correlation": float(ic["fro_correlation"]),
         "intrinsic_context_mean_cosine_similarity": float(ic["mean_cosine_similarity"]),
         "intrinsic_context_allclose": bool(ic["allclose"]),
+        "intrinsic_context_top_canonical_correlation": _top_canonical_correlation(intrinsic, context),
         "intrinsic_joint_mean_abs_correlation": float(ij["mean_abs_correlation"]),
         "intrinsic_joint_max_abs_correlation": float(ij["max_abs_correlation"]),
         "intrinsic_joint_allclose": bool(ij["allclose"]),
+        "intrinsic_joint_top_canonical_correlation": _top_canonical_correlation(intrinsic, joint),
         "context_joint_mean_abs_correlation": float(cj["mean_abs_correlation"]),
         "context_joint_max_abs_correlation": float(cj["max_abs_correlation"]),
         "context_joint_allclose": bool(cj["allclose"]),
+        "context_joint_top_canonical_correlation": _top_canonical_correlation(context, joint),
+        "intrinsic_input_r2": intrinsic_input_r2,
+        "context_input_r2": context_input_r2,
+        "joint_input_r2": joint_input_r2,
+        "intrinsic_context_target_r2": intrinsic_context_r2,
+        "context_context_target_r2": context_context_r2,
+        "joint_context_target_r2": joint_context_r2,
+        "intrinsic_coordinate_r2": intrinsic_coord_r2,
+        "context_coordinate_r2": context_coord_r2,
+        "joint_coordinate_r2": joint_coord_r2,
+        "intrinsic_minus_context_input_r2": float(intrinsic_input_r2 - context_input_r2),
+        "context_minus_intrinsic_context_target_r2": float(context_context_r2 - intrinsic_context_r2),
     }
 
 
@@ -482,6 +582,11 @@ class SpatialOTFeatureEncoder:
             raise ValueError("SpatialOTFeatureEncoder.fit requires config.output_embedding to be set explicitly.")
         if self.config.count_layer is not None:
             raise NotImplementedError("deep.count_layer is configured but count reconstruction is not implemented yet.")
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            try:
+                torch.cuda.reset_peak_memory_stats(self.device)
+            except Exception:
+                pass
 
         x = np.asarray(features, dtype=np.float32)
         coords_um = np.asarray(coords_um, dtype=np.float32)
@@ -722,8 +827,10 @@ class SpatialOTFeatureEncoder:
             outputs_full,
             x_std=x_std,
             context_std=context_std,
+            coords_um=coords_um,
             selected_embedding=self.config.output_embedding,
         )
+        self.latent_diagnostics["runtime_memory"] = _runtime_memory_snapshot(self.device)
         return self
 
     def _validate_transform_schema(
