@@ -8,12 +8,15 @@ VENV_DIR="${VENV_DIR:-../.venv}"
 PYTHON_BIN="${PYTHON_BIN:-${VENV_DIR}/bin/python}"
 INPUT_DIR="${INPUT_DIR:-../spatial_ot_input}"
 POOL_ALL_INPUTS="${POOL_ALL_INPUTS:-1}"
+REFRESH_POOLED_INPUT="${REFRESH_POOLED_INPUT:-0}"
+POOLED_INPUT_NAME="${POOLED_INPUT_NAME:-spatial_ot_input_pooled.h5ad}"
+PREPARE_INPUTS_AHEAD="${PREPARE_INPUTS_AHEAD:-1}"
+REFRESH_PREPARED_FEATURES="${REFRESH_PREPARED_FEATURES:-0}"
 SAMPLE_GLOB="${SAMPLE_GLOB:-*_cells_marker_genes_umap3d.h5ad}"
 SAMPLE_ID_SUFFIX="${SAMPLE_ID_SUFFIX:-_cells_marker_genes_umap3d}"
 SAMPLE_OBS_KEY="${SAMPLE_OBS_KEY:-sample_id}"
 SOURCE_FILE_OBS_KEY="${SOURCE_FILE_OBS_KEY:-source_h5ad}"
 SAMPLE_KEY="${SAMPLE_KEY:-p2_crc}"
-FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X}"
 ORIGINAL_SPATIAL_X_KEY="${ORIGINAL_SPATIAL_X_KEY:-cell_x}"
 ORIGINAL_SPATIAL_Y_KEY="${ORIGINAL_SPATIAL_Y_KEY:-cell_y}"
 POOLED_SPATIAL_X_KEY="${POOLED_SPATIAL_X_KEY:-pooled_cell_x}"
@@ -22,9 +25,12 @@ SPATIAL_SCALE="${SPATIAL_SCALE:-0.2737012522439323}"
 N_CLUSTERS="${N_CLUSTERS:-8}"
 ATOMS_PER_CLUSTER="${ATOMS_PER_CLUSTER:-8}"
 COMPUTE_DEVICE="${COMPUTE_DEVICE:-cuda}"
+RADIUS_UM="${RADIUS_UM:-100}"
+STRIDE_UM="${STRIDE_UM:-$RADIUS_UM}"
 BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-200}"
 MIN_CELLS="${MIN_CELLS:-1}"
 MAX_SUBREGIONS="${MAX_SUBREGIONS:-0}"
+REQUIRE_FULL_CELL_COVERAGE="${REQUIRE_FULL_CELL_COVERAGE:-1}"
 ALLOW_UMAP_AS_FEATURE="${ALLOW_UMAP_AS_FEATURE:-0}"
 ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-1}"
 PLOT_SAMPLE_NICHES="${PLOT_SAMPLE_NICHES:-1}"
@@ -36,6 +42,42 @@ PARALLEL_RESTARTS="${PARALLEL_RESTARTS:-auto}"
 CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-50}"
 X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-512}"
 X_TARGET_SUM="${X_TARGET_SUM:-10000}"
+PREPARED_FEATURE_OBSM_KEY="${PREPARED_FEATURE_OBSM_KEY:-X_spatial_ot_x_svd_${X_FEATURE_COMPONENTS}}"
+FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-}"
+DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"
+DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-context}"
+DEEP_OUTPUT_OBSM_KEY="${DEEP_OUTPUT_OBSM_KEY:-X_spatial_ot_deep_context_autoencoder}"
+DEEP_DEVICE="${DEEP_DEVICE:-cuda}"
+DEEP_LATENT_DIM="${DEEP_LATENT_DIM:-64}"
+DEEP_HIDDEN_DIM="${DEEP_HIDDEN_DIM:-1024}"
+DEEP_LAYERS="${DEEP_LAYERS:-3}"
+DEEP_NEIGHBOR_K="${DEEP_NEIGHBOR_K:-8}"
+DEEP_RADIUS_UM="${DEEP_RADIUS_UM:-}"
+DEEP_SHORT_RADIUS_UM="${DEEP_SHORT_RADIUS_UM:-}"
+DEEP_MID_RADIUS_UM="${DEEP_MID_RADIUS_UM:-}"
+DEEP_GRAPH_LAYERS="${DEEP_GRAPH_LAYERS:-2}"
+DEEP_GRAPH_MAX_NEIGHBORS="${DEEP_GRAPH_MAX_NEIGHBORS:-64}"
+DEEP_FULL_BATCH_MAX_CELLS="${DEEP_FULL_BATCH_MAX_CELLS:-50000}"
+DEEP_EPOCHS="${DEEP_EPOCHS:-30}"
+DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-32768}"
+DEEP_LR="${DEEP_LR:-0.001}"
+DEEP_WEIGHT_DECAY="${DEEP_WEIGHT_DECAY:-0.0001}"
+DEEP_VALIDATION="${DEEP_VALIDATION:-spatial_block}"
+DEEP_VALIDATION_CONTEXT_MODE="${DEEP_VALIDATION_CONTEXT_MODE:-inductive}"
+DEEP_RECONSTRUCTION_WEIGHT="${DEEP_RECONSTRUCTION_WEIGHT:-1.0}"
+DEEP_CONTEXT_WEIGHT="${DEEP_CONTEXT_WEIGHT:-0.5}"
+DEEP_CONTRASTIVE_WEIGHT="${DEEP_CONTRASTIVE_WEIGHT:-0.1}"
+DEEP_VARIANCE_WEIGHT="${DEEP_VARIANCE_WEIGHT:-0.1}"
+DEEP_DECORRELATION_WEIGHT="${DEEP_DECORRELATION_WEIGHT:-0.01}"
+DEEP_SAVE_MODEL="${DEEP_SAVE_MODEL:-1}"
+
+if [[ -z "$FEATURE_OBSM_KEY" ]]; then
+  if [[ "$PREPARE_INPUTS_AHEAD" == "1" ]]; then
+    FEATURE_OBSM_KEY="$PREPARED_FEATURE_OBSM_KEY"
+  else
+    FEATURE_OBSM_KEY="X"
+  fi
+fi
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPU_THREADS}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CPU_THREADS}"
@@ -53,7 +95,7 @@ export SPATIAL_OT_X_TARGET_SUM="${SPATIAL_OT_X_TARGET_SUM:-$X_TARGET_SUM}"
 
 if [[ "$POOL_ALL_INPUTS" == "1" ]]; then
   OUTPUT_DIR="${OUTPUT_DIR:-../outputs/spatial_ot/cohort_multilevel_ot}"
-  INPUT_H5AD="${INPUT_H5AD:-${OUTPUT_DIR}/pooled_inputs/spatial_ot_input_pooled.h5ad}"
+  INPUT_H5AD="${INPUT_H5AD:-${INPUT_DIR}/${POOLED_INPUT_NAME}}"
   SPATIAL_X_KEY="${SPATIAL_X_KEY:-$POOLED_SPATIAL_X_KEY}"
   SPATIAL_Y_KEY="${SPATIAL_Y_KEY:-$POOLED_SPATIAL_Y_KEY}"
   DEFAULT_PLOT_SAMPLE_ID="${DEFAULT_PLOT_SAMPLE_ID:-pooled_cohort}"
@@ -72,20 +114,47 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
+if [[ "$REQUIRE_FULL_CELL_COVERAGE" == "1" ]]; then
+  "$PYTHON_BIN" - "$RADIUS_UM" "$STRIDE_UM" <<'PY'
+import sys
+
+radius = float(sys.argv[1])
+stride = float(sys.argv[2])
+if stride > radius + 1e-9:
+    raise SystemExit(
+        f"REQUIRE_FULL_CELL_COVERAGE=1 requires STRIDE_UM <= RADIUS_UM, "
+        f"but got STRIDE_UM={stride:g} and RADIUS_UM={radius:g}."
+    )
+PY
+fi
+
 if [[ "$POOL_ALL_INPUTS" == "1" ]]; then
-  mkdir -p "$(dirname -- "$INPUT_H5AD")"
-  "$PYTHON_BIN" -m spatial_ot pool-inputs \
-    --input-dir "$INPUT_DIR" \
-    --output-h5ad "$INPUT_H5AD" \
-    --feature-obsm-key "$FEATURE_OBSM_KEY" \
-    --sample-glob "$SAMPLE_GLOB" \
-    --spatial-x-key "$ORIGINAL_SPATIAL_X_KEY" \
-    --spatial-y-key "$ORIGINAL_SPATIAL_Y_KEY" \
-    --pooled-spatial-x-key "$POOLED_SPATIAL_X_KEY" \
-    --pooled-spatial-y-key "$POOLED_SPATIAL_Y_KEY" \
-    --sample-obs-key "$SAMPLE_OBS_KEY" \
-    --source-file-obs-key "$SOURCE_FILE_OBS_KEY" \
-    --sample-id-suffix "$SAMPLE_ID_SUFFIX"
+  if [[ ! -d "$INPUT_DIR" ]]; then
+    echo "Missing input directory: $INPUT_DIR" >&2
+    exit 1
+  fi
+  if [[ "$PREPARE_INPUTS_AHEAD" == "1" && "$FEATURE_OBSM_KEY" == "$PREPARED_FEATURE_OBSM_KEY" ]]; then
+    export OUTPUT_H5AD="$INPUT_H5AD"
+    export FEATURE_OBSM_KEY
+    export PREPARED_FEATURE_OBSM_KEY
+    export REFRESH_POOLED_INPUT
+    export REFRESH_PREPARED_FEATURES
+    bash "$SCRIPT_DIR/prepare_spatial_ot_input.sh"
+  elif [[ "$REFRESH_POOLED_INPUT" == "1" || ! -f "$INPUT_H5AD" ]]; then
+    mkdir -p "$(dirname -- "$INPUT_H5AD")"
+    "$PYTHON_BIN" -m spatial_ot pool-inputs \
+      --input-dir "$INPUT_DIR" \
+      --output-h5ad "$INPUT_H5AD" \
+      --feature-obsm-key X \
+      --sample-glob "$SAMPLE_GLOB" \
+      --spatial-x-key "$ORIGINAL_SPATIAL_X_KEY" \
+      --spatial-y-key "$ORIGINAL_SPATIAL_Y_KEY" \
+      --pooled-spatial-x-key "$POOLED_SPATIAL_X_KEY" \
+      --pooled-spatial-y-key "$POOLED_SPATIAL_Y_KEY" \
+      --sample-obs-key "$SAMPLE_OBS_KEY" \
+      --source-file-obs-key "$SOURCE_FILE_OBS_KEY" \
+      --sample-id-suffix "$SAMPLE_ID_SUFFIX"
+  fi
 elif [[ ! -f "$INPUT_H5AD" ]]; then
   echo "Missing input H5AD: $INPUT_H5AD" >&2
   if [[ -d "$INPUT_DIR" ]]; then
@@ -100,12 +169,66 @@ elif [[ ! -f "$INPUT_H5AD" ]]; then
   exit 1
 fi
 
+if [[ "$POOL_ALL_INPUTS" != "1" && "$PREPARE_INPUTS_AHEAD" == "1" && "$FEATURE_OBSM_KEY" == "$PREPARED_FEATURE_OBSM_KEY" ]]; then
+  PREPARE_ARGS=()
+  if [[ "$REFRESH_PREPARED_FEATURES" == "1" ]]; then
+    PREPARE_ARGS+=(--overwrite)
+  fi
+  "$PYTHON_BIN" -m spatial_ot prepare-inputs \
+    --input-h5ad "$INPUT_H5AD" \
+    --feature-obsm-key X \
+    --output-obsm-key "$PREPARED_FEATURE_OBSM_KEY" \
+    "${PREPARE_ARGS[@]}"
+fi
+
 EXTRA_FLAGS=()
 if [[ "$ALLOW_UMAP_AS_FEATURE" == "1" ]]; then
   EXTRA_FLAGS+=(--allow-umap-as-feature)
 fi
 if [[ "$ALLOW_OBSERVED_HULL_GEOMETRY" == "1" ]]; then
   EXTRA_FLAGS+=(--allow-observed-hull-geometry)
+fi
+
+DEEP_FLAGS=()
+if [[ "$DEEP_FEATURE_METHOD" != "none" ]]; then
+  DEEP_FLAGS+=(
+    --deep-feature-method "$DEEP_FEATURE_METHOD"
+    --deep-output-embedding "$DEEP_OUTPUT_EMBEDDING"
+    --deep-output-obsm-key "$DEEP_OUTPUT_OBSM_KEY"
+    --deep-device "$DEEP_DEVICE"
+    --deep-latent-dim "$DEEP_LATENT_DIM"
+    --deep-hidden-dim "$DEEP_HIDDEN_DIM"
+    --deep-layers "$DEEP_LAYERS"
+    --deep-neighbor-k "$DEEP_NEIGHBOR_K"
+    --deep-graph-layers "$DEEP_GRAPH_LAYERS"
+    --deep-graph-max-neighbors "$DEEP_GRAPH_MAX_NEIGHBORS"
+    --deep-full-batch-max-cells "$DEEP_FULL_BATCH_MAX_CELLS"
+    --deep-epochs "$DEEP_EPOCHS"
+    --deep-batch-size "$DEEP_BATCH_SIZE"
+    --deep-lr "$DEEP_LR"
+    --deep-weight-decay "$DEEP_WEIGHT_DECAY"
+    --deep-validation "$DEEP_VALIDATION"
+    --deep-validation-context-mode "$DEEP_VALIDATION_CONTEXT_MODE"
+    --deep-reconstruction-weight "$DEEP_RECONSTRUCTION_WEIGHT"
+    --deep-context-weight "$DEEP_CONTEXT_WEIGHT"
+    --deep-contrastive-weight "$DEEP_CONTRASTIVE_WEIGHT"
+    --deep-variance-weight "$DEEP_VARIANCE_WEIGHT"
+    --deep-decorrelation-weight "$DEEP_DECORRELATION_WEIGHT"
+  )
+  if [[ -n "$DEEP_RADIUS_UM" ]]; then
+    DEEP_FLAGS+=(--deep-radius-um "$DEEP_RADIUS_UM")
+  fi
+  if [[ -n "$DEEP_SHORT_RADIUS_UM" ]]; then
+    DEEP_FLAGS+=(--deep-short-radius-um "$DEEP_SHORT_RADIUS_UM")
+  fi
+  if [[ -n "$DEEP_MID_RADIUS_UM" ]]; then
+    DEEP_FLAGS+=(--deep-mid-radius-um "$DEEP_MID_RADIUS_UM")
+  fi
+  if [[ "$DEEP_SAVE_MODEL" == "1" ]]; then
+    DEEP_FLAGS+=(--deep-save-model)
+  else
+    DEEP_FLAGS+=(--no-deep-save-model)
+  fi
 fi
 
 "$PYTHON_BIN" -m spatial_ot multilevel-ot \
@@ -118,8 +241,8 @@ fi
   --compute-device "$COMPUTE_DEVICE" \
   --n-clusters "$N_CLUSTERS" \
   --atoms-per-cluster "$ATOMS_PER_CLUSTER" \
-  --radius-um 100 \
-  --stride-um 150 \
+  --radius-um "$RADIUS_UM" \
+  --stride-um "$STRIDE_UM" \
   --basic-niche-size-um "$BASIC_NICHE_SIZE_UM" \
   --min-cells "$MIN_CELLS" \
   --max-subregions "$MAX_SUBREGIONS" \
@@ -135,7 +258,29 @@ fi
   --max-iter 10 \
   --tol 1e-4 \
   --seed 1337 \
+  "${DEEP_FLAGS[@]}" \
   "${EXTRA_FLAGS[@]}"
+
+if [[ "$REQUIRE_FULL_CELL_COVERAGE" == "1" ]]; then
+  "$PYTHON_BIN" - "$OUTPUT_DIR/summary.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+summary_path = Path(sys.argv[1])
+if not summary_path.exists():
+    raise SystemExit(f"Expected run summary was not written: {summary_path}")
+summary = json.loads(summary_path.read_text())
+uncovered = int(summary.get("uncovered_cell_count", -1))
+coverage = float(summary.get("cell_subregion_coverage_fraction", -1.0))
+if uncovered != 0 or coverage < 1.0 - 1e-8:
+    raise SystemExit(
+        "Run completed, but not all cells were covered by at least one analyzed subregion. "
+        f"uncovered_cell_count={uncovered}, cell_subregion_coverage_fraction={coverage:.6f}. "
+        "Reduce STRIDE_UM, increase RADIUS_UM, or set REQUIRE_FULL_CELL_COVERAGE=0 to override."
+    )
+PY
+fi
 
 if [[ "$PLOT_SAMPLE_NICHES" == "1" ]]; then
   "$PYTHON_BIN" -m spatial_ot plot-sample-niches \

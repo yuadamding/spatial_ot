@@ -6,10 +6,12 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import pytest
+import torch
 
 from spatial_ot.cli import _resolve_deep_fit_config_from_args, build_parser
 from spatial_ot.config import DeepFeatureConfig, load_multilevel_config
-from spatial_ot.deep.graph import build_neighbor_graph
+from spatial_ot.deep import graph as deep_graph
+from spatial_ot.deep.graph import aggregate_neighbor_mean_torch, build_neighbor_graph
 from spatial_ot.deep_features import (
     SpatialOTFeatureEncoder,
     _split_validation,
@@ -201,6 +203,30 @@ def test_build_neighbor_graph_respects_max_neighbors() -> None:
         assert int(max_degree) <= 3
 
 
+def test_aggregate_neighbor_mean_torch_matches_full_gather_when_chunked(monkeypatch) -> None:
+    features = torch.arange(24, dtype=torch.float32).reshape(8, 3)
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2, 3, 4, 5, 6, 7, 1, 5],
+            [1, 1, 2, 2, 3, 3, 4, 4, 7, 7],
+        ],
+        dtype=torch.long,
+    )
+    src, dst = edge_index
+    expected = torch.zeros_like(features)
+    deg = torch.zeros((features.shape[0], 1), dtype=features.dtype)
+    expected.index_add_(0, dst, features[src])
+    deg.index_add_(0, dst, torch.ones((src.numel(), 1), dtype=features.dtype))
+    expected = expected / deg.clamp_min(1.0)
+    isolated = deg.squeeze(1) == 0
+    if torch.any(isolated):
+        expected[isolated] = features[isolated]
+
+    monkeypatch.setattr(deep_graph, "_NEIGHBOR_AGGREGATION_MAX_GATHER_BYTES", 8)
+    actual = aggregate_neighbor_mean_torch(features, edge_index)
+    assert torch.allclose(actual, expected)
+
+
 def test_deep_transform_batched_equals_default(tmp_path) -> None:
     rng = np.random.default_rng(55)
     features = rng.normal(size=(64, 6)).astype(np.float32)
@@ -320,7 +346,12 @@ def test_fit_deep_features_on_h5ad_outputs_artifacts(tmp_path) -> None:
     )
 
     assert summary["deep_features"]["method"] == "graph_autoencoder"
+    assert summary["method_family"] == "deep_feature_adapter"
+    assert summary["active_path"] == "deep-fit"
+    assert summary["latent_source"] == "deep_joint"
+    assert summary["communication_source"] == "none"
     assert summary["deep_features"]["graph_max_neighbors"] == 5
+    assert summary["deep_features"]["full_batch_max_cells"] == 50000
     assert summary["spatial_scale"] == 2.0
     assert Path(summary["outputs"]["embedded_h5ad"]).exists()
     assert Path(summary["outputs"]["deep_feature_model"]).exists()
@@ -329,6 +360,8 @@ def test_fit_deep_features_on_h5ad_outputs_artifacts(tmp_path) -> None:
     assert saved.obsm["X_spatial_ot_deep"].shape == (32, 3)
     assert saved.uns["deep_features"]["summary_json"]
     saved_summary = json.loads(saved.uns["deep_features"]["summary_json"])
+    assert saved_summary["method_family"] == "deep_feature_adapter"
+    assert saved_summary["latent_source"] == "deep_joint"
     assert saved_summary["deep_features"]["feature_schema"]["spatial_scale"] == 2.0
 
 
@@ -386,11 +419,75 @@ def test_transform_h5ad_with_deep_model_writes_embedding(tmp_path) -> None:
         batch_size=5,
     )
 
+    assert summary["method_family"] == "deep_feature_adapter"
+    assert summary["active_path"] == "deep-transform"
+    assert summary["latent_source"] == "deep_intrinsic"
+    assert summary["communication_source"] == "none"
     assert summary["deep_features"]["pretrained_model_loaded"] is True
     assert summary["deep_features"]["graph_inference_mode"] == "batched"
     transformed = ad.read_h5ad(summary["outputs"]["embedded_h5ad"])
     assert "X_deep_test" in transformed.obsm
     assert transformed.obsm["X_deep_test"].shape == (18, 3)
+
+
+def test_transform_h5ad_with_deep_model_rejects_graph_full_batch_oversize_input(tmp_path) -> None:
+    rng = np.random.default_rng(7801)
+    features_train = rng.normal(size=(6, 4)).astype(np.float32)
+    coords_train = rng.normal(size=(6, 2)).astype(np.float32)
+    train = ad.AnnData(X=features_train.copy())
+    train.obsm["X_pca"] = features_train.copy()
+    train.obs["cell_x"] = coords_train[:, 0]
+    train.obs["cell_y"] = coords_train[:, 1]
+    train_h5ad = tmp_path / "train_graph_guard.h5ad"
+    train.write_h5ad(train_h5ad)
+
+    fit_summary = fit_deep_features_on_h5ad(
+        input_h5ad=train_h5ad,
+        output_dir=tmp_path / "deep_graph_guard_model",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        config=DeepFeatureConfig(
+            method="graph_autoencoder",
+            latent_dim=3,
+            hidden_dim=12,
+            layers=1,
+            neighbor_k=3,
+            radius_um=1.0,
+            short_radius_um=0.75,
+            mid_radius_um=1.5,
+            graph_layers=1,
+            epochs=2,
+            batch_size=8,
+            validation="none",
+            output_embedding="joint",
+            allow_joint_ot_embedding=True,
+            full_batch_max_cells=8,
+            save_model=True,
+        ),
+        seed=9,
+    )
+
+    features_new = rng.normal(size=(10, 4)).astype(np.float32)
+    coords_new = rng.normal(size=(10, 2)).astype(np.float32)
+    new = ad.AnnData(X=features_new.copy())
+    new.obsm["X_pca"] = features_new.copy()
+    new.obs["cell_x"] = coords_new[:, 0]
+    new.obs["cell_y"] = coords_new[:, 1]
+    new_h5ad = tmp_path / "new_graph_guard.h5ad"
+    new.write_h5ad(new_h5ad)
+
+    with pytest.raises(ValueError, match="full-batch execution"):
+        transform_h5ad_with_deep_model(
+            model_path=fit_summary["outputs"]["deep_feature_model"],
+            input_h5ad=new_h5ad,
+            output_h5ad=tmp_path / "new_graph_guard_embedded.h5ad",
+            feature_obsm_key="X_pca",
+            spatial_x_key="cell_x",
+            spatial_y_key="cell_y",
+            spatial_scale=1.0,
+        )
 
 
 def test_transform_h5ad_with_deep_model_rejects_mismatched_input_obsm_key(tmp_path) -> None:
@@ -723,8 +820,14 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert "deep_feature_scaler" in summary["outputs"]
     saved_summary = json.loads((output_dir / "summary.json").read_text())
     assert saved_summary["deep_features"]["enabled"] is True
+    assert saved_summary["method_family"] == "multilevel_ot"
+    assert saved_summary["latent_source"] == "deep_joint"
+    assert saved_summary["communication_source"] == "none"
     required_summary_keys = {
         "summary_schema_version",
+        "method_family",
+        "latent_source",
+        "communication_source",
         "deep_features",
         "geometry_source_counts",
         "convex_hull_fallback_fraction",
@@ -749,6 +852,79 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert feature_schema["mid_graph"]["edges"] >= 0
     assert "latent_diagnostics" in saved_summary["deep_features"]
     assert "runtime_memory" in saved_summary["deep_features"]
+
+
+def test_run_multilevel_ot_on_h5ad_with_autoencoder_context_features(tmp_path) -> None:
+    rng = np.random.default_rng(44)
+    coords_a = rng.normal(loc=[0.0, 0.0], scale=0.35, size=(20, 2))
+    coords_b = rng.normal(loc=[7.5, 7.5], scale=0.35, size=(20, 2))
+    coords = np.vstack([coords_a, coords_b]).astype(np.float32)
+    feat_a = rng.normal(loc=[0.0, 1.0, 0.0, 1.0, 0.5], scale=0.2, size=(20, 5))
+    feat_b = rng.normal(loc=[3.0, 2.0, 3.0, 2.0, 2.5], scale=0.2, size=(20, 5))
+    features = np.vstack([feat_a, feat_b]).astype(np.float32)
+
+    adata = ad.AnnData(X=features.copy())
+    adata.obsm["X_pca"] = features.copy()
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    input_h5ad = tmp_path / "tiny_autoencoder_context.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    output_dir = tmp_path / "out_autoencoder_context"
+    summary = run_multilevel_ot_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=output_dir,
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=2.0,
+        stride_um=4.0,
+        min_cells=8,
+        max_subregions=8,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=8,
+        align_iters=1,
+        n_init=1,
+        allow_convex_hull_fallback=True,
+        max_iter=2,
+        tol=1e-4,
+        basic_niche_size_um=None,
+        seed=11,
+        compute_device="cpu",
+        deep_config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=4,
+            hidden_dim=24,
+            layers=2,
+            neighbor_k=4,
+            epochs=3,
+            batch_size=16,
+            validation="none",
+            output_embedding="context",
+            save_model=False,
+        ),
+    )
+
+    assert summary["deep_features"]["enabled"] is True
+    assert summary["deep_features"]["method"] == "autoencoder"
+    assert summary["deep_features"]["output_embedding"] == "context"
+    assert summary["latent_source"] == "deep_context"
+    assert summary["deep_features"]["uses_spatial_graph"] is False
+    saved_summary = json.loads((output_dir / "summary.json").read_text())
+    assert saved_summary["deep_features"]["method"] == "autoencoder"
+    assert saved_summary["deep_features"]["output_embedding"] == "context"
+    assert saved_summary["latent_source"] == "deep_context"
+    assert saved_summary["deep_features"]["uses_spatial_graph"] is False
+    assert "latent_diagnostics" in saved_summary["deep_features"]
+    assert saved_summary["deep_features"]["ot_feature_view_warning"] is None
 
 
 def test_run_multilevel_ot_on_h5ad_rejects_joint_ot_without_explicit_opt_in(tmp_path) -> None:

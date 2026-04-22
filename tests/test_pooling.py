@@ -5,8 +5,10 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pytest
 
-from spatial_ot.pooling import pool_h5ads_in_directory
+from spatial_ot.feature_source import default_precomputed_x_feature_key, prepare_h5ad_feature_cache
+from spatial_ot.pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_directory
 
 
 def _write_demo_h5ad(path: Path, *, offset: float) -> None:
@@ -72,3 +74,71 @@ def test_pool_h5ads_in_directory_keeps_sample_labels_and_separates_coordinates(t
     assert min_b_x > max_a_x
 
     assert all(str(index).startswith(("sample_a:", "sample_b:")) for index in pooled.obs_names)
+
+
+def test_prepare_h5ad_feature_cache_reuses_matching_precomputed_x_features(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    input_h5ad = tmp_path / "prepared_input.h5ad"
+    _write_demo_h5ad(input_h5ad, offset=0.0)
+
+    monkeypatch.setenv("SPATIAL_OT_X_SVD_COMPONENTS", "2")
+    monkeypatch.setenv("SPATIAL_OT_X_TARGET_SUM", "1000")
+    prepared_key = default_precomputed_x_feature_key(requested_components=2)
+
+    first = prepare_h5ad_feature_cache(
+        input_h5ad=input_h5ad,
+        feature_obsm_key="X",
+        output_obsm_key=prepared_key,
+    )
+    assert first["prepared_feature_obsm_key"] == prepared_key
+    assert first["reused_existing"] is False
+
+    prepared = ad.read_h5ad(input_h5ad)
+    assert prepared_key in prepared.obsm
+    assert prepared.obsm[prepared_key].shape == (3, 2)
+    assert "spatial_ot_prepared_features" in prepared.uns
+
+    second = prepare_h5ad_feature_cache(
+        input_h5ad=input_h5ad,
+        feature_obsm_key="X",
+        output_obsm_key=prepared_key,
+    )
+    assert second["prepared_feature_obsm_key"] == prepared_key
+    assert second["reused_existing"] is True
+
+
+def test_distribute_pooled_feature_cache_to_inputs_writes_shared_cache_back_to_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    input_dir = tmp_path / "inputs"
+    input_dir.mkdir()
+    first = input_dir / "sample_a_cells_marker_genes_umap3d.h5ad"
+    second = input_dir / "sample_b_cells_marker_genes_umap3d.h5ad"
+    _write_demo_h5ad(first, offset=0.0)
+    _write_demo_h5ad(second, offset=5.0)
+
+    output_h5ad = tmp_path / "pooled.h5ad"
+    pool_h5ads_in_directory(
+        input_dir=input_dir,
+        output_h5ad=output_h5ad,
+        feature_obsm_keys=["X"],
+    )
+
+    monkeypatch.setenv("SPATIAL_OT_X_SVD_COMPONENTS", "2")
+    monkeypatch.setenv("SPATIAL_OT_X_TARGET_SUM", "1000")
+    prepared_key = default_precomputed_x_feature_key(requested_components=2)
+    prepare_h5ad_feature_cache(
+        input_h5ad=output_h5ad,
+        feature_obsm_key="X",
+        output_obsm_key=prepared_key,
+    )
+
+    summary = distribute_pooled_feature_cache_to_inputs(
+        pooled_h5ad=output_h5ad,
+        input_dir=input_dir,
+        prepared_obsm_key=prepared_key,
+    )
+
+    assert summary["n_inputs"] == 2
+    for sample_path in (first, second):
+        sample = ad.read_h5ad(sample_path)
+        assert prepared_key in sample.obsm
+        assert sample.obsm[prepared_key].shape == (3, 2)
+        assert sample.uns["spatial_ot_prepared_features"][prepared_key]["distributed_from_pooled"] is True

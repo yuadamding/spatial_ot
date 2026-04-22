@@ -445,6 +445,10 @@ def run_experiment(config: ExperimentConfig) -> dict:
     print("[spatial_ot] writing outputs", flush=True)
 
     summary = {
+        "method_family": "legacy_teacher_student",
+        "active_path": "legacy-train",
+        "latent_source": "legacy_student_z_s",
+        "communication_source": "legacy",
         "device": str(device),
         "n_cells": data.n_cells,
         "n_bins8": data.n_bins,

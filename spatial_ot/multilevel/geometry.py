@@ -702,6 +702,32 @@ def _gpu_balanced_sinkhorn_transport(
     )
 
 
+def _fit_degenerate_shape_normalizer(
+    geometry_points: np.ndarray,
+) -> tuple[ShapeNormalizer, ShapeNormalizerDiagnostics]:
+    """Fallback normalizer for subregions with fewer than 3 geometry points.
+
+    There is not enough geometry to estimate a stable OT map in this case, so we
+    keep the coordinates in a centered-and-scaled local frame and skip the OT
+    interpolation step entirely.
+    """
+
+    g = np.asarray(geometry_points, dtype=np.float64)
+    g_norm, center, scale = _normalize_coords_basic(g)
+    radius = np.sqrt(np.sum(g_norm**2, axis=1))
+    normalizer = ShapeNormalizer(center=center, scale=scale, interpolator=None)
+    diagnostics = ShapeNormalizerDiagnostics(
+        geometry_source="unknown",
+        used_fallback=False,
+        ot_cost=None,
+        sinkhorn_converged=None,
+        mapped_radius_p95=float(np.percentile(radius, 95)) if radius.size else 0.0,
+        mapped_radius_max=float(radius.max()) if radius.size else 0.0,
+        interpolation_residual=0.0,
+    )
+    return normalizer, diagnostics
+
+
 def fit_ot_shape_normalizer(
     geometry_points: np.ndarray,
     reference_points: np.ndarray,
@@ -717,12 +743,14 @@ def fit_ot_shape_normalizer(
         raise ValueError("geometry_points must have shape (n_points, 2).")
     if q.ndim != 2 or q.shape[1] != 2:
         raise ValueError("reference_points must have shape (n_points, 2).")
-    if g.shape[0] < 3:
-        raise ValueError("At least 3 geometry points are required for shape normalization.")
+    if g.shape[0] < 1:
+        raise ValueError("At least 1 geometry point is required for shape normalization.")
     if not np.all(np.isfinite(g)):
         raise ValueError("geometry_points contains NaN or Inf.")
     if not np.all(np.isfinite(q)):
         raise ValueError("reference_points contains NaN or Inf.")
+    if g.shape[0] < 3:
+        return _fit_degenerate_shape_normalizer(g)
 
     g_norm, center, scale = _normalize_coords_basic(g)
     if reference_weights is None:

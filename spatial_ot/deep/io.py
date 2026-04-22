@@ -122,6 +122,7 @@ def _deep_summary(
         "input_feature_obsm_key": feature_obsm_key,
         "output_feature_obsm_key": output_obsm_key,
         "latent_dim": int(embedding_dim),
+        "full_batch_max_cells": int(config.full_batch_max_cells),
         "epochs": int(config.epochs),
         "batch_key": config.batch_key,
         "neighbor_k": int(config.neighbor_k),
@@ -133,9 +134,15 @@ def _deep_summary(
         "graph_max_neighbors": int(config.graph_max_neighbors),
         "validation": config.validation,
         "validation_context_mode": config.validation_context_mode,
+        "allow_joint_ot_embedding": bool(config.allow_joint_ot_embedding),
         "uses_absolute_coordinate_features": False,
         "uses_spatial_graph": bool(config.method == "graph_autoencoder"),
         "output_embedding": config.output_embedding,
+        "ot_feature_view_warning": (
+            "joint_embedding_explicit_opt_in"
+            if config.output_embedding == "joint" and bool(config.allow_joint_ot_embedding)
+            else None
+        ),
         "final_train_loss": float(final_train_loss) if final_train_loss is not None else None,
         "final_val_loss": float(final_val_loss) if final_val_loss is not None else None,
         "model_path": model_path,
@@ -242,6 +249,10 @@ def fit_deep_features_on_h5ad(
         "summary_schema_version": "1",
         "spatial_ot_version": _package_version(),
         "git_sha": _git_sha(),
+        "method_family": "deep_feature_adapter",
+        "active_path": "deep-fit",
+        "latent_source": f"deep_{config.output_embedding}" if config.output_embedding is not None else "deep_unspecified",
+        "communication_source": "none",
         "input_h5ad": str(input_h5ad),
         "output_dir": str(output_dir),
         "feature_obsm_key": feature_obsm_key,
@@ -323,6 +334,14 @@ def transform_h5ad_with_deep_model(
         "summary_schema_version": "1",
         "spatial_ot_version": _package_version(),
         "git_sha": _git_sha(),
+        "method_family": "deep_feature_adapter",
+        "active_path": "deep-transform",
+        "latent_source": (
+            f"deep_{encoder.config.output_embedding}"
+            if encoder.config.output_embedding is not None
+            else "deep_unspecified"
+        ),
+        "communication_source": "none",
         "input_h5ad": str(input_h5ad),
         "output_h5ad": str(output_h5ad),
         "model_path": str(model_path),

@@ -12,10 +12,11 @@ from .config import (
     validate_multilevel_config,
 )
 from .deep import fit_deep_features_on_h5ad, transform_h5ad_with_deep_model
+from .feature_source import prepare_h5ad_feature_cache
 from .legacy.training import run_experiment
 from .legacy.visualization import plot_preprocessed_inputs, plot_result_bundle
 from .multilevel import plot_sample_niche_maps_from_run_dir, run_multilevel_ot_with_config
-from .pooling import pool_h5ads_in_directory
+from .pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_directory
 
 
 def _configure_runtime_threads_from_env() -> None:
@@ -133,6 +134,42 @@ def build_parser() -> argparse.ArgumentParser:
     pool_inputs.add_argument("--sample-id-suffix", default="_cells_marker_genes_umap3d", help="Filename suffix stripped when deriving sample IDs.")
     pool_inputs.add_argument("--layout-columns", type=int, default=None, help="Optional number of columns used to tile samples in pooled coordinate space.")
     pool_inputs.add_argument("--layout-gap", type=float, default=None, help="Optional gap between sample tiles in pooled coordinate units.")
+
+    prepare_inputs = sub.add_parser(
+        "prepare-inputs",
+        help="Precompute reusable CPU-side feature caches inside an H5AD before GPU-heavy runs.",
+    )
+    prepare_inputs.add_argument("--input-h5ad", required=True, help="Input H5AD to update or copy.")
+    prepare_inputs.add_argument("--output-h5ad", help="Optional output H5AD path. Defaults to updating --input-h5ad in place.")
+    prepare_inputs.add_argument(
+        "--feature-obsm-key",
+        default="X",
+        help="Feature source to prepare. Currently only 'X' is supported for cached full-gene preprocessing.",
+    )
+    prepare_inputs.add_argument("--output-obsm-key", help="Optional obsm key used to store the prepared feature cache.")
+    prepare_inputs.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Recompute the prepared feature cache even if a matching one already exists.",
+    )
+
+    distribute_inputs = sub.add_parser(
+        "distribute-prepared-inputs",
+        help="Copy a prepared pooled feature cache back into each source H5AD so single-sample runs can reuse the same cohort-aligned feature space.",
+    )
+    distribute_inputs.add_argument("--pooled-h5ad", required=True, help="Pooled H5AD containing the prepared feature cache.")
+    distribute_inputs.add_argument("--input-dir", required=True, help="Directory containing the source sample H5AD files.")
+    distribute_inputs.add_argument("--prepared-obsm-key", required=True, help="Prepared pooled obsm key to distribute back into the source files.")
+    distribute_inputs.add_argument("--sample-glob", default="*_cells_marker_genes_umap3d.h5ad", help="Glob used to select source H5AD files within --input-dir.")
+    distribute_inputs.add_argument("--sample-obs-key", default="sample_id", help="obs key storing the sample identifier.")
+    distribute_inputs.add_argument("--source-file-obs-key", default="source_h5ad", help="obs key in the pooled H5AD storing the source H5AD filename.")
+    distribute_inputs.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Rewrite the distributed feature cache even if a matching pooled-derived cache already exists in a source file.",
+    )
 
     deep_fit = sub.add_parser(
         "deep-fit",
@@ -390,6 +427,26 @@ def main() -> None:
             sample_id_suffix=args.sample_id_suffix,
             layout_columns=args.layout_columns,
             layout_gap=args.layout_gap,
+        )
+        print(json.dumps(summary, indent=2))
+    elif args.command == "prepare-inputs":
+        summary = prepare_h5ad_feature_cache(
+            input_h5ad=args.input_h5ad,
+            output_h5ad=args.output_h5ad,
+            feature_obsm_key=args.feature_obsm_key,
+            output_obsm_key=args.output_obsm_key,
+            overwrite=bool(args.overwrite),
+        )
+        print(json.dumps(summary, indent=2))
+    elif args.command == "distribute-prepared-inputs":
+        summary = distribute_pooled_feature_cache_to_inputs(
+            pooled_h5ad=args.pooled_h5ad,
+            input_dir=args.input_dir,
+            prepared_obsm_key=args.prepared_obsm_key,
+            sample_glob=args.sample_glob,
+            sample_obs_key=args.sample_obs_key,
+            source_file_obs_key=args.source_file_obs_key,
+            overwrite=bool(args.overwrite),
         )
         print(json.dumps(summary, indent=2))
     elif args.command == "deep-fit":

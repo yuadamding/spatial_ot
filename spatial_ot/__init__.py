@@ -18,6 +18,7 @@ __all__ = [
     "load_config",
     "load_multilevel_config",
     "make_reference_points_unit_disk",
+    "prepare_h5ad_feature_cache",
     "plot_sample_niche_maps",
     "plot_sample_niche_maps_from_run_dir",
     "run_multilevel_ot_on_h5ad",
@@ -50,6 +51,7 @@ def __getattr__(name: str):
         "make_reference_points_unit_disk",
         "plot_sample_niche_maps",
         "plot_sample_niche_maps_from_run_dir",
+        "prepare_h5ad_feature_cache",
         "run_multilevel_ot_on_h5ad",
         "run_multilevel_ot_with_config",
         "pool_h5ad_files",
@@ -69,7 +71,12 @@ def __getattr__(name: str):
         if name in {
             "pool_h5ad_files",
             "pool_h5ads_in_directory",
+            "prepare_h5ad_feature_cache",
         }:
+            if name == "prepare_h5ad_feature_cache":
+                from . import feature_source
+
+                return getattr(feature_source, name)
             from . import pooling
 
             return getattr(pooling, name)

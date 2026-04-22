@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import json
+import os
 from math import ceil, sqrt
 from pathlib import Path
-import json
+import tempfile
 
 import anndata as ad
+import h5py
 import numpy as np
 import pandas as pd
 from scipy import sparse
+
+from .feature_source import PREPARED_FEATURES_UNS_KEY
 
 
 def _sample_id_from_path(path: Path, suffix: str) -> str:
@@ -48,6 +53,22 @@ def _pooled_offsets(
         "tile_width": float(tile_w),
         "tile_height": float(tile_h),
     }
+
+
+def _write_h5ad_atomically(adata: ad.AnnData, output_path: Path) -> None:
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f"{output_path.name}.",
+        suffix=".tmp.h5ad",
+        dir=str(output_path.parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        adata.write_h5ad(tmp_path, compression="gzip")
+        tmp_path.replace(output_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 def pool_h5ad_files(
@@ -258,3 +279,147 @@ def pool_h5ads_in_directory(
     summary_path = Path(output_h5ad).with_suffix(Path(output_h5ad).suffix + ".summary.json")
     summary_path.write_text(json.dumps(summary, indent=2))
     return summary
+
+
+def distribute_pooled_feature_cache_to_inputs(
+    pooled_h5ad: str | Path,
+    input_dir: str | Path,
+    *,
+    prepared_obsm_key: str,
+    sample_glob: str = "*_cells_marker_genes_umap3d.h5ad",
+    sample_obs_key: str = "sample_id",
+    source_file_obs_key: str = "source_h5ad",
+    overwrite: bool = False,
+) -> dict:
+    pooled_path = Path(pooled_h5ad)
+    input_root = Path(input_dir)
+    paths = sorted(input_root.glob(sample_glob))
+    if not pooled_path.exists():
+        raise FileNotFoundError(f"Pooled H5AD not found: {pooled_path}")
+    if not paths:
+        raise FileNotFoundError(f"No input H5AD files matched '{sample_glob}' under {input_root}.")
+
+    pooled = ad.read_h5ad(pooled_path, backed="r")
+    try:
+        pooled_obs = pooled.obs.copy()
+        pooled_uns = dict(pooled.uns.get(PREPARED_FEATURES_UNS_KEY, {}))
+    finally:
+        pooled.file.close()
+
+    if source_file_obs_key not in pooled_obs.columns:
+        raise KeyError(f"Pooled H5AD is missing source-file obs key '{source_file_obs_key}'.")
+    if prepared_obsm_key not in pooled_uns:
+        raise KeyError(
+            f"Pooled H5AD does not contain prepared feature metadata for '{prepared_obsm_key}'. "
+            "Run prepare-inputs on the pooled H5AD first."
+        )
+
+    prepared_metadata = dict(pooled_uns[prepared_obsm_key])
+    source_files = pooled_obs[source_file_obs_key].astype(str).to_numpy()
+    pooled_cell_ids = (
+        pooled_obs["cell_id"].astype(str).to_numpy()
+        if "cell_id" in pooled_obs.columns
+        else np.asarray([str(index).split(":", 1)[-1] for index in pooled_obs.index], dtype=object)
+    )
+    row_indices_by_source = {
+        str(source_name): np.flatnonzero(source_files == str(source_name))
+        for source_name in pd.unique(source_files)
+    }
+
+    distributed: list[dict[str, object]] = []
+    with h5py.File(pooled_path, "r") as handle:
+        if "obsm" not in handle or prepared_obsm_key not in handle["obsm"]:
+            raise KeyError(f"Pooled H5AD is missing obsm['{prepared_obsm_key}'].")
+        feature_dataset = handle["obsm"][prepared_obsm_key]
+        feature_dim = int(feature_dataset.shape[1])
+        for input_path in paths:
+            row_indices = np.asarray(row_indices_by_source.get(str(input_path.name), np.asarray([], dtype=np.int64)), dtype=np.int64)
+            if row_indices.size == 0:
+                raise KeyError(
+                    f"No pooled rows were tagged with source file '{input_path.name}'. "
+                    f"Check '{source_file_obs_key}' in {pooled_path.name}."
+                )
+
+            sample_adata = ad.read_h5ad(input_path)
+            expected_metadata = dict(sample_adata.uns.get(PREPARED_FEATURES_UNS_KEY, {})).get(prepared_obsm_key, {})
+            reusable = (
+                not bool(overwrite)
+                and prepared_obsm_key in sample_adata.obsm
+                and bool(expected_metadata)
+                and bool(expected_metadata.get("distributed_from_pooled", False))
+                and str(expected_metadata.get("pooled_source_h5ad", "")) == str(pooled_path.name)
+                and int(expected_metadata.get("svd_components_requested", -1)) == int(prepared_metadata.get("svd_components_requested", -1))
+                and float(expected_metadata.get("target_sum", float("nan"))) == float(prepared_metadata.get("target_sum", float("nan")))
+                and np.asarray(sample_adata.obsm[prepared_obsm_key]).shape == (int(sample_adata.n_obs), feature_dim)
+            )
+            if reusable:
+                distributed.append(
+                    {
+                        "input_h5ad": str(input_path),
+                        "sample_id": str(sample_adata.obs[sample_obs_key].iloc[0]) if sample_obs_key in sample_adata.obs and sample_adata.n_obs > 0 else input_path.stem,
+                        "n_cells": int(sample_adata.n_obs),
+                        "feature_dim": int(feature_dim),
+                        "reused_existing": True,
+                    }
+                )
+                continue
+
+            sample_cell_ids = (
+                sample_adata.obs["cell_id"].astype(str).to_numpy()
+                if "cell_id" in sample_adata.obs.columns
+                else sample_adata.obs.index.astype(str).to_numpy()
+            )
+            pooled_source_cell_ids = pooled_cell_ids[row_indices]
+            if pooled_source_cell_ids.shape[0] != sample_cell_ids.shape[0]:
+                raise ValueError(
+                    f"Pooled/source cell count mismatch for {input_path.name}: "
+                    f"{pooled_source_cell_ids.shape[0]} pooled rows vs {sample_cell_ids.shape[0]} sample rows."
+                )
+            if np.array_equal(sample_cell_ids, pooled_source_cell_ids):
+                ordered_rows = row_indices
+            else:
+                lookup = pd.Index(pooled_source_cell_ids)
+                mapped = lookup.get_indexer(sample_cell_ids)
+                if np.any(mapped < 0):
+                    raise ValueError(f"Could not align pooled prepared features back to {input_path.name} by cell_id/obs_name.")
+                ordered_rows = row_indices[mapped]
+
+            order = np.argsort(ordered_rows)
+            sorted_rows = ordered_rows[order]
+            sorted_features = np.asarray(feature_dataset[sorted_rows, :], dtype=np.float32)
+            features = np.empty_like(sorted_features)
+            features[order] = sorted_features
+            sample_adata.obsm[prepared_obsm_key] = features
+            sample_prepared_uns = dict(sample_adata.uns.get(PREPARED_FEATURES_UNS_KEY, {}))
+            sample_prepared_uns[prepared_obsm_key] = {
+                **prepared_metadata,
+                "output_feature_key": str(prepared_obsm_key),
+                "distributed_from_pooled": True,
+                "pooled_source_h5ad": str(pooled_path.name),
+                "pooled_source_feature_key": str(prepared_obsm_key),
+            }
+            sample_adata.uns[PREPARED_FEATURES_UNS_KEY] = sample_prepared_uns
+            _write_h5ad_atomically(sample_adata, input_path)
+            distributed.append(
+                {
+                    "input_h5ad": str(input_path),
+                    "sample_id": str(sample_adata.obs[sample_obs_key].iloc[0]) if sample_obs_key in sample_adata.obs and sample_adata.n_obs > 0 else input_path.stem,
+                    "n_cells": int(sample_adata.n_obs),
+                    "feature_dim": int(feature_dim),
+                    "reused_existing": False,
+                }
+            )
+
+    return {
+        "pooled_h5ad": str(pooled_path),
+        "prepared_feature_obsm_key": str(prepared_obsm_key),
+        "n_inputs": int(len(distributed)),
+        "distributed_inputs": distributed,
+    }
+
+
+__all__ = [
+    "pool_h5ad_files",
+    "pool_h5ads_in_directory",
+    "distribute_pooled_feature_cache_to_inputs",
+]

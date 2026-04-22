@@ -112,6 +112,23 @@ def _runtime_memory_snapshot(device: torch.device) -> dict[str, float | int | bo
     return snapshot
 
 
+def _latent_source_label(feature_source: dict, deep_summary: dict) -> str:
+    if bool(deep_summary.get("enabled")):
+        output_embedding = deep_summary.get("output_embedding")
+        return f"deep_{output_embedding}" if output_embedding is not None else "deep_unspecified"
+
+    feature_key = str(feature_source.get("feature_key", ""))
+    input_mode = str(feature_source.get("input_mode", "obsm"))
+    preprocessing = str(feature_source.get("preprocessing", ""))
+    if feature_key.startswith("X_spatial_ot_x_svd_"):
+        return "prepared_svd"
+    if input_mode == "X" and "truncated_svd" in preprocessing:
+        return "runtime_svd"
+    if feature_key == "X":
+        return "raw_x"
+    return f"obsm:{feature_key}"
+
+
 def _probability_diagnostics(probs: np.ndarray, *, prefix: str) -> dict[str, float]:
     probs = np.asarray(probs, dtype=np.float64)
     if probs.ndim != 2 or probs.shape[0] == 0:
@@ -872,6 +889,10 @@ def run_multilevel_ot_on_h5ad(
         "summary_schema_version": "1",
         "spatial_ot_version": _package_version(),
         "git_sha": _git_sha(),
+        "method_family": "multilevel_ot",
+        "active_path": "multilevel-ot",
+        "latent_source": _latent_source_label(feature_source, deep_summary),
+        "communication_source": "none",
         "input_h5ad": str(input_h5ad),
         "output_dir": str(output_dir),
         "feature_obsm_key": feature_obsm_key_used,
@@ -960,6 +981,8 @@ def run_multilevel_ot_on_h5ad(
         ],
         "geometry_fallback_fraction": fallback_fraction,
         "convex_hull_fallback_fraction": fallback_fraction,
+        "degenerate_geometry_subregion_count": int(np.sum(result.subregion_geometry_point_counts < 3)),
+        "degenerate_geometry_subregion_fraction": float(np.mean((result.subregion_geometry_point_counts < 3).astype(np.float32))),
         "geometry_source_counts": {
             key: int(value)
             for key, value in pd.Series(result.subregion_geometry_sources).value_counts().sort_index().items()
@@ -987,7 +1010,7 @@ def run_multilevel_ot_on_h5ad(
         "runtime_memory": runtime_memory,
         "method_notes": {
             "core": "shape-normalized cluster-specific semi-relaxed Wasserstein dictionary clustering",
-            "geometry_normalization": "uniform geometry samples from each subregion are OT-mapped into a shared unit-disk reference domain before clustering",
+            "geometry_normalization": "uniform geometry samples from each subregion are OT-mapped into a shared unit-disk reference domain before clustering; degenerate 1-2 point subregions fall back to centered-and-scaled local coordinates without OT interpolation",
             "geometry_proxy": "when explicit masks are unavailable and convex hull fallback is allowed, geometry samples are drawn from the convex hull of local cell coordinates",
             "basic_niches": "when basic_niche_size_um is set, grid-built subregions are unions of fixed-size basic niches rather than direct raw-cell radius windows",
             "local_measure": "compressed empirical measures over canonical coordinates and standardized cell-level features",

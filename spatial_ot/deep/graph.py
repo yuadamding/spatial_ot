@@ -5,6 +5,8 @@ from sklearn.neighbors import NearestNeighbors
 import torch
 from torch import nn
 
+_NEIGHBOR_AGGREGATION_MAX_GATHER_BYTES = 128 * 1024 * 1024
+
 
 def build_neighbor_graph(
     coords_um: np.ndarray,
@@ -90,8 +92,18 @@ def aggregate_neighbor_mean_torch(
     src, dst = edge_index
     agg = torch.zeros_like(features)
     deg = torch.zeros((features.shape[0], 1), dtype=features.dtype, device=features.device)
-    agg.index_add_(0, dst, features[src])
-    deg.index_add_(0, dst, torch.ones((src.numel(), 1), dtype=features.dtype, device=features.device))
+    bytes_per_row = max(int(features.shape[1]) * max(int(features.element_size()), 1), 1)
+    chunk_size = max(int(_NEIGHBOR_AGGREGATION_MAX_GATHER_BYTES // bytes_per_row), 1)
+    for start in range(0, int(src.numel()), chunk_size):
+        stop = min(start + chunk_size, int(src.numel()))
+        src_chunk = src[start:stop]
+        dst_chunk = dst[start:stop]
+        agg.index_add_(0, dst_chunk, features.index_select(0, src_chunk))
+        deg.index_add_(
+            0,
+            dst_chunk,
+            torch.ones((dst_chunk.numel(), 1), dtype=features.dtype, device=features.device),
+        )
     agg = agg / deg.clamp_min(1.0)
     isolated = deg.squeeze(1) == 0
     if torch.any(isolated):
@@ -123,12 +135,16 @@ def build_context_distribution_targets(
     )
     target_device = device or torch.device("cpu")
     feats_t = torch.as_tensor(feats, dtype=torch.float32, device=target_device)
-    short_t = torch.as_tensor(short_edges, dtype=torch.long, device=target_device)
-    mid_t = torch.as_tensor(mid_edges, dtype=torch.long, device=target_device)
-    short_mean = aggregate_neighbor_mean_torch(feats_t, short_t)
-    mid_mean = aggregate_neighbor_mean_torch(feats_t, mid_t)
-    targets = torch.cat([short_mean, mid_mean], dim=1)
-    return targets.detach().cpu().numpy().astype(np.float32, copy=False)
+    target_chunks: list[np.ndarray] = []
+    for edges in (short_edges, mid_edges):
+        edge_t = torch.as_tensor(edges, dtype=torch.long, device=target_device)
+        mean_t = aggregate_neighbor_mean_torch(feats_t, edge_t)
+        target_chunks.append(mean_t.detach().cpu().numpy().astype(np.float32, copy=False))
+        del edge_t
+        del mean_t
+        if target_device.type == "cuda":
+            torch.cuda.empty_cache()
+    return np.concatenate(target_chunks, axis=1).astype(np.float32, copy=False)
 
 
 class MeanGraphLayer(nn.Module):

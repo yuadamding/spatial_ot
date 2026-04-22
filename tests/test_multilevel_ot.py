@@ -207,6 +207,29 @@ def test_shape_normalizer_reduces_boundary_shape_difference() -> None:
     assert abs(std_circle - std_ellipse) < 0.15
 
 
+def test_shape_normalizer_handles_degenerate_geometry_points() -> None:
+    q, w = make_reference_points_unit_disk(64)
+
+    single = np.array([[2.0, -3.0]], dtype=np.float32)
+    phi_single, diag_single = fit_ot_shape_normalizer(single, q, w, eps_geom=0.03)
+    mapped_single = phi_single.transform(single)
+    assert phi_single.interpolator is None
+    assert mapped_single.shape == (1, 2)
+    assert np.allclose(mapped_single, 0.0)
+    assert diag_single.ot_cost is None
+    assert diag_single.interpolation_residual == 0.0
+
+    pair = np.array([[0.0, 0.0], [2.0, 0.0]], dtype=np.float32)
+    phi_pair, diag_pair = fit_ot_shape_normalizer(pair, q, w, eps_geom=0.03)
+    mapped_pair = phi_pair.transform(pair)
+    assert phi_pair.interpolator is None
+    assert mapped_pair.shape == (2, 2)
+    assert np.allclose(mapped_pair.mean(axis=0), 0.0, atol=1e-6)
+    assert np.isclose(np.linalg.norm(mapped_pair[0] - mapped_pair[1]), 2.0, atol=1e-5)
+    assert diag_pair.ot_cost is None
+    assert diag_pair.interpolation_residual == 0.0
+
+
 def test_shape_leakage_diagnostic_runs() -> None:
     coords = np.vstack(
         [
@@ -421,6 +444,51 @@ def test_sample_geometry_points_prefers_explicit_polygon_geometry() -> None:
     assert not used_fallback
     assert pts[:, 0].max() > 3.0
     assert pts[:, 1].max() > 3.0
+
+
+def test_build_subregion_measures_handles_singleton_subregions() -> None:
+    coords = np.array(
+        [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [20.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    features = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    centers = coords.copy()
+    regions = [RegionGeometry(region_id=f"r{i}", members=np.array([i], dtype=np.int32)) for i in range(coords.shape[0])]
+    q, w = make_reference_points_unit_disk(64)
+
+    measures = _build_subregion_measures(
+        features=features,
+        coords_um=coords,
+        centers_um=centers,
+        region_geometries=regions,
+        geometry_reference_points=q,
+        geometry_reference_weights=w,
+        geometry_eps=0.03,
+        geometry_samples=64,
+        compressed_support_size=4,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        seed=0,
+        allow_convex_hull_fallback=True,
+    )
+
+    assert len(measures) == 3
+    for measure in measures:
+        assert measure.geometry_point_count == 1
+        assert measure.normalizer.interpolator is None
+        assert measure.canonical_coords.shape == (1, 2)
+        assert np.allclose(measure.canonical_coords, 0.0)
 
 
 def test_returned_costs_match_returned_atoms() -> None:

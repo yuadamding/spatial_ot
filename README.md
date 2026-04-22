@@ -115,6 +115,7 @@ The current deep feature adapter is still a research-stage component, but it is 
 - `batch_key` currently supports validation/sample-holdout bookkeeping, not true batch correction
 - `count_layer` is reserved but not implemented for count reconstruction yet
 - the packaged shell runner now requests `cuda` explicitly by default, while the Python API and TOML config surface still accept `auto` or an explicit device string such as `cuda:0`
+- the packaged `run.sh` path now defaults to `deep.method = "autoencoder"` with `output_embedding = "context"` over the prepared full-gene SVD cache; set `DEEP_FEATURE_METHOD=none` to disable the deep adapter
 - `graph_autoencoder` remains full-batch only, and `deep.full_batch_max_cells` now guards against accidental oversize runs
 
 Current deep-path capability snapshot:
@@ -181,19 +182,79 @@ cd spatial_ot
   --allow-observed-hull-geometry
 ```
 
-The packaged input bundle includes both the full sparse gene matrix in `X` and an exploratory `obsm["X_umap_marker_genes_3d"]`. The packaged runner now defaults to `--feature-obsm-key X`, which uses the full gene matrix as the source feature space and derives a scalable log1p-normalized TruncatedSVD embedding before OT. The UMAP path remains available only through explicit exploratory opt-in.
+The packaged input bundle includes both the full sparse gene matrix in `X` and an exploratory `obsm["X_umap_marker_genes_3d"]`. The fastest repeated GPU path is now:
+
+1. pool all samples once into `../spatial_ot_input/spatial_ot_input_pooled.h5ad`
+2. precompute the CPU-heavy `X -> log1p-normalized TruncatedSVD` feature cache once into that same pooled H5AD
+3. fit the default deep `autoencoder` adapter on that cached cohort-level feature matrix and pass the learned `context` embedding into OT
+4. point repeated OT runs at the cached / learned feature matrices instead of recomputing the CPU-heavy preprocessing every run
+
+The UMAP path remains available only through explicit exploratory opt-in.
 
 Treat `../spatial_ot_input/` as the canonical staging directory for those H5AD files and keep it next to the unzipped `spatial_ot/` directory.
 
-The default `bash run.sh` path now pools every `*.h5ad` in `../spatial_ot_input/` into one cohort-level H5AD before running OT:
+The reusable cohort-level pooled input now also lives in that same sibling staging directory by default:
+
+```bash
+cd spatial_ot
+bash pool_spatial_ot_input.sh
+```
+
+That writes `../spatial_ot_input/spatial_ot_input_pooled.h5ad` plus its JSON summary once, so later cohort runs can reuse the same pooled input without rebuilding it.
+
+To also precompute the CPU-heavy full-gene feature transform up front:
+
+```bash
+cd spatial_ot
+bash prepare_spatial_ot_input.sh
+```
+
+That reuses or refreshes `../spatial_ot_input/spatial_ot_input_pooled.h5ad`, then writes a prepared shared feature cache such as `obsm["X_spatial_ot_x_svd_512"]` into that pooled cohort H5AD from the pooled full-gene matrix `X`. This is the recommended staging step before long GPU runs because the pooled run needs one cohort-aligned feature basis rather than separate per-sample SVD bases.
+
+If you also want every original sample H5AD in `../spatial_ot_input/` to carry the same prepared cache for single-sample runs, stage them all in one pass:
+
+```bash
+cd spatial_ot
+bash prepare_all_spatial_ot_input.sh
+```
+
+That first prepares the pooled cohort H5AD, then copies the resulting pooled shared feature cache back into each `*_cells_marker_genes_umap3d.h5ad` in place, and finally verifies that every sample now contains the prepared cache. This avoids recomputing separate per-sample SVD spaces while still letting single-sample runs reuse a precomputed feature matrix.
+
+In this packaged workspace, `../spatial_ot_input/*.h5ad` may also be managed by an external sync job. Because of that, `prepare_all_spatial_ot_input.sh` defaults to the safe pooled-only staging path and leaves those source files untouched unless you explicitly opt in:
+
+```bash
+cd spatial_ot
+WRITE_BACK_TO_SOURCE_INPUTS=1 bash prepare_all_spatial_ot_input.sh
+```
+
+Use that opt-in only when the source H5AD files are not being overwritten by another process.
+
+The default `bash run.sh` path now reuses `../spatial_ot_input/spatial_ot_input_pooled.h5ad` when it already exists, reuses the prepared full-gene cache when it already exists, and only recomputes those CPU-side steps when the file is missing or when you explicitly refresh them:
 
 - `sample_id` and `source_h5ad` are written into `obs`
 - original per-sample coordinates remain available in `cell_x` / `cell_y` and explicit `original_cell_x` / `original_cell_y`
 - pooled sample-separated coordinates are written to `pooled_cell_x` / `pooled_cell_y`
+- the default pooled-run feature key is now the prepared cache `X_spatial_ot_x_svd_${X_FEATURE_COMPONENTS}` rather than recomputing TruncatedSVD from `X` inside each OT run
+- `prepare_all_spatial_ot_input.sh` stages the pooled shared cache first, and can optionally write that same cohort-aligned cache back into each sample H5AD when `WRITE_BACK_TO_SOURCE_INPUTS=1`
+- when `POOL_ALL_INPUTS=0` and `PREPARE_INPUTS_AHEAD=1`, the same prepared cache key is also used for single-sample runs
 - the pooled coordinates place each sample on its own non-overlapping tile, so samples contribute jointly to latent/OT learning without being treated as one physically continuous tissue section
-- the packaged runner now defaults to `MIN_CELLS=1` and `MAX_SUBREGIONS=0`, so it does not cap or subsample candidate subregions and uses the full pooled cell table rather than a packaged subset
+- the packaged runner now defaults to `MIN_CELLS=1`, `MAX_SUBREGIONS=0`, `STRIDE_UM=RADIUS_UM`, and `REQUIRE_FULL_CELL_COVERAGE=1`, so it does not cap or subsample candidate subregions, uses the full pooled cell table, and fails the run if any cells are left outside all analyzed subregions
 - after the OT fit finishes, `run.sh` also writes one spatial niche PNG per sample under `../outputs/spatial_ot/cohort_multilevel_ot/sample_niche_plots/`
 - those per-sample plots use the original within-sample spatial coordinates rather than the pooled tiled coordinates, so each specimen is visualized in its native layout
+
+If you want to force a pooled-input rebuild before running OT:
+
+```bash
+cd spatial_ot
+REFRESH_POOLED_INPUT=1 bash run.sh
+```
+
+If you want to force the prepared full-gene cache to be recomputed too:
+
+```bash
+cd spatial_ot
+REFRESH_PREPARED_FEATURES=1 bash run.sh
+```
 
 The active path now also supports a TOML config surface. A portable example lives at `configs/multilevel_deep_example.toml`, and it now demonstrates the graph-aware encoder:
 
