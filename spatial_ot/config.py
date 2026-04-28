@@ -116,6 +116,7 @@ class MultilevelPathConfig:
     spatial_y_key: str = "cell_y"
     spatial_scale: float = 1.0
     region_obs_key: str | None = None
+    region_geometry_json: str | None = None
     allow_umap_as_feature: bool = False
 
 
@@ -127,7 +128,7 @@ class MultilevelOTConfig:
     stride_um: float = 100.0
     basic_niche_size_um: float | None = 50.0
     min_cells: int = 25
-    max_subregions: int = 1500
+    max_subregions: int = 5000
     lambda_x: float = 0.5
     lambda_y: float = 1.0
     geometry_eps: float = 0.03
@@ -147,6 +148,17 @@ class MultilevelOTConfig:
     overlap_jaccard_min: float = 0.15
     overlap_contrast_scale: float = 1.0
     allow_convex_hull_fallback: bool = False
+    shape_diagnostics: bool = True
+    shape_leakage_permutations: int = 64
+    compute_spot_latent: bool = True
+    auto_n_clusters: bool = False
+    candidate_n_clusters: tuple[int, ...] = (15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)
+    auto_k_max_score_subregions: int = 2500
+    auto_k_gap_references: int = 8
+    auto_k_mds_components: int = 8
+    auto_k_pilot_n_init: int = 1
+    auto_k_pilot_max_iter: int = 3
+    min_subregions_per_cluster: int = 50
     max_iter: int = 10
     tol: float = 1e-4
     seed: int = 1337
@@ -236,6 +248,22 @@ def _expand_env_value(value):
     return value
 
 
+def _parse_candidate_n_clusters(value) -> tuple[int, ...]:
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return ()
+        if "-" in raw and "," not in raw:
+            left, right = raw.split("-", 1)
+            start = int(left.strip())
+            stop = int(right.strip())
+            if stop < start:
+                raise ValueError("ot.candidate_n_clusters range must be increasing")
+            return tuple(range(start, stop + 1))
+        return tuple(int(part.strip()) for part in raw.split(",") if part.strip())
+    return tuple(int(k) for k in value)
+
+
 def _validate_experiment(config: ExperimentConfig) -> ExperimentConfig:
     valid_subset = {"spatial_grid", "stratified"}
     if config.data.subset_strategy not in valid_subset:
@@ -268,6 +296,8 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
     for required in ["input_h5ad", "output_dir", "feature_obsm_key"]:
         if not getattr(config.paths, required):
             raise ValueError(f"paths.{required} must be set")
+    if config.paths.region_geometry_json and not config.paths.region_obs_key:
+        raise ValueError("paths.region_geometry_json requires paths.region_obs_key")
     if config.paths.spatial_scale <= 0:
         raise ValueError("paths.spatial_scale must be > 0")
     if config.ot.basic_niche_size_um is not None and config.ot.basic_niche_size_um <= 0:
@@ -284,6 +314,8 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.max_subregions must be positive or 0")
     if config.ot.lambda_x < 0 or config.ot.lambda_y < 0:
         raise ValueError("ot.lambda_x and ot.lambda_y must be non-negative")
+    if config.ot.lambda_x == 0 and config.ot.lambda_y == 0:
+        raise ValueError("at least one of lambda_x or lambda_y must be positive")
     if config.ot.overlap_consistency_weight < 0:
         raise ValueError("ot.overlap_consistency_weight must be >= 0")
     if config.ot.overlap_jaccard_min < 0 or config.ot.overlap_jaccard_min > 1:
@@ -306,6 +338,21 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.min_scale and ot.max_scale must be positive and min_scale <= max_scale")
     if not str(config.ot.compute_device).strip():
         raise ValueError("ot.compute_device must be a non-empty string")
+    if config.ot.shape_leakage_permutations < 0:
+        raise ValueError("ot.shape_leakage_permutations must be >= 0")
+    config.ot.candidate_n_clusters = tuple(sorted({int(k) for k in _parse_candidate_n_clusters(config.ot.candidate_n_clusters) if int(k) >= 2}))
+    if not config.ot.candidate_n_clusters:
+        raise ValueError("ot.candidate_n_clusters must contain at least one K >= 2")
+    if config.ot.auto_k_max_score_subregions < 0:
+        raise ValueError("ot.auto_k_max_score_subregions must be >= 0")
+    if config.ot.auto_k_gap_references < 0:
+        raise ValueError("ot.auto_k_gap_references must be >= 0")
+    if config.ot.auto_k_mds_components < 1:
+        raise ValueError("ot.auto_k_mds_components must be at least 1")
+    if config.ot.auto_k_pilot_n_init < 1 or config.ot.auto_k_pilot_max_iter < 1:
+        raise ValueError("ot.auto_k_pilot_n_init and ot.auto_k_pilot_max_iter must be at least 1")
+    if config.ot.min_subregions_per_cluster < 1:
+        raise ValueError("ot.min_subregions_per_cluster must be at least 1")
 
     valid_methods = {"none", "autoencoder", "graph_autoencoder"}
     if config.deep.method not in valid_methods:

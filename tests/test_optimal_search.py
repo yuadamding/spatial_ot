@@ -1,7 +1,17 @@
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 from spatial_ot.config import MultilevelExperimentConfig
-from spatial_ot.optimal_search import build_default_search_candidates, build_refine_candidates, score_multilevel_summary
+from spatial_ot.optimal_search import (
+    SearchCandidate,
+    _candidate_command,
+    build_default_search_candidates,
+    build_refine_candidates,
+    run_multilevel_optimal_search,
+    score_multilevel_summary,
+)
 
 
 def test_score_multilevel_summary_prefers_compact_low_warning_runs() -> None:
@@ -64,6 +74,10 @@ def test_score_multilevel_summary_prefers_compact_low_warning_runs() -> None:
     bad_score = score_multilevel_summary(bad_summary)
 
     assert good_score["total_score"] > bad_score["total_score"]
+    assert good_score["rankable"] is True
+    assert bad_score["rankable"] is False
+    assert "convex_hull_fallback" in bad_score["rank_blockers"]
+    assert "forced_subregion_cluster_size_repair" in bad_score["rank_blockers"]
 
 
 def test_default_search_candidates_include_baseline_and_are_unique() -> None:
@@ -93,3 +107,61 @@ def test_refine_candidates_are_derived_from_top_ranked_rows() -> None:
 
     assert candidates
     assert any(candidate.stage == "refine" for candidate in candidates)
+
+
+def test_candidate_command_preserves_pretrained_deep_model_and_regularization_flags(tmp_path: Path) -> None:
+    config = MultilevelExperimentConfig()
+    config.paths.input_h5ad = str(tmp_path / "input.h5ad")
+    config.paths.output_dir = str(tmp_path / "out")
+    config.paths.feature_obsm_key = "X_pca"
+    config.deep.method = "autoencoder"
+    config.deep.output_embedding = "intrinsic"
+    config.deep.pretrained_model = str(tmp_path / "deep_feature_model.pt")
+    config.deep.independence_weight = 0.23
+    config.deep.early_stopping_patience = 4
+    config.deep.min_delta = 0.002
+    config.deep.restore_best = False
+
+    command = _candidate_command(config)
+
+    assert "--pretrained-deep-model" in command
+    assert str(tmp_path / "deep_feature_model.pt") in command
+    assert command[command.index("--deep-independence-weight") + 1] == "0.23"
+    assert command[command.index("--deep-early-stopping-patience") + 1] == "4"
+    assert command[command.index("--deep-min-delta") + 1] == "0.002"
+    assert "--no-deep-restore-best" in command
+    assert "--compute-spot-latent" in command
+    assert command[command.index("--min-subregions-per-cluster") + 1] == str(config.ot.min_subregions_per_cluster)
+
+
+def test_optimal_search_marks_timed_out_candidates(monkeypatch, tmp_path: Path) -> None:
+    config = MultilevelExperimentConfig()
+    config.paths.input_h5ad = str(tmp_path / "dummy_input.h5ad")
+    config.paths.output_dir = str(tmp_path / "search_out")
+    config.paths.feature_obsm_key = "X_pca"
+
+    monkeypatch.setattr(
+        "spatial_ot.optimal_search.build_default_search_candidates",
+        lambda _config: [SearchCandidate("baseline", "coarse", {})],
+    )
+    monkeypatch.setattr(
+        "spatial_ot.optimal_search.build_refine_candidates",
+        lambda _config, _rows: [],
+    )
+
+    def _fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=kwargs.get("args", args[0] if args else []), timeout=1.0)
+
+    monkeypatch.setattr("spatial_ot.optimal_search.subprocess.run", _fake_run)
+
+    summary = run_multilevel_optimal_search(
+        config=config,
+        search_output_dir=tmp_path / "search_root",
+        time_budget_hours=0.001,
+        keep_top_k=1,
+        plot_best_sample_maps=False,
+    )
+
+    assert summary["timed_out_candidates"] == 1
+    assert summary["completed_candidates"] == 0
+    assert summary["best_candidate"] is None

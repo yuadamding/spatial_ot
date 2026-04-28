@@ -143,7 +143,7 @@ def build_qc_warnings(
         _qc_warning(
             "cell_projection_is_approximate_assigned_subregion",
             "info",
-            "Cell-level labels are approximate projections from assigned subregions rather than direct cell-level OT posteriors.",
+            "Auxiliary cell-level projection scores are approximate; primary cell labels are inherited from fitted mutually exclusive subregions.",
         )
     ]
     if feature_embedding_warning == "umap_exploratory":
@@ -221,13 +221,23 @@ def build_qc_warnings(
     if forced_label_fraction > 0.0:
         warnings_out.append(
             _qc_warning(
-                "forced_nonempty_cluster_assignment",
+                "forced_subregion_cluster_size_assignment",
                 "warning",
-                "At least one subregion label was forced to keep every requested cluster nonempty.",
+                "At least one subregion label was forced to satisfy the requested minimum subregion count per subregion cluster.",
                 value=float(forced_label_fraction),
             )
         )
     mixed_candidate_fallback_fraction = float(cost_reliability.get("mixed_candidate_fallback_fraction", 0.0) or 0.0)
+    mixed_candidate_effective_eps_fraction = float(cost_reliability.get("mixed_candidate_effective_eps_fraction", 0.0) or 0.0)
+    if mixed_candidate_effective_eps_fraction > 0.0:
+        warnings_out.append(
+            _qc_warning(
+                "candidate_costs_use_mixed_effective_eps",
+                "warning",
+                "Some subregions still compare candidate clusters under different effective OT eps values after stabilization attempts.",
+                value=mixed_candidate_effective_eps_fraction,
+            )
+        )
     if mixed_candidate_fallback_fraction > 0.0:
         warnings_out.append(
             _qc_warning(
@@ -287,19 +297,42 @@ def probability_diagnostics(probs: np.ndarray, *, prefix: str) -> dict[str, floa
     }
 
 
-def cell_subregion_coverage(n_cells: int, subregion_members: list[np.ndarray]) -> dict[str, float | int]:
+def cell_subregion_coverage(n_cells: int, subregion_members: list[np.ndarray]) -> dict[str, object]:
     if n_cells <= 0:
         return {
             "covered_cell_count": 0,
             "uncovered_cell_count": 0,
             "cell_subregion_coverage_fraction": 0.0,
+            "cell_subregion_duplicate_count": 0,
+            "cell_subregion_duplicate_fraction": 0.0,
+            "cell_subregion_max_memberships": 0,
+            "cell_subregion_partition_complete": False,
+            "subregion_membership_mode": "empty",
         }
-    covered = np.zeros(n_cells, dtype=bool)
+    membership_counts = np.zeros(n_cells, dtype=np.int32)
     for members in subregion_members:
-        covered[np.asarray(members, dtype=np.int64)] = True
+        member_arr = np.asarray(members, dtype=np.int64)
+        if member_arr.size:
+            np.add.at(membership_counts, member_arr, 1)
+    covered = membership_counts > 0
     covered_count = int(covered.sum())
+    duplicate_count = int(np.sum(membership_counts > 1))
+    uncovered_count = int(n_cells - covered_count)
+    max_memberships = int(membership_counts.max(initial=0))
+    partition_complete = bool(uncovered_count == 0 and duplicate_count == 0)
+    if partition_complete:
+        membership_mode = "mutually_exclusive_complete"
+    elif duplicate_count == 0:
+        membership_mode = "mutually_exclusive_partial"
+    else:
+        membership_mode = "overlapping"
     return {
         "covered_cell_count": covered_count,
-        "uncovered_cell_count": int(n_cells - covered_count),
+        "uncovered_cell_count": uncovered_count,
         "cell_subregion_coverage_fraction": float(covered_count / max(n_cells, 1)),
+        "cell_subregion_duplicate_count": duplicate_count,
+        "cell_subregion_duplicate_fraction": float(duplicate_count / max(n_cells, 1)),
+        "cell_subregion_max_memberships": max_memberships,
+        "cell_subregion_partition_complete": partition_complete,
+        "subregion_membership_mode": membership_mode,
     }

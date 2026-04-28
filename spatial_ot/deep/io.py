@@ -104,7 +104,7 @@ def _extract_count_target(adata: ad.AnnData, *, count_layer: str | None):
     if count_layer is None:
         return None, None
     layer_key = str(count_layer)
-    if layer_key in {"X", "counts"}:
+    if layer_key == "X":
         if adata.X is None:
             raise ValueError("deep.count_layer requested the primary count matrix, but adata.X is missing.")
         return adata.X, "X"

@@ -21,6 +21,14 @@ _SHELL_DEFAULT_CHECKS: tuple[tuple[str, str, str], ...] = (
     ("OVERLAP_CONSISTENCY_WEIGHT", "ot.overlap_consistency_weight", "float"),
     ("RADIUS_UM", "ot.radius_um", "float"),
     ("ALLOW_OBSERVED_HULL_GEOMETRY", "ot.allow_convex_hull_fallback", "bool01"),
+    ("AUTO_N_CLUSTERS", "ot.auto_n_clusters", "bool01"),
+    ("CANDIDATE_N_CLUSTERS", "ot.candidate_n_clusters", "candidate_n_clusters"),
+    ("AUTO_K_MAX_SCORE_SUBREGIONS", "ot.auto_k_max_score_subregions", "int"),
+    ("AUTO_K_GAP_REFERENCES", "ot.auto_k_gap_references", "int"),
+    ("AUTO_K_MDS_COMPONENTS", "ot.auto_k_mds_components", "int"),
+    ("AUTO_K_PILOT_N_INIT", "ot.auto_k_pilot_n_init", "int"),
+    ("AUTO_K_PILOT_MAX_ITER", "ot.auto_k_pilot_max_iter", "int"),
+    ("MIN_SUBREGIONS_PER_CLUSTER", "ot.min_subregions_per_cluster", "int"),
 )
 
 
@@ -45,6 +53,13 @@ def _cast_value(raw: str, kind: str):
         return int(raw)
     if kind == "bool01":
         return bool(int(raw))
+    if kind == "candidate_n_clusters":
+        if "-" in raw and "," not in raw:
+            left, right = raw.split("-", 1)
+            start = int(left.strip())
+            stop = int(right.strip())
+            return tuple(range(start, stop + 1))
+        return tuple(int(part.strip()) for part in raw.split(",") if part.strip())
     raise ValueError(f"Unknown cast kind {kind!r}")
 
 
@@ -57,7 +72,7 @@ def _getattr_path(obj, dotted: str):
 
 def _package_version() -> str:
     try:
-        from importlib.metadata import PackageNotFoundError, version
+        from importlib.metadata import version
 
         return version("spatial-ot")
     except Exception:

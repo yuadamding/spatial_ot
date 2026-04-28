@@ -5,8 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from spatial_ot.doctor import run_doctor
 
 
@@ -21,8 +19,12 @@ def test_run_doctor_reports_no_shell_default_drift() -> None:
     assert "deep_feature_config_defaults" in report
     assert report["multilevel_ot_config_defaults"]["basic_niche_size_um"] == 50.0
     assert report["multilevel_ot_config_defaults"]["min_cells"] == 25
-    assert report["multilevel_ot_config_defaults"]["max_subregions"] == 1500
+    assert report["multilevel_ot_config_defaults"]["max_subregions"] == 5000
     assert report["multilevel_ot_config_defaults"]["allow_convex_hull_fallback"] is False
+    assert report["multilevel_ot_config_defaults"]["candidate_n_clusters"] == (15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)
+    assert report["multilevel_ot_config_defaults"]["min_subregions_per_cluster"] == 50
+    checked = set(report["shell_defaults_vs_config"]["checked"])
+    assert {"CANDIDATE_N_CLUSTERS", "MIN_SUBREGIONS_PER_CLUSTER"}.issubset(checked)
 
 
 def test_doctor_cli_exits_zero_on_clean_tree(tmp_path: Path) -> None:

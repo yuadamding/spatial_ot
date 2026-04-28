@@ -11,21 +11,33 @@ from .types import MultilevelOTResult
 
 
 def compute_subregion_embedding(weights: np.ndarray, seed: int) -> tuple[np.ndarray, str]:
+    weights_arr = np.asarray(weights, dtype=np.float32)
+    if weights_arr.ndim != 2:
+        raise ValueError("weights must be a 2D array.")
+    if weights_arr.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32), "empty"
+    if weights_arr.shape[0] == 1:
+        return np.zeros((1, 2), dtype=np.float32), "constant"
     try:
         import umap.umap_ as umap  # type: ignore
 
         reducer = umap.UMAP(
             n_components=2,
-            n_neighbors=min(30, max(3, weights.shape[0] - 1)),
+            n_neighbors=min(30, max(3, weights_arr.shape[0] - 1)),
             min_dist=0.2,
             metric="euclidean",
             random_state=seed,
             transform_seed=seed,
         )
-        return reducer.fit_transform(weights).astype(np.float32), "UMAP"
+        return reducer.fit_transform(weights_arr).astype(np.float32), "UMAP"
     except Exception:
-        pca = PCA(n_components=2, random_state=seed)
-        return pca.fit_transform(weights).astype(np.float32), "PCA"
+        if min(weights_arr.shape) >= 2:
+            pca = PCA(n_components=2, random_state=seed)
+            return pca.fit_transform(weights_arr).astype(np.float32), "PCA"
+        values = weights_arr[:, 0] if weights_arr.shape[1] else np.zeros(weights_arr.shape[0], dtype=np.float32)
+        values = values.astype(np.float32, copy=False)
+        values = (values - float(values.mean())) / max(float(values.std()), 1e-6)
+        return np.column_stack([values, np.zeros_like(values)]).astype(np.float32), "1D"
 
 
 def _zscore_columns(x: np.ndarray) -> np.ndarray:
@@ -180,6 +192,10 @@ def _cell_adjacency_same_label_fraction(
 ) -> float | None:
     coords = np.asarray(coords_um, dtype=np.float32)
     labels_arr = np.asarray(labels, dtype=np.int32)
+    valid = labels_arr >= 0
+    if not np.all(valid):
+        coords = coords[valid]
+        labels_arr = labels_arr[valid]
     if coords.shape[0] < 2:
         return None
     keep = _deterministic_subsample_indices(coords.shape[0], max_cells)
@@ -196,6 +212,25 @@ def _cell_adjacency_same_label_fraction(
     return float(np.mean(same.astype(np.float32))) if same.size else None
 
 
+def _cell_labels_from_subregions(
+    *,
+    n_cells: int,
+    subregion_members: list[np.ndarray],
+    subregion_labels: np.ndarray,
+) -> np.ndarray:
+    labels = np.full(int(n_cells), -1, dtype=np.int32)
+    membership_counts = np.zeros(int(n_cells), dtype=np.int32)
+    for idx, members in enumerate(subregion_members):
+        member_arr = np.asarray(members, dtype=np.int64)
+        if member_arr.size == 0:
+            continue
+        labels[member_arr] = int(subregion_labels[idx])
+        np.add.at(membership_counts, member_arr, 1)
+    if int(membership_counts.max(initial=0)) > 1:
+        raise ValueError("Cannot compute cell adjacency diagnostics because subregion memberships overlap.")
+    return labels
+
+
 def subregion_graph_metrics(
     *,
     n_cells: int,
@@ -207,6 +242,11 @@ def subregion_graph_metrics(
     n_subregions = len(result.subregion_members)
     labels = np.asarray(result.subregion_cluster_labels, dtype=np.int32)
     probs = np.asarray(result.subregion_cluster_probs, dtype=np.float64)
+    cell_labels = _cell_labels_from_subregions(
+        n_cells=int(n_cells),
+        subregion_members=result.subregion_members,
+        subregion_labels=labels,
+    )
     if n_subregions < 2:
         return {
             "subregion_graph_edge_count": 0,
@@ -221,7 +261,7 @@ def subregion_graph_metrics(
             "high_overlap_same_label_fraction": None,
             "isolated_subregion_fraction": None,
             "cluster_connected_components": {},
-            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, result.cell_cluster_labels),
+            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, cell_labels),
         }
 
     member_sizes = np.asarray([len(members) for members in result.subregion_members], dtype=np.int64)
@@ -286,7 +326,7 @@ def subregion_graph_metrics(
             "high_overlap_same_label_fraction": None,
             "isolated_subregion_fraction": 1.0,
             "cluster_connected_components": {f"C{int(cid)}": int(np.sum(labels == int(cid))) for cid in np.unique(labels).tolist()},
-            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, result.cell_cluster_labels),
+            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, cell_labels),
         }
 
     edge_pairs = np.asarray(list(edge_info.keys()), dtype=np.int64)
@@ -361,5 +401,5 @@ def subregion_graph_metrics(
         ),
         "isolated_subregion_fraction": float(np.mean((degree <= 0).astype(np.float32))),
         "cluster_connected_components": component_counts,
-        "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, result.cell_cluster_labels),
+        "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, cell_labels),
     }

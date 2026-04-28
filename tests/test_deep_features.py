@@ -5,6 +5,7 @@ from pathlib import Path
 
 import anndata as ad
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
@@ -19,6 +20,9 @@ from spatial_ot.deep_features import (
     fit_deep_features_on_h5ad,
     transform_h5ad_with_deep_model,
 )
+from spatial_ot.deep.io import _extract_count_target as _extract_deep_count_target
+from spatial_ot.multilevel.metadata import extract_count_target as _extract_multilevel_count_target
+from spatial_ot.multilevel.io import _load_region_geometry_json
 from spatial_ot.multilevel_ot import run_multilevel_ot_on_h5ad
 
 
@@ -49,6 +53,28 @@ def test_deep_feature_encoder_fit_save_load(tmp_path) -> None:
     loaded = SpatialOTFeatureEncoder.load(model_path)
     loaded_embedding = loaded.transform(features=features, coords_um=coords)
     assert np.allclose(embedding, loaded_embedding, atol=1e-5)
+
+
+def test_graph_autoencoder_fit_limit_checks_total_cells_before_training() -> None:
+    rng = np.random.default_rng(321)
+    features = rng.normal(size=(40, 4)).astype(np.float32)
+    coords = rng.normal(size=(40, 2)).astype(np.float32)
+    batch = np.repeat(["trainish", "heldoutish"], repeats=20)
+    encoder = SpatialOTFeatureEncoder(
+        DeepFeatureConfig(
+            method="graph_autoencoder",
+            latent_dim=3,
+            hidden_dim=12,
+            layers=1,
+            graph_layers=1,
+            validation="sample_holdout",
+            full_batch_max_cells=30,
+            output_embedding="context",
+            epochs=1,
+        )
+    )
+    with pytest.raises(ValueError, match="n_cells=40"):
+        encoder.fit(features=features, coords_um=coords, batch=batch, seed=7)
 
 
 def test_graph_deep_feature_encoder_fit_save_load(tmp_path) -> None:
@@ -546,6 +572,84 @@ def test_transform_h5ad_with_deep_model_rejects_mismatched_input_obsm_key(tmp_pa
         )
 
 
+def test_multilevel_pretrained_deep_model_rejects_mismatched_input_obsm_key(tmp_path) -> None:
+    rng = np.random.default_rng(791)
+    features = rng.normal(size=(20, 4)).astype(np.float32)
+    coords = rng.normal(size=(20, 2)).astype(np.float32)
+    train = ad.AnnData(X=features.copy())
+    train.obsm["X_pca"] = features.copy()
+    train.obs["cell_x"] = coords[:, 0]
+    train.obs["cell_y"] = coords[:, 1]
+    train_h5ad = tmp_path / "train_multilevel_pretrained_schema.h5ad"
+    train.write_h5ad(train_h5ad)
+
+    fit_summary = fit_deep_features_on_h5ad(
+        input_h5ad=train_h5ad,
+        output_dir=tmp_path / "deep_model_multilevel_schema",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=3,
+            hidden_dim=12,
+            layers=1,
+            neighbor_k=3,
+            epochs=2,
+            batch_size=8,
+            validation="none",
+            output_embedding="intrinsic",
+            save_model=True,
+        ),
+        seed=9,
+    )
+
+    new = ad.AnnData(X=features.copy())
+    new.obsm["X_other"] = features.copy()
+    new.obs["cell_x"] = coords[:, 0]
+    new.obs["cell_y"] = coords[:, 1]
+    new_h5ad = tmp_path / "new_multilevel_pretrained_schema.h5ad"
+    new.write_h5ad(new_h5ad)
+
+    with pytest.raises(ValueError, match="Input obsm key mismatch"):
+        run_multilevel_ot_on_h5ad(
+            input_h5ad=new_h5ad,
+            output_dir=tmp_path / "out_multilevel_pretrained_schema",
+            feature_obsm_key="X_other",
+            spatial_x_key="cell_x",
+            spatial_y_key="cell_y",
+            spatial_scale=1.0,
+            n_clusters=2,
+            atoms_per_cluster=2,
+            radius_um=2.0,
+            stride_um=4.0,
+            min_cells=4,
+            max_subregions=4,
+            lambda_x=0.5,
+            lambda_y=1.0,
+            geometry_eps=0.03,
+            ot_eps=0.03,
+            rho=0.5,
+            geometry_samples=32,
+            compressed_support_size=8,
+            align_iters=1,
+            n_init=1,
+            allow_convex_hull_fallback=True,
+            max_iter=1,
+            tol=1e-4,
+            basic_niche_size_um=None,
+            seed=5,
+            compute_device="cpu",
+            deep_config=DeepFeatureConfig(
+                method="autoencoder",
+                output_embedding="intrinsic",
+                pretrained_model=str(fit_summary["outputs"]["deep_feature_model"]),
+                device="cpu",
+            ),
+        )
+
+
 def test_transform_h5ad_with_deep_model_rejects_spatial_scale_mismatch(tmp_path) -> None:
     rng = np.random.default_rng(80)
     features = rng.normal(size=(20, 4)).astype(np.float32)
@@ -675,6 +779,18 @@ atoms_per_cluster = 2
     )
     config = load_multilevel_config(config_path)
     assert config.deep.count_layer == "counts"
+
+
+def test_count_layer_counts_reads_named_layer_not_x() -> None:
+    x = np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    counts = np.asarray([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
+    adata = ad.AnnData(X=x.copy())
+    adata.layers["counts"] = counts.copy()
+
+    for extractor in (_extract_deep_count_target, _extract_multilevel_count_target):
+        matrix, used = extractor(adata, count_layer="counts")
+        assert used == "counts"
+        assert np.array_equal(np.asarray(matrix), counts)
 
 
 def test_fit_deep_features_supports_count_reconstruction_targets() -> None:
@@ -843,6 +959,7 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     adata.obsm["X_pca"] = features.copy()
     adata.obs["cell_x"] = coords[:, 0]
     adata.obs["cell_y"] = coords[:, 1]
+    adata.obs["region_id"] = np.repeat(["r0", "r1"], repeats=18)
     input_h5ad = tmp_path / "tiny.h5ad"
     adata.write_h5ad(input_h5ad)
 
@@ -854,6 +971,7 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
         spatial_x_key="cell_x",
         spatial_y_key="cell_y",
         spatial_scale=1.0,
+        region_obs_key="region_id",
         n_clusters=2,
         atoms_per_cluster=2,
         radius_um=2.0,
@@ -899,6 +1017,8 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert summary["deep_features"]["ot_feature_view_warning"] == "joint_embedding_explicit_opt_in"
     assert summary["deep_features"]["batch_correction"] == "disabled"
     assert "runtime_memory" in summary["deep_features"]
+    assert summary["deep_features"]["feature_schema"]["input_obsm_key"] == "X_pca"
+    assert summary["deep_features"]["feature_schema"]["coordinate_keys"] == ["cell_x", "cell_y"]
     assert "deep_feature_model" in summary["outputs"]
     assert "deep_feature_history" in summary["outputs"]
     assert "deep_feature_model_meta" in summary["outputs"]
@@ -910,7 +1030,8 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert saved_summary["latent_source"] == "deep_joint"
     assert saved_summary["communication_source"] == "none"
     assert saved_summary["method_stack"]["deep_feature_adapter"] == "graph_autoencoder"
-    assert saved_summary["method_stack"]["cell_projection_mode"] == "approximate_assigned_subregion"
+    assert saved_summary["method_stack"]["cell_label_mode"] == "fitted_subregion_cluster_membership"
+    assert saved_summary["method_stack"]["cell_projection_mode"] == "auxiliary_approximate_cell_scores"
     assigned_transport_cost_decomposition = saved_summary["assigned_transport_cost_decomposition"]
     assert assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"] > 0.0
     assert assigned_transport_cost_decomposition["mean_transport_assignment_objective"] >= assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"]
@@ -959,6 +1080,242 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert "subregion_cluster_transport_costs" in diag.files
     assert "subregion_cluster_overlap_penalties" in diag.files
     assert "subregion_measure_summaries" in diag.files
+    saved_cells = ad.read_h5ad(output_dir / "cells_multilevel_ot.h5ad")
+    assert "mlot_projected_cluster_int" in saved_cells.obs
+    assert "mlot_subregion_cluster_int" in saved_cells.obs
+    assert np.array_equal(
+        saved_cells.obs["mlot_cluster_int"].to_numpy(dtype=np.int32),
+        saved_cells.obs["mlot_subregion_cluster_int"].to_numpy(dtype=np.int32),
+    )
+    assert "mlot_projected_cluster_probs" in saved_cells.obsm
+    assert "mlot_subregion_cluster_probs" in saved_cells.obsm
+
+
+def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallback(tmp_path) -> None:
+    rng = np.random.default_rng(404)
+    coords = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0], scale=0.2, size=(10, 2)),
+            rng.normal(loc=[5.0, 5.0], scale=0.2, size=(10, 2)),
+        ]
+    ).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0], scale=0.1, size=(10, 2)),
+            rng.normal(loc=[2.0, 2.0], scale=0.1, size=(10, 2)),
+        ]
+    ).astype(np.float32)
+    adata = ad.AnnData(X=features.copy())
+    adata.obsm["X_pca"] = features.copy()
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    adata.obs["region_id"] = np.repeat(["r0", "r1"], repeats=10)
+    input_h5ad = tmp_path / "regions.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    geometry_json = tmp_path / "region_geometry.json"
+    geometry_json.write_text(
+        json.dumps(
+            {
+                "coordinate_units": "um",
+                "regions": [
+                    {
+                        "region_id": "r0",
+                        "polygon_vertices": [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+                    },
+                    {
+                        "region_id": "r1",
+                        "polygon_vertices": [[4.0, 4.0], [6.0, 4.0], [6.0, 6.0], [4.0, 6.0]],
+                    },
+                ],
+            }
+        )
+    )
+
+    summary = run_multilevel_ot_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=tmp_path / "region_out",
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        region_obs_key="region_id",
+        region_geometry_json=geometry_json,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=2.0,
+        stride_um=2.0,
+        min_cells=8,
+        max_subregions=4,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=4,
+        align_iters=1,
+        n_init=1,
+        allow_convex_hull_fallback=False,
+        max_iter=1,
+        tol=1e-4,
+        basic_niche_size_um=None,
+        shape_diagnostics=False,
+        seed=11,
+        compute_device="cpu",
+    )
+    assert summary["geometry_fallback_fraction"] == 0.0
+    assert summary["geometry_source_counts"] == {"polygon": 2}
+    assert summary["boundary_invariance_claim"] == "supported_with_explicit_geometry"
+    assert summary["shape_diagnostics_enabled"] is False
+    assert summary["shape_leakage_balanced_accuracy"] is None
+    assert summary["capabilities"]["spot_level_latent_charts_implemented"] is True
+    assert summary["method_stack"]["spot_level_latent_projection"] == "cluster_local_pca_over_ot_atom_posteriors_aligned_coords_and_local_context"
+    assert "spot_level_latent" in summary["outputs"]
+    spot_latent_path = Path(summary["outputs"]["spot_level_latent"])
+    assert spot_latent_path.exists()
+    spot_latent = np.load(spot_latent_path)
+    assert spot_latent["latent_coords"].shape[1] == 2
+    assert spot_latent["aligned_coords"].shape[1] == 2
+    assert np.allclose(spot_latent["atom_posteriors"].sum(axis=1), 1.0, atol=1e-5)
+    assert summary["spot_level_latent"]["coordinate_scope"] == "cluster_local"
+    saved = ad.read_h5ad(summary["outputs"]["h5ad"])
+    assert "mlot_spot_latent_coords" in saved.obsm
+    assert saved.obsm["mlot_spot_latent_coords"].shape == (adata.n_obs, 2)
+    assert "mlot_spot_latent_cluster_int" in saved.obs
+
+
+def test_region_geometry_json_rejects_unknown_units_and_bad_affine(tmp_path) -> None:
+    bad_units = tmp_path / "bad_units.json"
+    bad_units.write_text(
+        json.dumps(
+            {
+                "coordinate_units": "pixels",
+                "regions": [
+                    {
+                        "region_id": "r0",
+                        "polygon_vertices": [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                    }
+                ],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="coordinate_units"):
+        _load_region_geometry_json(
+            bad_units,
+            region_ids=["r0"],
+            subregion_members=[np.array([0, 1, 2], dtype=np.int32)],
+            spatial_scale=2.0,
+        )
+
+    bad_affine = tmp_path / "bad_affine.json"
+    bad_affine.write_text(
+        json.dumps(
+            {
+                "regions": [
+                    {
+                        "region_id": "r0",
+                        "mask": [[1, 1], [1, 1]],
+                        "affine": [[1.0, 0.0], [0.0, 1.0]],
+                    }
+                ],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="affine"):
+        _load_region_geometry_json(
+            bad_affine,
+            region_ids=["r0"],
+            subregion_members=[np.array([0, 1, 2], dtype=np.int32)],
+            spatial_scale=2.0,
+        )
+
+
+def test_explicit_region_min_cell_filter_keeps_geometry_descriptors_aligned(tmp_path) -> None:
+    rng = np.random.default_rng(405)
+    coords = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0], scale=0.1, size=(4, 2)),
+            rng.normal(loc=[100.0, 100.0], scale=0.1, size=(10, 2)),
+            rng.normal(loc=[200.0, 200.0], scale=0.1, size=(10, 2)),
+        ]
+    ).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0], scale=0.1, size=(4, 2)),
+            rng.normal(loc=[1.0, 1.0], scale=0.1, size=(10, 2)),
+            rng.normal(loc=[2.0, 2.0], scale=0.1, size=(10, 2)),
+        ]
+    ).astype(np.float32)
+    adata = ad.AnnData(X=features.copy())
+    adata.obsm["X_pca"] = features.copy()
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    adata.obs["region_id"] = ["drop"] * 4 + ["keep_a"] * 10 + ["keep_b"] * 10
+    input_h5ad = tmp_path / "regions_with_small_first.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    geometry_json = tmp_path / "region_geometry.json"
+    geometry_json.write_text(
+        json.dumps(
+            {
+                "regions": [
+                    {
+                        "region_id": "drop",
+                        "polygon_vertices": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    },
+                    {
+                        "region_id": "keep_a",
+                        "polygon_vertices": [[95.0, 95.0], [105.0, 95.0], [105.0, 105.0], [95.0, 105.0]],
+                    },
+                    {
+                        "region_id": "keep_b",
+                        "polygon_vertices": [[195.0, 195.0], [205.0, 195.0], [205.0, 205.0], [195.0, 205.0]],
+                    },
+                ],
+            }
+        )
+    )
+
+    output_dir = tmp_path / "region_out"
+    summary = run_multilevel_ot_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=output_dir,
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        region_obs_key="region_id",
+        region_geometry_json=geometry_json,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=2.0,
+        stride_um=2.0,
+        min_cells=8,
+        max_subregions=4,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=4,
+        align_iters=1,
+        n_init=1,
+        allow_convex_hull_fallback=False,
+        max_iter=1,
+        tol=1e-4,
+        basic_niche_size_um=None,
+        shape_diagnostics=False,
+        seed=12,
+        compute_device="cpu",
+    )
+
+    subregions = pd.read_parquet(output_dir / "subregions_multilevel_ot.parquet")
+    assert summary["n_subregions"] == 2
+    assert summary["geometry_source_counts"] == {"polygon": 2}
+    assert set(subregions["shape_descriptor_source"]) == {"explicit_polygon"}
+    assert float(subregions["shape_area"].min()) > 50.0
 
 
 def test_run_multilevel_ot_on_h5ad_reports_deep_count_reconstruction(tmp_path) -> None:
@@ -1027,6 +1384,9 @@ def test_run_multilevel_ot_on_h5ad_reports_deep_count_reconstruction(tmp_path) -
     assert isinstance(count_summary, dict)
     assert count_summary["enabled"] is True
     assert count_summary["target_layer"] == "X"
+    assert summary["geometry_source_counts"] == {"observed_point_cloud": summary["n_subregions"]}
+    assert summary["shape_descriptor_source_counts"] == {"observed_point_cloud": summary["n_subregions"]}
+    assert summary["boundary_invariance_claim"] == "supported_with_data_driven_observed_geometry"
     assert summary["deep_features"]["latent_diagnostics"]["count_target_dim"] == counts.shape[1]
     saved_summary = json.loads((tmp_path / "count_multilevel_out" / "summary.json").read_text())
     assert saved_summary["deep_features"]["count_reconstruction"]["target_layer"] == "X"
@@ -1300,6 +1660,8 @@ def test_autoencoder_latent_diagnostics_show_distinct_branches() -> None:
     assert diagnostics["intrinsic_context_allclose"] is False
     assert diagnostics["intrinsic_context_mean_abs_correlation"] >= 0.0
     assert "intrinsic_context_top_canonical_correlation" in diagnostics
+    assert "intrinsic_context_distance_correlation" in diagnostics
+    assert "intrinsic_context_hsic_rbf" in diagnostics
     assert "intrinsic_input_r2" in diagnostics
     assert "context_context_target_r2" in diagnostics
     assert "intrinsic_coordinate_r2" in diagnostics

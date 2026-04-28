@@ -3,6 +3,59 @@ from __future__ import annotations
 import numpy as np
 
 
+def _deterministic_subsample_rows(*arrays: np.ndarray, max_rows: int = 1024) -> tuple[np.ndarray, ...]:
+    if not arrays:
+        return ()
+    n_rows = arrays[0].shape[0]
+    if n_rows <= max_rows:
+        return arrays
+    keep = np.linspace(0, n_rows - 1, num=max_rows, dtype=np.int64)
+    return tuple(np.asarray(arr)[keep] for arr in arrays)
+
+
+def _pairwise_distance_matrix(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    diff = x[:, None, :] - x[None, :, :]
+    return np.sqrt(np.maximum(np.sum(diff * diff, axis=-1), 0.0))
+
+
+def distance_correlation(a: np.ndarray, b: np.ndarray, *, max_rows: int = 1024) -> float:
+    a_arr, b_arr = _deterministic_subsample_rows(np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32), max_rows=max_rows)
+    if a_arr.shape[0] < 2 or b_arr.shape[0] < 2:
+        return 0.0
+    da = _pairwise_distance_matrix(a_arr)
+    db = _pairwise_distance_matrix(b_arr)
+    da = da - da.mean(axis=0, keepdims=True) - da.mean(axis=1, keepdims=True) + da.mean()
+    db = db - db.mean(axis=0, keepdims=True) - db.mean(axis=1, keepdims=True) + db.mean()
+    dcov2 = float(np.mean(da * db))
+    dvar_a = float(np.mean(da * da))
+    dvar_b = float(np.mean(db * db))
+    if dvar_a <= 1e-12 or dvar_b <= 1e-12:
+        return 0.0
+    return float(np.clip(np.sqrt(max(dcov2, 0.0) / np.sqrt(dvar_a * dvar_b)), 0.0, 1.0))
+
+
+def hsic_rbf(a: np.ndarray, b: np.ndarray, *, max_rows: int = 512) -> float:
+    a_arr, b_arr = _deterministic_subsample_rows(np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32), max_rows=max_rows)
+    n = int(a_arr.shape[0])
+    if n < 4 or b_arr.shape[0] != n:
+        return 0.0
+
+    def _rbf_kernel(x: np.ndarray) -> np.ndarray:
+        diff = x[:, None, :] - x[None, :, :]
+        dist2 = np.sum(diff * diff, axis=-1)
+        median = float(np.median(dist2[dist2 > 0])) if np.any(dist2 > 0) else 1.0
+        gamma = 1.0 / max(2.0 * median, 1e-8)
+        return np.exp(-gamma * dist2)
+
+    ka = _rbf_kernel(a_arr.astype(np.float64))
+    kb = _rbf_kernel(b_arr.astype(np.float64))
+    h = np.eye(n, dtype=np.float64) - np.full((n, n), 1.0 / n, dtype=np.float64)
+    ka_c = h @ ka @ h
+    kb_c = h @ kb @ h
+    return float(np.trace(ka_c @ kb_c) / max((n - 1) ** 2, 1))
+
+
 def correlation_summary(a: np.ndarray, b: np.ndarray) -> dict[str, float | bool]:
     if a.shape[0] < 2 or b.shape[0] < 2:
         return {
@@ -103,6 +156,8 @@ def latent_diagnostics(
     intrinsic_coord_r2 = linear_r2(intrinsic, coords_um)
     context_coord_r2 = linear_r2(context, coords_um)
     joint_coord_r2 = linear_r2(joint, coords_um)
+    intrinsic_context_distcorr = distance_correlation(intrinsic, context)
+    intrinsic_context_hsic = hsic_rbf(intrinsic, context)
     return {
         "selected_embedding": selected_embedding,
         "selected_mean_norm": float(np.mean(np.linalg.norm(selected, axis=1))),
@@ -114,6 +169,8 @@ def latent_diagnostics(
         "intrinsic_context_mean_cosine_similarity": float(ic["mean_cosine_similarity"]),
         "intrinsic_context_allclose": bool(ic["allclose"]),
         "intrinsic_context_top_canonical_correlation": top_canonical_correlation(intrinsic, context),
+        "intrinsic_context_distance_correlation": intrinsic_context_distcorr,
+        "intrinsic_context_hsic_rbf": intrinsic_context_hsic,
         "intrinsic_joint_mean_abs_correlation": float(ij["mean_abs_correlation"]),
         "intrinsic_joint_max_abs_correlation": float(ij["max_abs_correlation"]),
         "intrinsic_joint_allclose": bool(ij["allclose"]),

@@ -54,10 +54,12 @@ Prefer PCA, standardized marker expression, or another calibrated latent space. 
 
 Two modes:
 
-- **grid-window discovery** (default): overlapping radius windows over cells
+- **data-driven subregion discovery** (default): mutually exclusive spatial subregions learned from observed coordinates, with sparse connected pieces merged to satisfy `min_cells`; the fitted boundary/shape geometry is taken from the observed member-cell point cloud rather than a hand-coded template
 - **explicit-region clustering**: pass `--region-obs-key` and ideally explicit geometry objects so boundary shape can be treated as nuisance
 
-Without explicit masks or polygons, boundary-shape invariance is not guaranteed. The observed-coordinate convex-hull fallback is opt-in via `--allow-observed-hull-geometry` and is exploratory only.
+For generated subregions, membership and boundary shape are data-driven from the observed member cells. For explicit-region runs without masks or polygons, boundary-shape invariance is not guaranteed unless you intentionally opt into the observed-coordinate convex-hull fallback via `--allow-observed-hull-geometry`.
+
+For CLI explicit-region runs, pass `--region-geometry-json` with a JSON object containing `regions`, each with `region_id` plus `polygon_vertices`, `polygon_components`, or `mask`. Polygon coordinates are interpreted in scaled microns by default; set `"coordinate_units": "obs"` to multiply them by `--spatial-scale`.
 
 ### Quick run against packaged inputs
 
@@ -71,14 +73,31 @@ cd spatial_ot
   --spatial-scale 0.2737012522439323 \
   --compute-device cuda \
   --n-clusters 8 --atoms-per-cluster 8 \
-  --radius-um 100 --stride-um 150 --basic-niche-size-um 200 \
+  --radius-um 100 --stride-um 100 --basic-niche-size-um 50 \
   --min-cells 20 --max-subregions 2000 \
   --lambda-x 0.5 --lambda-y 1.0 \
   --geometry-eps 0.03 --ot-eps 0.03 --rho 0.5 \
   --geometry-samples 192 --compressed-support-size 96 \
-  --align-iters 4 --n-init 5 \
-  --allow-observed-hull-geometry
+  --align-iters 4 --n-init 5
 ```
+
+### Automatic K Selection
+
+`multilevel-ot` can choose the number of subregion clusters before the final fit:
+
+```bash
+../.venv/bin/python -m spatial_ot multilevel-ot \
+  --input-h5ad ../spatial_ot_input/spatial_ot_input_pooled.h5ad \
+  --output-dir ../outputs/spatial_ot/cohort_multilevel_ot_auto_k \
+  --feature-obsm-key X_spatial_ot_x_svd_512 \
+  --spatial-x-key pooled_cell_x --spatial-y-key pooled_cell_y \
+  --spatial-scale 0.2737012522439323 \
+  --auto-n-clusters --candidate-n-clusters 15-25
+```
+
+The selector runs one pilot OT fit at the largest candidate `K`, builds a scalable OT-landmark distance between subregions from the pilot fused transport-cost profiles, then scores candidate `K` values with Silhouette on that precomputed distance plus Gap / Calinski-Harabasz / Davies-Bouldin on a classical MDS embedding. The final `K` is chosen by majority vote and the model is refit at that selected `K`. This avoids all-pairs subregion OT and avoids running a full final fit for every candidate `K`.
+
+The cluster-size constraint is defined on fitted subregions, not on cells or spots. Set `MIN_SUBREGIONS_PER_CLUSTER=50` or pass `--min-subregions-per-cluster 50` to require each subregion cluster to contain at least that many subregions when feasible; projected cell and spot labels remain downstream summaries.
 
 ### TOML config
 
@@ -96,7 +115,8 @@ CLI flags override config values — for example switching to a different sample
   --input-h5ad ../spatial_ot_input/p5_crc_cells_marker_genes_umap3d.h5ad \
   --output-dir ../outputs/spatial_ot/p5_crc_multilevel_ot \
   --deep-feature-method graph_autoencoder \
-  --deep-output-embedding joint
+  --deep-output-embedding joint \
+  --deep-allow-joint-ot-embedding
 ```
 
 ### Deep feature adapter
@@ -165,9 +185,12 @@ bash prepare_spatial_ot_input.sh        # pool + precompute X → SVD into the p
 bash prepare_all_spatial_ot_input.sh    # also verify each sample H5AD has the prepared cache
 WRITE_BACK_TO_SOURCE_INPUTS=1 bash prepare_all_spatial_ot_input.sh
                                         # opt in to copying the cohort cache back into source files
+bash run_prepared_cohort_gpu.sh         # verify the prepared pooled H5AD, then launch the remaining GPU OT run
 ```
 
 Pooled coordinates place each sample on its own non-overlapping tile, so samples contribute jointly to latent/OT learning without being treated as one continuous tissue section.
+
+`run_prepared_cohort_gpu.sh` intentionally disables pooling and feature-cache refresh by default. It only accepts a pooled input that already has `X_spatial_ot_x_svd_512`, then delegates to `run.sh` with `COMPUTE_DEVICE=cuda` and `AUTO_N_CLUSTERS=1`.
 
 `obs` columns written by pooling:
 
@@ -194,11 +217,18 @@ REFRESH_PREPARED_FEATURES=1 bash run.sh                                  # rebui
 
 Defaults relevant to safety / cost (override with the matching env var):
 
-- `COMPUTE_DEVICE=cuda`, `FEATURE_OBSM_KEY=X`
-- `BASIC_NICHE_SIZE_UM=50`, `MIN_CELLS=25`, `MAX_SUBREGIONS=1500`, `STRIDE_UM=$RADIUS_UM`
-- `REQUIRE_FULL_CELL_COVERAGE=1` (fails the run if any cell falls outside all analyzed subregions)
+- `COMPUTE_DEVICE=cuda`, `FEATURE_OBSM_KEY=X_spatial_ot_x_svd_${X_FEATURE_COMPONENTS}` when `PREPARE_INPUTS_AHEAD=1` (`X` otherwise)
+- `BASIC_NICHE_SIZE_UM=50`, `MIN_CELLS=25`, `MAX_SUBREGIONS=5000`, `STRIDE_UM=$RADIUS_UM`
+- `AUTO_N_CLUSTERS=0` by default. Set `AUTO_N_CLUSTERS=1` with `CANDIDATE_N_CLUSTERS=15-25` to run pilot-based model selection before the final fit.
+- `MIN_SUBREGIONS_PER_CLUSTER=50` constrains the number of subregions per selected cluster; it does not constrain projected cell or spot counts.
+- `N_INIT=2`, `MAX_ITER=5`, `ALIGN_ITERS=2`, `GEOMETRY_SAMPLES=64`, `COMPRESSED_SUPPORT_SIZE=48` for the packaged cohort runner; raise these for a final high-depth confirmation run.
+- `SINKHORN_MAX_ITER=256`, `SINKHORN_TOL=1e-4` for CUDA OT solves in the packaged runner.
+- `SHAPE_LEAKAGE_PERMUTATIONS=16` keeps the default diagnostic pass light; raise it for publication-quality QC.
+- `LIGHT_CELL_H5AD=1`, `H5AD_COMPRESSION=lzf`, `WRITE_SAMPLE_SPATIAL_MAPS=0` keep the default cohort output fast and visualization-focused; set `LIGHT_CELL_H5AD=0` to copy the full input matrix into `cells_multilevel_ot.h5ad`.
+- `PROGRESS_LOG=1` prints major fit stages and restart completion times during long cohort runs.
+- `REQUIRE_FULL_CELL_COVERAGE=0` (capped cohort runs report incomplete analyzed-subregion coverage instead of failing; set to `1` after tuning `STRIDE_UM`, `RADIUS_UM`, and `MAX_SUBREGIONS` when every spot must have a niche-context latent occurrence)
 - `ALLOW_OBSERVED_HULL_GEOMETRY=0` (disabled — opt in only for exploratory runs)
-- `DEEP_FEATURE_METHOD=autoencoder`, `DEEP_OUTPUT_EMBEDDING=context`, `DEEP_DEVICE=cuda`. Set `DEEP_FEATURE_METHOD=none` to skip the deep adapter.
+- `DEEP_FEATURE_METHOD=none` by default for fast pooled-cohort iteration. Set `DEEP_FEATURE_METHOD=autoencoder` or `graph_autoencoder` when you intentionally want to retrain the experimental deep adapter; set `DEEP_ALLOW_JOINT_OT_EMBEDDING=1` when intentionally using the `joint` deep embedding as the OT view.
 
 ### Compute resources
 
@@ -225,7 +255,7 @@ The Python API and TOML config still accept `auto`, `cuda`, `cuda:0`, `cuda:1`, 
 - `run_spatial_ot_input.sh`: backward-compatible alias for `run.sh`
 - `run_p2_crc_multilevel_ot.sh`: pinned single-sample alias (`SAMPLE_KEY=p2_crc`)
 - `run_p2_crc_multilevel_ot_exploratory_umap.sh`: same, but switches `FEATURE_OBSM_KEY` back to `X_umap_marker_genes_3d`
-- `run_optimal_setting_search.sh`: launches a staged pooled-cohort parameter search; results land under `../work/spatial_ot_runs/cohort_optimal_search/`. Explicitly enables observed-hull fallback because the pooled bundle ships no explicit polygons — treat geometry as exploratory.
+- `run_optimal_setting_search.sh`: launches a staged pooled-cohort parameter search on the same prepared-feature + deep-context path used by `run.sh`; results land under `../work/spatial_ot_runs/cohort_optimal_search/`. Generated runs use data-driven observed-coordinate membership and geometry, so observed-hull fallback stays off unless you opt in for exploratory explicit-region runs missing geometry.
 
 ## Replotting per-sample niche maps
 
@@ -237,7 +267,17 @@ The Python API and TOML config still accept `auto`, `cuda`, `cuda:0`, `cuda:1`, 
   --plot-spatial-x-key cell_x --plot-spatial-y-key cell_y
 ```
 
-For grid-built runs, `basic_niche_size_um` sets the smallest building block used to compose larger subregions (default `50 µm`).
+Per-sample spot-latent fields are cluster-local, so they are rendered one sample and one cluster at a time:
+
+```bash
+../.venv/bin/python -m spatial_ot plot-sample-spot-latent \
+  --run-dir ../outputs/spatial_ot/cohort_multilevel_ot \
+  --output-dir ../outputs/spatial_ot/cohort_multilevel_ot/sample_spot_latent_plots \
+  --sample-obs-key sample_id \
+  --plot-spatial-x-key cell_x --plot-spatial-y-key cell_y
+```
+
+For generated runs, `basic_niche_size_um` is only a target scale hint for data-driven atomic membership seeds (default `50 µm`). Fitted subregions are mutually exclusive by construction, sparse connected pieces are merged to satisfy `min_cells`, and OT boundary geometry is learned from the observed coordinates of the cells inside each final subregion.
 
 ## Output artifacts
 
@@ -246,6 +286,7 @@ Multilevel OT writes:
 - `cells_multilevel_ot.h5ad`
 - `subregions_multilevel_ot.parquet`
 - `cluster_supports_multilevel_ot.npz`
+- `spot_level_latent_multilevel_ot.npz` with occurrence-level `(subregion, spot)` cluster-local latent coordinates
 - `multilevel_ot_spatial_map.png`, `multilevel_ot_subregion_embedding.png`, `multilevel_ot_atom_layouts.png`
 - `summary.json`
 - `deep_feature_model.pt`, `deep_feature_history.csv`, `deep_feature_config.json` (when deep features are enabled)

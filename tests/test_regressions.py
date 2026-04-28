@@ -10,7 +10,7 @@ from scipy import sparse
 import torch
 
 from spatial_ot.communication import _masked_sinkhorn
-from spatial_ot.config import DeepFeatureConfig, MultilevelExperimentConfig, TrainingConfig, load_config
+from spatial_ot.config import DeepFeatureConfig, MultilevelExperimentConfig, TrainingConfig, load_config, validate_multilevel_config
 from spatial_ot.nn import aggregate_mean, sample_negative_edges
 from spatial_ot.ot import _build_shell_ground
 from spatial_ot.preprocessing import _extract_cell_types, _resolve_raw_counts, _spatial_grid_subset, aggregate_mean_numpy, aggregate_sum_numpy
@@ -214,3 +214,32 @@ def test_auto_device_defaults_are_explicit() -> None:
     assert TrainingConfig().device == "auto"
     assert DeepFeatureConfig().device == "auto"
     assert MultilevelExperimentConfig().ot.compute_device == "auto"
+
+
+def test_multilevel_config_rejects_zero_geometry_and_feature_weights() -> None:
+    config = MultilevelExperimentConfig()
+    config.paths.input_h5ad = "input.h5ad"
+    config.paths.output_dir = "out"
+    config.paths.feature_obsm_key = "X"
+    config.ot.lambda_x = 0.0
+    config.ot.lambda_y = 0.0
+    try:
+        validate_multilevel_config(config)
+    except ValueError as exc:
+        assert "lambda_x or lambda_y" in str(exc)
+    else:
+        raise AssertionError("Expected zero lambda_x/lambda_y to be rejected")
+
+
+def test_multilevel_config_requires_region_obs_key_for_region_geometry_json() -> None:
+    config = MultilevelExperimentConfig()
+    config.paths.input_h5ad = "input.h5ad"
+    config.paths.output_dir = "out"
+    config.paths.feature_obsm_key = "X"
+    config.paths.region_geometry_json = "regions.json"
+    try:
+        validate_multilevel_config(config)
+    except ValueError as exc:
+        assert "region_obs_key" in str(exc)
+    else:
+        raise AssertionError("Expected region_geometry_json without region_obs_key to be rejected")

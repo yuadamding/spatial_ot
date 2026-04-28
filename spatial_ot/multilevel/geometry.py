@@ -7,13 +7,15 @@ import numpy as np
 import ot
 import pandas as pd
 from scipy.interpolate import RBFInterpolator
+from scipy.sparse.csgraph import connected_components
 from scipy.spatial import ConvexHull
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.neighbors import NearestNeighbors
 import torch
 
+from .runtime import env_float as _env_float, env_int as _env_int
 from .types import RegionGeometry, ShapeNormalizer, ShapeNormalizerDiagnostics
 
 
@@ -34,6 +36,22 @@ def _normalize_hist(x: np.ndarray) -> np.ndarray:
     return x / total
 
 
+def _sinkhorn_max_iter() -> int:
+    return _env_int("SPATIAL_OT_SINKHORN_MAX_ITER", 600)
+
+
+def _sinkhorn_tol() -> float:
+    return _env_float("SPATIAL_OT_SINKHORN_TOL", 1e-5)
+
+
+def _cpu_sinkhorn_max_iter() -> int:
+    return _env_int("SPATIAL_OT_CPU_SINKHORN_MAX_ITER", 3000)
+
+
+def _cpu_sinkhorn_tol() -> float:
+    return _env_float("SPATIAL_OT_CPU_SINKHORN_TOL", 1e-8)
+
+
 def _softmax_over_negative_costs(costs: np.ndarray, temperature: float) -> np.ndarray:
     scaled = -np.asarray(costs, dtype=np.float32) / max(float(temperature), 1e-5)
     scaled = scaled - scaled.max(axis=1, keepdims=True)
@@ -42,43 +60,332 @@ def _softmax_over_negative_costs(costs: np.ndarray, temperature: float) -> np.nd
     return probs.astype(np.float32)
 
 
-def _subsample_grid_points(points: np.ndarray, target: int) -> np.ndarray:
-    if target <= 0 or points.shape[0] <= target:
-        return np.arange(points.shape[0], dtype=np.int32)
-    x = points[:, 0]
-    y = points[:, 1]
-    x0, x1 = float(x.min()), float(x.max())
-    y0, y1 = float(y.min()), float(y.max())
-    xr = max(x1 - x0, 1e-6)
-    yr = max(y1 - y0, 1e-6)
-    aspect = xr / yr
-    nx = max(1, int(round(np.sqrt(target * aspect))))
-    ny = max(1, int(round(target / max(nx, 1))))
-    gx = np.clip(((x - x0) / xr * nx).astype(np.int32), 0, nx - 1)
-    gy = np.clip(((y - y0) / yr * ny).astype(np.int32), 0, ny - 1)
-    flat = gy * nx + gx
-    selected: list[int] = []
-    for cell in np.unique(flat):
-        idx = np.flatnonzero(flat == cell)
-        cell_x = x0 + ((cell % nx) + 0.5) * xr / nx
-        cell_y = y0 + ((cell // nx) + 0.5) * yr / ny
-        d = (x[idx] - cell_x) ** 2 + (y[idx] - cell_y) ** 2
-        selected.append(int(idx[np.argmin(d)]))
-        if len(selected) >= target:
+def _center_from_members(coords_um: np.ndarray, members: np.ndarray) -> np.ndarray:
+    return np.asarray(coords_um, dtype=np.float32)[np.asarray(members, dtype=np.int32)].mean(axis=0).astype(np.float32)
+
+
+def _target_data_driven_region_count(
+    coords_um: np.ndarray,
+    *,
+    target_scale_um: float,
+    min_cells: int,
+    max_subregions: int,
+) -> int:
+    coords = np.asarray(coords_um, dtype=np.float32)
+    n_cells = int(coords.shape[0])
+    if n_cells == 0:
+        raise RuntimeError("No cells were provided, so no subregions can be created.")
+    min_cells = max(int(min_cells), 1)
+    max_by_min = max(1, n_cells // min_cells)
+    target_scale = max(float(target_scale_um), 1e-6)
+    span = np.maximum(np.ptp(coords, axis=0), target_scale)
+    spatial_estimate = int(np.ceil(float(span[0] * span[1]) / max(target_scale * target_scale, 1e-6)))
+    size_estimate = int(np.ceil(n_cells / max(min_cells * 4, 64)))
+    data_estimate = max(spatial_estimate, size_estimate)
+    cap = int(max_subregions) if int(max_subregions) > 0 else n_cells
+    return max(1, min(data_estimate, cap, max_by_min, n_cells))
+
+
+def _subregion_seed_kmeans_n_init() -> int:
+    return max(1, _env_int("SPATIAL_OT_SUBREGION_KMEANS_N_INIT", 1))
+
+
+def _subregion_seed_kmeans_max_iter() -> int:
+    return max(5, _env_int("SPATIAL_OT_SUBREGION_KMEANS_MAX_ITER", 50))
+
+
+def _fit_coordinate_seed_partition(
+    coords_um: np.ndarray,
+    *,
+    target_count: int,
+    seed: int,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    coords = np.asarray(coords_um, dtype=np.float32)
+    n_cells = int(coords.shape[0])
+    target_count = max(1, min(int(target_count), n_cells))
+    if target_count == 1:
+        members = [np.arange(n_cells, dtype=np.int32)]
+        return np.asarray([coords.mean(axis=0)], dtype=np.float32), members
+
+    centered = coords - coords.mean(axis=0, keepdims=True)
+    scale = float(np.sqrt(np.mean(np.sum(centered * centered, axis=1))))
+    scale = max(scale, 1e-6)
+    x = (centered / scale).astype(np.float32)
+    batch_size = min(n_cells, max(4096, int(target_count) * 8))
+    model = MiniBatchKMeans(
+        n_clusters=target_count,
+        random_state=int(seed),
+        batch_size=batch_size,
+        n_init=_subregion_seed_kmeans_n_init(),
+        max_iter=_subregion_seed_kmeans_max_iter(),
+        reassignment_ratio=0.0,
+    )
+    labels = model.fit_predict(x).astype(np.int32)
+    centers: list[np.ndarray] = []
+    members: list[np.ndarray] = []
+    for label in np.unique(labels).tolist():
+        member = np.flatnonzero(labels == int(label)).astype(np.int32)
+        if member.size == 0:
+            continue
+        members.append(member)
+        centers.append(_center_from_members(coords, member))
+    return np.vstack(centers).astype(np.float32), members
+
+
+def _estimate_connectivity_radius_um(
+    coords_um: np.ndarray,
+    *,
+    target_scale_um: float,
+    sample_size: int = 50000,
+) -> float:
+    coords = np.asarray(coords_um, dtype=np.float32)
+    if coords.shape[0] < 2:
+        return float("inf")
+    if coords.shape[0] > int(sample_size):
+        keep = np.linspace(0, coords.shape[0] - 1, num=int(sample_size), dtype=np.int64)
+        sample = coords[keep]
+    else:
+        sample = coords
+    nn = NearestNeighbors(n_neighbors=2, metric="euclidean")
+    nn.fit(sample)
+    distances = nn.kneighbors(sample, return_distance=True)[0][:, 1]
+    finite = distances[np.isfinite(distances) & (distances > 0)]
+    if finite.size == 0:
+        return max(float(target_scale_um) * 0.5, 1e-6)
+    local_radius = float(np.quantile(finite, 0.95)) * 4.0
+    scale_radius = float(target_scale_um) * 0.5
+    return max(local_radius, scale_radius, 1e-6)
+
+
+def _split_members_by_spatial_connectivity(
+    *,
+    coords_um: np.ndarray,
+    members: list[np.ndarray],
+    connectivity_radius_um: float,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    coords = np.asarray(coords_um, dtype=np.float32)
+    out_members: list[np.ndarray] = []
+    out_centers: list[np.ndarray] = []
+    radius = float(connectivity_radius_um)
+    for member in members:
+        member_arr = np.asarray(member, dtype=np.int32)
+        if member_arr.size <= 2 or not np.isfinite(radius):
+            out_members.append(np.sort(member_arr).astype(np.int32))
+            out_centers.append(_center_from_members(coords, member_arr))
+            continue
+        local = coords[member_arr]
+        nn = NearestNeighbors(radius=radius, metric="euclidean")
+        nn.fit(local)
+        graph = nn.radius_neighbors_graph(local, mode="connectivity")
+        graph = graph.maximum(graph.T)
+        n_components, component_labels = connected_components(graph, directed=False, return_labels=True)
+        if n_components <= 1:
+            out_members.append(np.sort(member_arr).astype(np.int32))
+            out_centers.append(_center_from_members(coords, member_arr))
+            continue
+        for cid in range(int(n_components)):
+            component = np.sort(member_arr[np.flatnonzero(component_labels == cid)]).astype(np.int32)
+            if component.size == 0:
+                continue
+            out_members.append(component)
+            out_centers.append(_center_from_members(coords, component))
+    return np.vstack(out_centers).astype(np.float32), out_members
+
+
+def _labels_from_partition(n_cells: int, members: list[np.ndarray]) -> np.ndarray:
+    labels = np.full(int(n_cells), -1, dtype=np.int32)
+    for idx, member in enumerate(members):
+        labels[np.asarray(member, dtype=np.int64)] = int(idx)
+    return labels
+
+
+def _sort_partition_by_center(
+    centers_um: np.ndarray,
+    members: list[np.ndarray],
+    component_ids: list[np.ndarray],
+) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
+    centers = np.asarray(centers_um, dtype=np.float32)
+    if centers.shape[0] == 0:
+        return centers, members, component_ids
+    order = np.lexsort((centers[:, 1], centers[:, 0]))
+    return (
+        centers[order].astype(np.float32),
+        [np.asarray(members[int(idx)], dtype=np.int32) for idx in order.tolist()],
+        [np.asarray(component_ids[int(idx)], dtype=np.int32) for idx in order.tolist()],
+    )
+
+
+def _region_adjacency_from_knn(
+    coords_um: np.ndarray,
+    members: list[np.ndarray],
+    *,
+    n_neighbors: int = 8,
+) -> list[set[int]]:
+    coords = np.asarray(coords_um, dtype=np.float32)
+    n_cells = int(coords.shape[0])
+    n_regions = len(members)
+    adjacency = [set() for _ in range(n_regions)]
+    if n_cells < 2 or n_regions < 2:
+        return adjacency
+    labels = _labels_from_partition(n_cells, members)
+    nn = NearestNeighbors(n_neighbors=min(int(n_neighbors) + 1, n_cells), metric="euclidean")
+    nn.fit(coords)
+    neigh = nn.kneighbors(coords, return_distance=False)[:, 1:]
+    row_labels = np.repeat(labels, neigh.shape[1])
+    col_labels = labels[neigh.reshape(-1)]
+    mask = (row_labels >= 0) & (col_labels >= 0) & (row_labels != col_labels)
+    for src, dst in zip(row_labels[mask].tolist(), col_labels[mask].tolist(), strict=False):
+        adjacency[int(src)].add(int(dst))
+        adjacency[int(dst)].add(int(src))
+    return adjacency
+
+
+def _merge_data_driven_regions(
+    *,
+    coords_um: np.ndarray,
+    centers_um: np.ndarray,
+    members: list[np.ndarray],
+    component_ids: list[np.ndarray],
+    min_cells: int,
+    max_subregions: int,
+) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
+    min_cells = int(min_cells)
+    if min_cells < 1:
+        raise ValueError("min_cells must be at least 1.")
+    total_cells = int(sum(np.asarray(member, dtype=np.int32).size for member in members))
+    if total_cells < min_cells:
+        raise RuntimeError("No valid subregions can be created because the full partition is smaller than min_cells.")
+
+    coords = np.asarray(coords_um, dtype=np.float32)
+    centers = [np.asarray(center, dtype=np.float32) for center in np.asarray(centers_um, dtype=np.float32)]
+    member_list = [np.asarray(member, dtype=np.int32) for member in members]
+    id_list = [np.asarray(ids, dtype=np.int32) for ids in component_ids]
+    active = np.ones(len(member_list), dtype=bool)
+    adjacency = _region_adjacency_from_knn(coords, member_list)
+
+    def active_indices() -> np.ndarray:
+        return np.flatnonzero(active)
+
+    while int(np.sum(active)) > 1:
+        active_idx = active_indices()
+        sizes = np.asarray([member_list[idx].size for idx in active_idx], dtype=np.int64)
+        small = active_idx[sizes < min_cells]
+        if small.size:
+            source = int(small[np.argmin([member_list[idx].size for idx in small])])
+        elif int(max_subregions) > 0 and active_idx.size > int(max_subregions):
+            source = int(active_idx[np.argmin(sizes)])
+        else:
             break
-    selected = np.asarray(sorted(set(selected)), dtype=np.int32)
-    if selected.size < target:
-        remaining = np.setdiff1d(np.arange(points.shape[0], dtype=np.int32), selected, assume_unique=False)
-        selected = np.concatenate([selected, remaining[: target - selected.size]])
-    return np.sort(selected[:target])
+
+        candidates = [idx for idx in adjacency[source] if active[int(idx)] and int(idx) != source]
+        if candidates:
+            target_pool = np.asarray(candidates, dtype=np.int32)
+        else:
+            target_pool = active_idx[active_idx != source]
+        center_arr = np.vstack([centers[int(idx)] for idx in target_pool]).astype(np.float32)
+        delta = center_arr - centers[source]
+        target = int(target_pool[int(np.argmin(np.sum(delta * delta, axis=1)))])
+
+        merged_members = np.unique(np.concatenate([member_list[target], member_list[source]])).astype(np.int32)
+        merged_ids = np.unique(np.concatenate([id_list[target], id_list[source]])).astype(np.int32)
+        member_list[target] = merged_members
+        id_list[target] = merged_ids
+        centers[target] = _center_from_members(coords, merged_members)
+
+        active[source] = False
+        source_neighbors = set(adjacency[source])
+        adjacency[target].update(source_neighbors)
+        adjacency[target].discard(source)
+        adjacency[target].discard(target)
+        for neighbor in source_neighbors:
+            adjacency[int(neighbor)].discard(source)
+            if active[int(neighbor)] and int(neighbor) != target:
+                adjacency[int(neighbor)].add(target)
+        adjacency[source].clear()
+
+    active_idx = active_indices()
+    out_members = [np.asarray(member_list[int(idx)], dtype=np.int32) for idx in active_idx.tolist()]
+    if any(member.size < min_cells for member in out_members):
+        raise RuntimeError("No valid subregions remain after enforcing min_cells.")
+    out_ids = [np.asarray(id_list[int(idx)], dtype=np.int32) for idx in active_idx.tolist()]
+    out_centers = np.vstack([centers[int(idx)] for idx in active_idx.tolist()]).astype(np.float32)
+    return out_centers, out_members, out_ids
 
 
-def _grid_centers(coords_um: np.ndarray, stride_um: float) -> np.ndarray:
-    x = np.asarray(coords_um[:, 0], dtype=np.float32)
-    y = np.asarray(coords_um[:, 1], dtype=np.float32)
-    x_centers = np.arange(float(x.min()), float(x.max()) + stride_um, stride_um, dtype=np.float32)
-    y_centers = np.arange(float(y.min()), float(y.max()) + stride_um, stride_um, dtype=np.float32)
-    return np.stack(np.meshgrid(x_centers, y_centers), axis=-1).reshape(-1, 2).astype(np.float32)
+def build_data_driven_subregions(
+    coords_um: np.ndarray,
+    radius_um: float,
+    stride_um: float,
+    min_cells: int,
+    max_subregions: int,
+    *,
+    target_scale_um: float | None = None,
+    seed: int = 1337,
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
+    del radius_um
+    coords = np.asarray(coords_um, dtype=np.float32)
+    if coords.shape[0] == 0:
+        raise RuntimeError("No cells were provided, so no subregions can be created.")
+    scale_um = float(target_scale_um) if target_scale_um is not None else float(stride_um)
+    if scale_um <= 0 or float(stride_um) <= 0:
+        raise ValueError("target scale and stride_um must be positive.")
+
+    target_count = _target_data_driven_region_count(
+        coords,
+        target_scale_um=scale_um,
+        min_cells=int(min_cells),
+        max_subregions=int(max_subregions),
+    )
+    _, seed_members = _fit_coordinate_seed_partition(coords, target_count=target_count, seed=int(seed))
+    connectivity_radius = _estimate_connectivity_radius_um(coords, target_scale_um=scale_um)
+    basic_centers, basic_members = _split_members_by_spatial_connectivity(
+        coords_um=coords,
+        members=seed_members,
+        connectivity_radius_um=connectivity_radius,
+    )
+    basic_ids = [np.asarray([idx], dtype=np.int32) for idx in range(len(basic_members))]
+    subregion_centers, subregion_members, subregion_basic_ids = _merge_data_driven_regions(
+        coords_um=coords,
+        centers_um=basic_centers,
+        members=basic_members,
+        component_ids=basic_ids,
+        min_cells=int(min_cells),
+        max_subregions=int(max_subregions),
+    )
+    subregion_centers, subregion_members, subregion_basic_ids = _sort_partition_by_center(
+        subregion_centers,
+        subregion_members,
+        subregion_basic_ids,
+    )
+    _validate_mutually_exclusive_memberships(coords.shape[0], subregion_members, require_full_coverage=True)
+    return (
+        subregion_centers.astype(np.float32),
+        [np.asarray(member, dtype=np.int32) for member in subregion_members],
+        basic_centers.astype(np.float32),
+        [np.asarray(member, dtype=np.int32) for member in basic_members],
+        [np.asarray(ids, dtype=np.int32) for ids in subregion_basic_ids],
+    )
+
+def _validate_mutually_exclusive_memberships(
+    n_cells: int,
+    members: list[np.ndarray],
+    *,
+    require_full_coverage: bool = False,
+) -> None:
+    counts = np.zeros(int(n_cells), dtype=np.int32)
+    for member in members:
+        member_arr = np.asarray(member, dtype=np.int64)
+        if member_arr.size == 0:
+            raise RuntimeError("Constructed subregions must not be empty.")
+        if int(member_arr.min()) < 0 or int(member_arr.max()) >= int(n_cells):
+            raise RuntimeError("Constructed subregions contain out-of-range cell indices.")
+        if np.unique(member_arr).size != member_arr.size:
+            raise RuntimeError("Constructed subregions contain duplicate cell indices.")
+        np.add.at(counts, member_arr, 1)
+    if int(counts.max(initial=0)) > 1:
+        raise RuntimeError("Constructed subregions are not mutually exclusive.")
+    if bool(require_full_coverage) and (counts.size == 0 or int(counts.min()) < 1):
+        raise RuntimeError("Constructed subregions do not cover every cell exactly once.")
 
 
 def build_subregions(
@@ -88,30 +395,39 @@ def build_subregions(
     min_cells: int,
     max_subregions: int,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
-    centers = _grid_centers(coords_um=coords_um, stride_um=stride_um)
+    subregion_centers, subregion_members, _, _, _ = build_data_driven_subregions(
+        coords_um=coords_um,
+        radius_um=radius_um,
+        stride_um=stride_um,
+        min_cells=min_cells,
+        max_subregions=max_subregions,
+    )
+    return subregion_centers, subregion_members
 
-    nn = NearestNeighbors(radius=radius_um, metric="euclidean")
-    nn.fit(coords_um)
-    memberships = nn.radius_neighbors(centers, return_distance=False)
 
-    kept_centers: list[np.ndarray] = []
-    kept_members: list[np.ndarray] = []
-    for center, members in zip(centers, memberships, strict=False):
-        if members.size < min_cells:
-            continue
-        kept_centers.append(center.astype(np.float32))
-        kept_members.append(np.asarray(members, dtype=np.int32))
+def build_partition_subregions_from_grid_tiles(
+    coords_um: np.ndarray,
+    radius_um: float,
+    stride_um: float,
+    min_cells: int,
+    max_subregions: int,
+    *,
+    seed: int = 1337,
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
+    """Backward-compatible alias for data-driven subregion construction.
 
-    if not kept_centers:
-        raise RuntimeError("No valid subregions were created; lower min_cells or increase the radius.")
-
-    centers_arr = np.vstack(kept_centers).astype(np.float32)
-    if max_subregions > 0 and centers_arr.shape[0] > max_subregions:
-        keep_idx = _subsample_grid_points(centers_arr, target=max_subregions)
-        centers_arr = centers_arr[keep_idx]
-        kept_members = [kept_members[int(i)] for i in keep_idx.tolist()]
-
-    return centers_arr, kept_members
+    The name is retained so older scripts keep running; no grid tiles or square
+    proposal regions are constructed here.
+    """
+    return build_data_driven_subregions(
+        coords_um=coords_um,
+        radius_um=radius_um,
+        stride_um=stride_um,
+        min_cells=min_cells,
+        max_subregions=max_subregions,
+        target_scale_um=float(stride_um),
+        seed=int(seed),
+    )
 
 
 def build_basic_niches(
@@ -120,46 +436,20 @@ def build_basic_niches(
     min_cells: int,
     max_subregions: int,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
-    coords = np.asarray(coords_um, dtype=np.float32)
-    if coords.shape[0] == 0:
-        raise RuntimeError("No cells were provided, so no basic niches can be created.")
+    """Build mutually exclusive data-driven atomic subregions.
 
-    niche_size_um = float(niche_size_um)
-    x0 = float(coords[:, 0].min())
-    y0 = float(coords[:, 1].min())
-    # Assign each cell to its nearest niche center on the fixed-size grid so the
-    # basic niches tile space without the pi/4 coverage loss from inscribed circles.
-    grid_x = np.floor((coords[:, 0] - x0) / niche_size_um + 0.5).astype(np.int32)
-    grid_y = np.floor((coords[:, 1] - y0) / niche_size_um + 0.5).astype(np.int32)
-
-    niche_members: dict[tuple[int, int], list[int]] = {}
-    for cell_idx, (ix, iy) in enumerate(zip(grid_x.tolist(), grid_y.tolist(), strict=False)):
-        niche_members.setdefault((int(ix), int(iy)), []).append(int(cell_idx))
-
-    kept_centers: list[np.ndarray] = []
-    kept_members: list[np.ndarray] = []
-    for ix, iy in sorted(niche_members):
-        members = np.asarray(niche_members[(ix, iy)], dtype=np.int32)
-        if members.size < min_cells:
-            continue
-        kept_centers.append(
-            np.asarray(
-                [x0 + float(ix) * niche_size_um, y0 + float(iy) * niche_size_um],
-                dtype=np.float32,
-            )
-        )
-        kept_members.append(members)
-
-    if not kept_centers:
-        raise RuntimeError("No valid basic niches were created; lower min_cells or decrease basic_niche_size_um.")
-
-    centers_arr = np.vstack(kept_centers).astype(np.float32)
-    if max_subregions > 0 and centers_arr.shape[0] > max_subregions:
-        keep_idx = _subsample_grid_points(centers_arr, target=max_subregions)
-        centers_arr = centers_arr[keep_idx]
-        kept_members = [kept_members[int(i)] for i in keep_idx.tolist()]
-
-    return centers_arr, kept_members
+    ``niche_size_um`` is a scale hint for the seed partition, not a fixed
+    square/circular window size.
+    """
+    centers, members, _, _, _ = build_data_driven_subregions(
+        coords_um=coords_um,
+        radius_um=float(niche_size_um),
+        stride_um=float(niche_size_um),
+        min_cells=int(min_cells),
+        max_subregions=int(max_subregions),
+        target_scale_um=float(niche_size_um),
+    )
+    return centers, members
 
 
 def build_composite_subregions_from_basic_niches(
@@ -169,86 +459,32 @@ def build_composite_subregions_from_basic_niches(
     min_cells: int,
     max_subregions: int,
     basic_niche_size_um: float,
+    *,
+    seed: int = 1337,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
-    basic_niche_size_um = float(basic_niche_size_um)
-    basic_niche_half_size_um = 0.5 * basic_niche_size_um
-    basic_niche_cover_radius_um = float(np.sqrt(2.0) * basic_niche_half_size_um)
-    basic_centers_um, basic_members = build_basic_niches(
+    """Build data-driven subregions plus atomic seed provenance."""
+    return build_data_driven_subregions(
         coords_um=coords_um,
-        niche_size_um=basic_niche_size_um,
-        min_cells=1,
-        max_subregions=0,
+        radius_um=radius_um,
+        stride_um=stride_um,
+        min_cells=min_cells,
+        max_subregions=max_subregions,
+        target_scale_um=float(basic_niche_size_um),
+        seed=int(seed),
     )
 
-    if radius_um <= basic_niche_cover_radius_um + 1e-6:
-        kept_idx = [idx for idx, members in enumerate(basic_members) if np.asarray(members).size >= min_cells]
-        if not kept_idx:
-            raise RuntimeError(
-                "No valid basic niches were created; lower min_cells, decrease basic_niche_size_um, or increase the radius."
-            )
-        subregion_centers_um = basic_centers_um[np.asarray(kept_idx, dtype=np.int32)].astype(np.float32, copy=True)
-        subregion_members = [np.asarray(basic_members[idx], dtype=np.int32) for idx in kept_idx]
-        subregion_basic_niche_ids = [np.asarray([idx], dtype=np.int32) for idx in kept_idx]
-        if max_subregions > 0 and subregion_centers_um.shape[0] > max_subregions:
-            keep_idx = _subsample_grid_points(subregion_centers_um, target=max_subregions)
-            subregion_centers_um = subregion_centers_um[keep_idx]
-            subregion_members = [subregion_members[int(i)] for i in keep_idx.tolist()]
-            subregion_basic_niche_ids = [subregion_basic_niche_ids[int(i)] for i in keep_idx.tolist()]
-        return (
-            subregion_centers_um,
-            subregion_members,
-            basic_centers_um.astype(np.float32),
-            [np.asarray(members, dtype=np.int32) for members in basic_members],
-            subregion_basic_niche_ids,
+
+def _region_geometries_from_observed_points(
+    subregion_members: list[np.ndarray],
+) -> list[RegionGeometry]:
+    return [
+        RegionGeometry(
+            region_id=f"region_{idx:04d}",
+            members=np.asarray(members, dtype=np.int32),
+            use_observed_geometry=True,
         )
-
-    candidate_centers_um = _grid_centers(coords_um=coords_um, stride_um=stride_um)
-    composite_radius_um = max(float(radius_um), basic_niche_cover_radius_um)
-    niche_selection_radius_um = composite_radius_um + basic_niche_cover_radius_um
-
-    nn = NearestNeighbors(radius=niche_selection_radius_um, metric="euclidean")
-    nn.fit(basic_centers_um)
-    niche_memberships = nn.radius_neighbors(candidate_centers_um, return_distance=False)
-
-    kept_centers: list[np.ndarray] = []
-    kept_members: list[np.ndarray] = []
-    kept_niche_ids: list[np.ndarray] = []
-    seen_niche_sets: set[tuple[int, ...]] = set()
-    for center_um, niche_ids in zip(candidate_centers_um, niche_memberships, strict=False):
-        if niche_ids.size == 0:
-            continue
-        niche_ids = np.asarray(np.unique(niche_ids), dtype=np.int32)
-        niche_key = tuple(int(x) for x in niche_ids.tolist())
-        if niche_key in seen_niche_sets:
-            continue
-        members = np.unique(np.concatenate([basic_members[int(niche_id)] for niche_id in niche_ids.tolist()])).astype(np.int32)
-        if members.size < min_cells:
-            continue
-        seen_niche_sets.add(niche_key)
-        kept_centers.append(np.asarray(center_um, dtype=np.float32))
-        kept_members.append(members)
-        kept_niche_ids.append(niche_ids)
-
-    if not kept_centers:
-        raise RuntimeError(
-            "No valid composite subregions were created from the basic niches; "
-            "lower min_cells, decrease basic_niche_size_um, or increase the radius."
-        )
-
-    subregion_centers_um = np.vstack(kept_centers).astype(np.float32)
-    if max_subregions > 0 and subregion_centers_um.shape[0] > max_subregions:
-        keep_idx = _subsample_grid_points(subregion_centers_um, target=max_subregions)
-        subregion_centers_um = subregion_centers_um[keep_idx]
-        kept_members = [kept_members[int(i)] for i in keep_idx.tolist()]
-        kept_niche_ids = [kept_niche_ids[int(i)] for i in keep_idx.tolist()]
-
-    return (
-        subregion_centers_um,
-        kept_members,
-        basic_centers_um.astype(np.float32),
-        [np.asarray(members, dtype=np.int32) for members in basic_members],
-        kept_niche_ids,
-    )
+        for idx, members in enumerate(subregion_members)
+    ]
 
 
 def _triangle_area(tri: np.ndarray) -> float:
@@ -309,6 +545,25 @@ def _sample_uniform_points_in_convex_hull(coords: np.ndarray, n_points: int, see
             continue
         samples.append(_sample_points_in_triangle(triangles[idx], count, rng))
     return np.vstack(samples).astype(np.float32)
+
+
+def _sample_observed_point_cloud_geometry(
+    observed_coords: np.ndarray,
+    n_points: int,
+    seed: int,
+) -> np.ndarray:
+    coords = np.asarray(observed_coords, dtype=np.float64)
+    if coords.size == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    coords = coords[np.all(np.isfinite(coords), axis=1)]
+    if coords.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    coords = np.unique(coords, axis=0)
+    if coords.shape[0] <= int(n_points):
+        return coords.astype(np.float32)
+    rng = np.random.default_rng(seed)
+    keep = rng.choice(coords.shape[0], size=int(n_points), replace=False)
+    return coords[np.sort(keep)].astype(np.float32)
 
 
 def _sample_uniform_points_in_polygon_components(
@@ -404,6 +659,11 @@ def sample_geometry_points(
         if pts.shape[0] > 0:
             return pts, "polygon", False
         raise ValueError(f"Region '{region_geometry.region_id}' provided polygon geometry but sampling produced no points.")
+    if bool(getattr(region_geometry, "use_observed_geometry", False)):
+        pts = _sample_observed_point_cloud_geometry(observed_coords, n_points=n_points, seed=seed)
+        if pts.shape[0] == 0:
+            raise ValueError(f"Region '{region_geometry.region_id}' has no observed coordinates for data-driven geometry.")
+        return pts, "observed_point_cloud", False
     if not allow_convex_hull_fallback:
         raise ValueError(
             f"Region '{region_geometry.region_id}' has no explicit geometry. "
@@ -489,6 +749,8 @@ def _shape_descriptor_frame(
     coords_um: np.ndarray,
     region_geometries: list[RegionGeometry] | None = None,
 ) -> pd.DataFrame:
+    if region_geometries is not None and len(region_geometries) != len(subregion_members):
+        raise ValueError("region_geometries must have the same length as subregion_members for shape descriptors.")
     rows = []
     for rid, members in enumerate(subregion_members):
         source = "observed_coordinate_hull"
@@ -511,6 +773,9 @@ def _shape_descriptor_frame(
             elif region.polygon_vertices is not None and np.asarray(region.polygon_vertices).shape[0] >= 3:
                 desc = _subregion_shape_descriptors(np.asarray(region.polygon_vertices, dtype=np.float64))
                 source = "explicit_polygon"
+            elif bool(getattr(region, "use_observed_geometry", False)):
+                desc = _subregion_shape_descriptors(coords_um[members])
+                source = "observed_point_cloud"
             else:
                 desc = _subregion_shape_descriptors(coords_um[members])
         else:
@@ -596,6 +861,13 @@ def _shape_leakage_permutation_baseline(
     observed = _shape_leakage_balanced_accuracy(shape_df, labels, seed=seed)
     if observed is None:
         return None
+    if int(n_perm) <= 0:
+        return {
+            "observed": float(observed),
+            "perm_mean": float("nan"),
+            "perm_p95": float("nan"),
+            "excess": float("nan"),
+        }
     rng = np.random.default_rng(seed)
     perm_scores = []
     for _ in range(int(n_perm)):
@@ -661,6 +933,8 @@ def _validate_fit_inputs(
         raise ValueError("max_subregions must be positive or 0.")
     if lambda_x < 0 or lambda_y < 0:
         raise ValueError("lambda_x and lambda_y must be non-negative.")
+    if lambda_x == 0 and lambda_y == 0:
+        raise ValueError("at least one of lambda_x or lambda_y must be positive.")
     if geometry_eps <= 0 or ot_eps <= 0:
         raise ValueError("geometry_eps and ot_eps must be positive.")
     if rho <= 0:
@@ -725,8 +999,8 @@ def _gpu_balanced_sinkhorn_transport(
         b_t,
         c,
         eps=max(float(eps_geom), 1e-5),
-        num_iter=600,
-        tol=1e-5,
+        num_iter=_sinkhorn_max_iter(),
+        tol=_sinkhorn_tol(),
     )
     if not bool(torch.isfinite(t).all().item()):
         # Re-try with a more relaxed regulariser before falling back to numpy.
@@ -736,8 +1010,8 @@ def _gpu_balanced_sinkhorn_transport(
                 b_t,
                 c,
                 eps=fallback_eps,
-                num_iter=600,
-                tol=1e-5,
+                num_iter=_sinkhorn_max_iter(),
+                tol=_sinkhorn_tol(),
             )
             if bool(torch.isfinite(t).all().item()):
                 break
@@ -797,7 +1071,8 @@ def fit_ot_shape_normalizer(
         raise ValueError("geometry_points contains NaN or Inf.")
     if not np.all(np.isfinite(q)):
         raise ValueError("reference_points contains NaN or Inf.")
-    if g.shape[0] < 3:
+    centered_geometry = g - g.mean(axis=0, keepdims=True)
+    if g.shape[0] < 3 or int(np.linalg.matrix_rank(centered_geometry, tol=1e-8)) < 2:
         return _fit_degenerate_shape_normalizer(g)
 
     g_norm, center, scale = _normalize_coords_basic(g)
@@ -837,8 +1112,8 @@ def fit_ot_shape_normalizer(
                 c,
                 reg=max(float(eps_geom), 1e-5),
                 method="sinkhorn_stabilized",
-                numItermax=3000,
-                stopThr=1e-8,
+                numItermax=_cpu_sinkhorn_max_iter(),
+                stopThr=_cpu_sinkhorn_tol(),
                 warn=False,
                 log=True,
             )
@@ -846,7 +1121,7 @@ def fit_ot_shape_normalizer(
             g_mapped = (t @ q) / row_mass
             ot_cost = float(np.sum(t * c))
             err_hist = np.asarray(log.get("err", []), dtype=np.float64)
-            sinkhorn_converged = bool(err_hist.size == 0 or err_hist[-1] < 1e-7)
+            sinkhorn_converged = bool(err_hist.size == 0 or err_hist[-1] < _cpu_sinkhorn_tol())
         radius = np.sqrt(np.sum(g_mapped**2, axis=1))
         mapped_radius_p95 = float(np.percentile(radius, 95)) if radius.size else 0.0
         mapped_radius_max = float(radius.max()) if radius.size else 0.0

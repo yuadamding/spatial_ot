@@ -58,6 +58,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     pool_helper_sh = (repo_root / "pool_spatial_ot_input.sh").read_text()
     prepare_helper_sh = (repo_root / "prepare_spatial_ot_input.sh").read_text()
     prepare_all_helper_sh = (repo_root / "prepare_all_spatial_ot_input.sh").read_text()
+    prepared_gpu_sh = (repo_root / "run_prepared_cohort_gpu.sh").read_text()
     p2_sh = (repo_root / "run_p2_crc_multilevel_ot.sh").read_text()
     exploratory_sh = (repo_root / "run_p2_crc_multilevel_ot_exploratory_umap.sh").read_text()
     config_toml = (repo_root / "configs" / "multilevel_deep_example.toml").read_text()
@@ -76,23 +77,43 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'STRIDE_UM="${STRIDE_UM:-$RADIUS_UM}"' in run_sh
     assert 'BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-50}"' in run_sh
     assert 'MIN_CELLS="${MIN_CELLS:-25}"' in run_sh
-    assert 'MAX_SUBREGIONS="${MAX_SUBREGIONS:-1500}"' in run_sh
-    assert 'REQUIRE_FULL_CELL_COVERAGE="${REQUIRE_FULL_CELL_COVERAGE:-1}"' in run_sh
+    assert 'MAX_SUBREGIONS="${MAX_SUBREGIONS:-5000}"' in run_sh
+    assert 'AUTO_N_CLUSTERS="${AUTO_N_CLUSTERS:-0}"' in run_sh
+    assert 'CANDIDATE_N_CLUSTERS="${CANDIDATE_N_CLUSTERS:-15-25}"' in run_sh
+    assert 'MIN_SUBREGIONS_PER_CLUSTER="${MIN_SUBREGIONS_PER_CLUSTER:-50}"' in run_sh
+    assert 'AUTO_K_MAX_SCORE_SUBREGIONS="${AUTO_K_MAX_SCORE_SUBREGIONS:-2500}"' in run_sh
+    assert 'AUTO_K_GAP_REFERENCES="${AUTO_K_GAP_REFERENCES:-8}"' in run_sh
+    assert 'AUTO_K_MDS_COMPONENTS="${AUTO_K_MDS_COMPONENTS:-8}"' in run_sh
+    assert 'AUTO_K_PILOT_N_INIT="${AUTO_K_PILOT_N_INIT:-1}"' in run_sh
+    assert 'AUTO_K_PILOT_MAX_ITER="${AUTO_K_PILOT_MAX_ITER:-3}"' in run_sh
+    assert 'REQUIRE_FULL_CELL_COVERAGE="${REQUIRE_FULL_CELL_COVERAGE:-0}"' in run_sh
     assert 'ALLOW_UMAP_AS_FEATURE="${ALLOW_UMAP_AS_FEATURE:-0}"' in run_sh
     assert 'ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"' in run_sh
+    assert 'SHAPE_LEAKAGE_PERMUTATIONS="${SHAPE_LEAKAGE_PERMUTATIONS:-16}"' in run_sh
     assert 'CPU_THREADS="${CPU_THREADS:-28}"' in run_sh
     assert 'CUDA_DEVICE_LIST="${CUDA_DEVICE_LIST:-all}"' in run_sh
     assert 'PARALLEL_RESTARTS="${PARALLEL_RESTARTS:-auto}"' in run_sh
     assert 'CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-50}"' in run_sh
     assert 'X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-512}"' in run_sh
     assert 'X_TARGET_SUM="${X_TARGET_SUM:-10000}"' in run_sh
-    assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in run_sh
+    assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-none}"' in run_sh
     assert 'DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-context}"' in run_sh
     assert 'DEEP_DEVICE="${DEEP_DEVICE:-cuda}"' in run_sh
     assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-32768}"' in run_sh
     assert 'LAMBDA_X="${LAMBDA_X:-0.5}"' in run_sh
     assert 'LAMBDA_Y="${LAMBDA_Y:-1.0}"' in run_sh
     assert 'OT_EPS="${OT_EPS:-0.03}"' in run_sh
+    assert 'GEOMETRY_SAMPLES="${GEOMETRY_SAMPLES:-64}"' in run_sh
+    assert 'COMPRESSED_SUPPORT_SIZE="${COMPRESSED_SUPPORT_SIZE:-48}"' in run_sh
+    assert 'ALIGN_ITERS="${ALIGN_ITERS:-2}"' in run_sh
+    assert 'N_INIT="${N_INIT:-2}"' in run_sh
+    assert 'MAX_ITER="${MAX_ITER:-5}"' in run_sh
+    assert 'SINKHORN_MAX_ITER="${SINKHORN_MAX_ITER:-256}"' in run_sh
+    assert 'SINKHORN_TOL="${SINKHORN_TOL:-1e-4}"' in run_sh
+    assert 'LIGHT_CELL_H5AD="${LIGHT_CELL_H5AD:-1}"' in run_sh
+    assert 'H5AD_COMPRESSION="${H5AD_COMPRESSION:-lzf}"' in run_sh
+    assert 'WRITE_SAMPLE_SPATIAL_MAPS="${WRITE_SAMPLE_SPATIAL_MAPS:-0}"' in run_sh
+    assert 'PROGRESS_LOG="${PROGRESS_LOG:-1}"' in run_sh
     assert 'OVERLAP_CONSISTENCY_WEIGHT="${OVERLAP_CONSISTENCY_WEIGHT:-0.05}"' in run_sh
     assert 'export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPU_THREADS}"' in run_sh
     assert 'export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CPU_THREADS}"' in run_sh
@@ -104,16 +125,29 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'export SPATIAL_OT_CUDA_TARGET_VRAM_GB="${SPATIAL_OT_CUDA_TARGET_VRAM_GB:-$CUDA_TARGET_VRAM_GB}"' in run_sh
     assert 'export SPATIAL_OT_X_SVD_COMPONENTS="${SPATIAL_OT_X_SVD_COMPONENTS:-$X_FEATURE_COMPONENTS}"' in run_sh
     assert 'export SPATIAL_OT_X_TARGET_SUM="${SPATIAL_OT_X_TARGET_SUM:-$X_TARGET_SUM}"' in run_sh
+    assert 'export SPATIAL_OT_SINKHORN_MAX_ITER="${SPATIAL_OT_SINKHORN_MAX_ITER:-$SINKHORN_MAX_ITER}"' in run_sh
+    assert 'export SPATIAL_OT_SINKHORN_TOL="${SPATIAL_OT_SINKHORN_TOL:-$SINKHORN_TOL}"' in run_sh
+    assert 'export SPATIAL_OT_LIGHT_CELL_H5AD="${SPATIAL_OT_LIGHT_CELL_H5AD:-$LIGHT_CELL_H5AD}"' in run_sh
+    assert 'export SPATIAL_OT_H5AD_COMPRESSION="${SPATIAL_OT_H5AD_COMPRESSION:-$H5AD_COMPRESSION}"' in run_sh
+    assert 'export SPATIAL_OT_WRITE_SAMPLE_SPATIAL_MAPS="${SPATIAL_OT_WRITE_SAMPLE_SPATIAL_MAPS:-$WRITE_SAMPLE_SPATIAL_MAPS}"' in run_sh
+    assert 'export SPATIAL_OT_PROGRESS="${SPATIAL_OT_PROGRESS:-$PROGRESS_LOG}"' in run_sh
     assert "pool-inputs" in run_sh
     assert "prepare_spatial_ot_input.sh" in run_sh
     assert "plot-sample-niches" in run_sh
+    assert "plot-sample-spot-latent" in run_sh
     assert "sample_niche_plots" in run_sh
+    assert "sample_spot_latent_plots" in run_sh
+    assert "COMPUTE_SPOT_LATENT" in run_sh
+    assert "--auto-n-clusters" in run_sh
+    assert "--candidate-n-clusters" in run_sh
+    assert '--min-subregions-per-cluster "$MIN_SUBREGIONS_PER_CLUSTER"' in run_sh
     assert '${INPUT_DIR}/${POOLED_INPUT_NAME}' in run_sh
     assert "pooled_cell_x" in run_sh
     assert "pooled_cell_y" in run_sh
     assert 'REQUIRE_FULL_CELL_COVERAGE=1 requires STRIDE_UM <= RADIUS_UM' in run_sh
     assert 'cell_subregion_coverage_fraction' in run_sh
     assert 'uncovered_cell_count' in run_sh
+    assert "Run completed with incomplete analyzed-subregion coverage" in run_sh
     assert '--min-cells "$MIN_CELLS"' in run_sh
     assert '--max-subregions "$MAX_SUBREGIONS"' in run_sh
     assert '--radius-um "$RADIUS_UM"' in run_sh
@@ -161,13 +195,29 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-none}"' in exploratory_sh
     assert "exec bash \"$SCRIPT_DIR/run.sh\"" in p2_sh
     assert "exec bash \"$SCRIPT_DIR/run.sh\"" in exploratory_sh
+    assert "../spatial_ot_input" in prepared_gpu_sh
+    assert "../outputs/spatial_ot/cohort_multilevel_ot_prepared_gpu" in prepared_gpu_sh
+    assert "../.venv" in prepared_gpu_sh
+    assert 'PREPARE_INPUTS_AHEAD="${PREPARE_INPUTS_AHEAD:-0}"' in prepared_gpu_sh
+    assert 'REFRESH_POOLED_INPUT="${REFRESH_POOLED_INPUT:-0}"' in prepared_gpu_sh
+    assert 'REFRESH_PREPARED_FEATURES="${REFRESH_PREPARED_FEATURES:-0}"' in prepared_gpu_sh
+    assert 'COMPUTE_DEVICE="${COMPUTE_DEVICE:-cuda}"' in prepared_gpu_sh
+    assert 'AUTO_N_CLUSTERS="${AUTO_N_CLUSTERS:-1}"' in prepared_gpu_sh
+    assert 'CANDIDATE_N_CLUSTERS="${CANDIDATE_N_CLUSTERS:-15-25}"' in prepared_gpu_sh
+    assert 'MIN_SUBREGIONS_PER_CLUSTER="${MIN_SUBREGIONS_PER_CLUSTER:-50}"' in prepared_gpu_sh
+    assert "exec bash run.sh" in prepared_gpu_sh
+    assert "/storage/" not in prepared_gpu_sh
     optimal_search_sh = (repo_root / "run_optimal_setting_search.sh").read_text()
     assert "../spatial_ot_input/spatial_ot_input_pooled.h5ad" in optimal_search_sh
     assert "../work/spatial_ot_runs/cohort_optimal_search" in optimal_search_sh
     assert "optimal-search" in optimal_search_sh
     assert 'BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-50}"' in optimal_search_sh
+    assert 'MIN_SUBREGIONS_PER_CLUSTER="${MIN_SUBREGIONS_PER_CLUSTER:-50}"' in optimal_search_sh
     assert 'TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-20}"' in optimal_search_sh
-    assert 'ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-1}"' in optimal_search_sh
+    assert 'ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"' in optimal_search_sh
+    assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in optimal_search_sh
+    assert 'DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-context}"' in optimal_search_sh
+    assert '--min-subregions-per-cluster "$MIN_SUBREGIONS_PER_CLUSTER"' in optimal_search_sh
     assert "../spatial_ot_input/" in config_toml
     assert "../outputs/" in config_toml
     assert 'feature_obsm_key = "X"' in config_toml
@@ -175,8 +225,11 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'output_embedding = "context"' in config_toml
     assert "basic_niche_size_um = 50.0" in config_toml
     assert "min_cells = 25" in config_toml
-    assert "max_subregions = 1500" in config_toml
+    assert "max_subregions = 5000" in config_toml
     assert "allow_convex_hull_fallback = false" in config_toml
+    assert "auto_n_clusters = false" in config_toml
+    assert "candidate_n_clusters = [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]" in config_toml
+    assert "min_subregions_per_cluster = 50" in config_toml
 
     legacy_training_py = (repo_root / "spatial_ot" / "legacy" / "training.py").read_text()
     legacy_training_facade_py = (repo_root / "spatial_ot" / "training.py").read_text()

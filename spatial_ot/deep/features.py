@@ -24,11 +24,8 @@ from ._utils import (
 )
 from .checkpoint import load_encoder_bundle, save_encoder_bundle
 from .diagnostics import (
-    correlation_summary as _correlation_summary,
     graph_summary as _graph_summary,
     latent_diagnostics as _latent_diagnostics,
-    linear_r2 as _linear_r2,
-    top_canonical_correlation as _top_canonical_correlation,
 )
 from .losses import (
     cross_correlation_loss,
@@ -38,15 +35,11 @@ from .losses import (
     variance_loss,
 )
 from .models import (
-    GraphAutoencoder as _GraphAutoencoder,
-    MLPAutoencoder as _MLPAutoencoder,
     make_model as _make_model,
     tensor_graphs as _tensor_graphs,
 )
 from .validation import (
-    build_context_targets as _build_context_targets,
     build_split_context_targets as _build_split_context_targets,
-    context_radii as _context_radii,
     split_validation as _split_validation,
 )
 
@@ -191,6 +184,7 @@ class SpatialOTFeatureEncoder:
 
         x = np.asarray(features, dtype=np.float32)
         coords_um = np.asarray(coords_um, dtype=np.float32)
+        self._enforce_graph_full_batch_limit(int(x.shape[0]), stage="fit")
         counts_target, library_log = self._prepare_count_targets(count_matrix)
         batch_array = np.asarray(batch) if batch is not None else None
         val_mask = _split_validation(coords_um=coords_um, batch=batch_array, config=self.config, seed=seed)
@@ -266,7 +260,7 @@ class SpatialOTFeatureEncoder:
         val_rows = np.flatnonzero(val_mask).astype(np.int64)
 
         if self.config.method == "graph_autoencoder":
-            self._enforce_graph_full_batch_limit(int(train_mask.sum()), stage="fit")
+            self._enforce_graph_full_batch_limit(int(x_std.shape[0]), stage="fit")
             x_train = torch.from_numpy(x_std[train_mask]).to(self.device)
             ctx_train = torch.from_numpy(context_std[train_mask]).to(self.device)
             short_train, mid_train = _tensor_graphs(coords_um[train_mask], config=self.config, device=self.device)

@@ -45,6 +45,7 @@ class RegionGeometry:
     polygon_components: list[np.ndarray] | None = None
     mask: np.ndarray | None = None
     affine: np.ndarray | None = None
+    use_observed_geometry: bool = False
 
 
 @dataclass
@@ -112,8 +113,23 @@ class MultilevelOTResult:
     cell_context_cluster_probs: np.ndarray
     cell_cluster_probs: np.ndarray
     cell_cluster_labels: np.ndarray
+    spot_latent_cell_indices: np.ndarray
+    spot_latent_subregion_ids: np.ndarray
+    spot_latent_cluster_labels: np.ndarray
+    spot_latent_coords: np.ndarray
+    spot_latent_aligned_coords: np.ndarray
+    spot_latent_cluster_probs: np.ndarray
+    spot_latent_atom_confidence: np.ndarray
+    spot_latent_weights: np.ndarray
+    spot_latent_atom_posteriors: np.ndarray
+    cell_spot_latent_coords: np.ndarray
+    cell_spot_latent_cluster_labels: np.ndarray
+    cell_spot_latent_weights: np.ndarray
     cost_scale_x: float
     cost_scale_y: float
     objective_history: list[dict[str, float]]
     selected_restart: int
     restart_summaries: list[dict[str, object]]
+    min_subregions_per_cluster: int = 1
+    effective_min_subregions_per_cluster: int = 1
+    auto_k_selection: dict[str, object] | None = None

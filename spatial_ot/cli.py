@@ -15,7 +15,11 @@ from .deep import fit_deep_features_on_h5ad, transform_h5ad_with_deep_model
 from .feature_source import prepare_h5ad_feature_cache
 from .legacy.training import run_experiment
 from .legacy.visualization import plot_preprocessed_inputs, plot_result_bundle
-from .multilevel import plot_sample_niche_maps_from_run_dir, run_multilevel_ot_with_config
+from .multilevel import (
+    plot_sample_niche_maps_from_run_dir,
+    plot_sample_spot_latent_maps_from_run_dir,
+    run_multilevel_ot_with_config,
+)
 from .optimal_search import run_multilevel_optimal_search
 from .pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_directory
 
@@ -53,6 +57,7 @@ def _add_deep_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--deep-short-radius-um", type=float, default=None, help="Short-range graph radius for graph_autoencoder.")
     parser.add_argument("--deep-mid-radius-um", type=float, default=None, help="Mid-range graph radius for graph_autoencoder.")
     parser.add_argument("--deep-graph-layers", type=int, default=None, help="Number of graph message-passing layers per scale for graph_autoencoder.")
+    parser.add_argument("--deep-graph-aggr", default=None, choices=["mean"], help="Graph aggregation mode for graph_autoencoder.")
     parser.add_argument("--deep-graph-max-neighbors", type=int, default=None, help="Maximum neighbors retained per node when building radius graphs for graph_autoencoder.")
     parser.add_argument("--deep-full-batch-max-cells", type=int, default=None, help="Maximum cells allowed for graph_autoencoder full-batch fit/transform. Use 0 to disable the guard.")
     parser.add_argument("--deep-validation-context-mode", default=None, choices=["inductive", "transductive"], help="Whether validation context targets are built from held-out cells only or from the full dataset.")
@@ -72,6 +77,7 @@ def _add_deep_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--deep-contrastive-weight", type=float, default=None, help="Short-range graph contrastive loss weight for graph_autoencoder.")
     parser.add_argument("--deep-variance-weight", type=float, default=None, help="Variance regularization weight for the deep feature adapter.")
     parser.add_argument("--deep-decorrelation-weight", type=float, default=None, help="Decorrelation regularization weight for the deep feature adapter.")
+    parser.add_argument("--deep-independence-weight", type=float, default=None, help="Cross-embedding independence regularization weight for the deep feature adapter.")
     parser.add_argument("--deep-output-embedding", default=None, choices=["intrinsic", "context", "joint"], help="Which learned embedding to expose to the OT layer.")
     parser.add_argument(
         "--deep-allow-joint-ot-embedding",
@@ -79,6 +85,9 @@ def _add_deep_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Require explicit opt-in before using deep.output_embedding='joint' as the OT feature view.",
     )
+    parser.add_argument("--deep-early-stopping-patience", type=int, default=None, help="Epochs without validation improvement before early stopping.")
+    parser.add_argument("--deep-min-delta", type=float, default=None, help="Minimum validation improvement required to reset early stopping patience.")
+    parser.add_argument("--deep-restore-best", action=argparse.BooleanOptionalAction, default=None, help="Restore the best validation checkpoint after deep feature training.")
     parser.add_argument("--deep-save-model", action=argparse.BooleanOptionalAction, default=None, help="Save the fitted deep feature model under the output directory.")
     parser.add_argument("--pretrained-deep-model", default=None, help="Path to a previously saved deep feature model for transform-only runs.")
     parser.add_argument("--deep-output-obsm-key", default=None, help="obsm key used to store the learned deep embedding.")
@@ -126,6 +135,23 @@ def build_parser() -> argparse.ArgumentParser:
     plot_sample_niches.add_argument("--plot-spatial-y-key", default=None, help="Preferred obs key for y coordinates in per-sample plots.")
     plot_sample_niches.add_argument("--default-sample-id", default="all_cells", help="Sample label used if the requested sample obs key is absent.")
     plot_sample_niches.add_argument("--spatial-scale", type=float, default=None, help="Optional override for the coordinate scale applied before plotting.")
+
+    plot_sample_spot_latent = sub.add_parser(
+        "plot-sample-spot-latent",
+        help="Render one spot-level latent field plot per sample from a finished multilevel OT run directory.",
+    )
+    plot_sample_spot_latent.add_argument("--run-dir", required=True, help="Path to a finished multilevel OT run directory.")
+    plot_sample_spot_latent.add_argument("--output-dir", help="Optional output directory for the sample latent PNG files.")
+    plot_sample_spot_latent.add_argument("--sample-obs-key", default="sample_id", help="obs key storing the sample identifier.")
+    plot_sample_spot_latent.add_argument("--source-file-obs-key", default="source_h5ad", help="obs key storing the source H5AD filename.")
+    plot_sample_spot_latent.add_argument("--spot-latent-npz", default=None, help="Optional occurrence-level spot latent NPZ. Defaults to spot_level_latent_multilevel_ot.npz under --run-dir.")
+    plot_sample_spot_latent.add_argument("--latent-obsm-key", default="mlot_spot_latent_coords", help="obsm key storing 2D spot-level latent coordinates.")
+    plot_sample_spot_latent.add_argument("--latent-cluster-obs-key", default="mlot_spot_latent_cluster_int", help="obs key storing integer latent-chart cluster labels.")
+    plot_sample_spot_latent.add_argument("--plot-spatial-x-key", default=None, help="Preferred obs key for x coordinates in per-sample plots.")
+    plot_sample_spot_latent.add_argument("--plot-spatial-y-key", default=None, help="Preferred obs key for y coordinates in per-sample plots.")
+    plot_sample_spot_latent.add_argument("--default-sample-id", default="all_cells", help="Sample label used if the requested sample obs key is absent.")
+    plot_sample_spot_latent.add_argument("--spatial-scale", type=float, default=None, help="Optional override for the coordinate scale applied before plotting.")
+    plot_sample_spot_latent.add_argument("--max-occurrences-per-cluster", type=int, default=150000, help="Maximum occurrence points drawn per sample/cluster panel. Use 0 for all.")
 
     pool_inputs = sub.add_parser(
         "pool-inputs",
@@ -224,22 +250,23 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--feature-obsm-key", help="Feature source used for the OT ground cost. Accepts an obsm key or 'X' for the full gene matrix. Prefer full-gene, PCA, or standardized marker features; avoid UMAP unless exploratory.")
     multilevel.add_argument("--spatial-x-key", default=None, help="obs key for the x coordinate.")
     multilevel.add_argument("--spatial-y-key", default=None, help="obs key for the y coordinate.")
-    multilevel.add_argument("--region-obs-key", help="Optional obs column defining explicit subregion membership. If set, spatial_ot clusters those regions instead of building radius windows.")
+    multilevel.add_argument("--region-obs-key", help="Optional obs column defining explicit mutually exclusive subregion membership. If set, spatial_ot clusters those regions instead of learning data-driven spatial subregions.")
+    multilevel.add_argument("--region-geometry-json", help="Optional JSON file with explicit polygon/mask geometry keyed by --region-obs-key values.")
     multilevel.add_argument("--allow-umap-as-feature", action=argparse.BooleanOptionalAction, default=None, help="Allow UMAP coordinates as the OT feature space for exploratory runs.")
     multilevel.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value to convert them into microns.")
     multilevel.add_argument("--n-clusters", type=int, default=None, help="Number of subregion clusters.")
     multilevel.add_argument("--atoms-per-cluster", type=int, default=None, help="Number of shared atoms per cluster.")
     multilevel.add_argument("--radius-um", type=float, default=None, help="Subregion radius in microns.")
     multilevel.add_argument("--stride-um", type=float, default=None, help="Subregion center stride in microns.")
-    multilevel.add_argument("--basic-niche-size-um", type=float, default=None, help="Diameter in microns for the smallest basic niche blocks used to compose grid-built subregions. Set to 0 to disable niche composition.")
+    multilevel.add_argument("--basic-niche-size-um", type=float, default=None, help="Target scale in microns for data-driven atomic membership seeds. Set to 0 to disable this scale hint.")
     multilevel.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
-    multilevel.add_argument("--max-subregions", type=int, default=None, help="Maximum number of subregions to retain after grid construction.")
+    multilevel.add_argument("--max-subregions", type=int, default=None, help="Maximum number of data-driven subregions to retain after minimum-size merging.")
     multilevel.add_argument("--lambda-x", type=float, default=None, help="Weight on canonical spatial coordinates in the OT cost.")
     multilevel.add_argument("--lambda-y", type=float, default=None, help="Weight on feature coordinates in the OT cost.")
     multilevel.add_argument("--geometry-eps", type=float, default=None, help="Entropic OT regularization for geometry-only normalization into the reference domain.")
     multilevel.add_argument("--ot-eps", type=float, default=None, help="Entropic regularization for the semi-relaxed OT clustering objective.")
     multilevel.add_argument("--rho", type=float, default=None, help="Relaxation strength for the target marginal in the semi-relaxed OT objective.")
-    multilevel.add_argument("--geometry-samples", type=int, default=None, help="Number of uniform geometry samples used to learn each subregion normalizer.")
+    multilevel.add_argument("--geometry-samples", type=int, default=None, help="Maximum number of data-driven geometry samples used to learn each subregion normalizer.")
     multilevel.add_argument("--compressed-support-size", type=int, default=None, help="Maximum number of compressed support points retained per subregion.")
     multilevel.add_argument("--align-iters", type=int, default=None, help="Number of residual similarity-alignment updates per subregion-cluster match.")
     multilevel.add_argument("--allow-reflection", action=argparse.BooleanOptionalAction, default=None, help="Allow reflections in the residual similarity alignment.")
@@ -253,6 +280,17 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--overlap-jaccard-min", type=float, default=None, help="Minimum subregion-overlap Jaccard retained by the overlap-consistency graph.")
     multilevel.add_argument("--overlap-contrast-scale", type=float, default=None, help="Contrast scale for gating the overlap-consistency penalty.")
     multilevel.add_argument("--allow-observed-hull-geometry", action=argparse.BooleanOptionalAction, default=None, help="Allow observed-coordinate convex hull fallback when explicit region geometry is unavailable.")
+    multilevel.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
+    multilevel.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
+    multilevel.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level cluster-local spot latent charts.")
+    multilevel.add_argument("--auto-n-clusters", action=argparse.BooleanOptionalAction, default=None, help="Select the number of subregion clusters automatically from pilot OT-landmark geometry.")
+    multilevel.add_argument("--candidate-n-clusters", default=None, help="Candidate K values for --auto-n-clusters, e.g. '15-25' or '15,16,17,18'.")
+    multilevel.add_argument("--auto-k-max-score-subregions", type=int, default=None, help="Maximum sampled subregions used to score automatic K selection; 0 scores all.")
+    multilevel.add_argument("--auto-k-gap-references", type=int, default=None, help="Reference resamples used by the automatic-K gap statistic.")
+    multilevel.add_argument("--auto-k-mds-components", type=int, default=None, help="MDS embedding dimensions used by CH/DB/Gap automatic-K scores.")
+    multilevel.add_argument("--auto-k-pilot-n-init", type=int, default=None, help="Restart count for the automatic-K pilot fit.")
+    multilevel.add_argument("--auto-k-pilot-max-iter", type=int, default=None, help="Maximum iterations for the automatic-K pilot fit.")
+    multilevel.add_argument("--min-subregions-per-cluster", type=int, default=None, help="Minimum number of subregions assigned to each subregion cluster when feasible.")
     multilevel.add_argument("--max-iter", type=int, default=None, help="Maximum alternating-optimization iterations.")
     multilevel.add_argument("--tol", type=float, default=None, help="Support-shift tolerance for early stopping.")
     multilevel.add_argument("--seed", type=int, default=None, help="Random seed.")
@@ -270,15 +308,16 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--spatial-x-key", default=None, help="obs key for the x coordinate.")
     optimal_search.add_argument("--spatial-y-key", default=None, help="obs key for the y coordinate.")
     optimal_search.add_argument("--region-obs-key", help="Optional obs column defining explicit subregion membership.")
+    optimal_search.add_argument("--region-geometry-json", help="Optional JSON file with explicit polygon/mask geometry keyed by --region-obs-key values.")
     optimal_search.add_argument("--allow-umap-as-feature", action=argparse.BooleanOptionalAction, default=None, help="Allow UMAP coordinates as the OT feature space for exploratory runs.")
     optimal_search.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value to convert them into microns.")
     optimal_search.add_argument("--n-clusters", type=int, default=None, help="Baseline number of subregion clusters used to seed the search.")
     optimal_search.add_argument("--atoms-per-cluster", type=int, default=None, help="Number of shared atoms per cluster.")
     optimal_search.add_argument("--radius-um", type=float, default=None, help="Baseline subregion radius in microns.")
     optimal_search.add_argument("--stride-um", type=float, default=None, help="Baseline subregion center stride in microns.")
-    optimal_search.add_argument("--basic-niche-size-um", type=float, default=None, help="Diameter in microns for the smallest basic niche blocks used to compose grid-built subregions.")
+    optimal_search.add_argument("--basic-niche-size-um", type=float, default=None, help="Target scale in microns for data-driven atomic membership seeds.")
     optimal_search.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
-    optimal_search.add_argument("--max-subregions", type=int, default=None, help="Maximum number of subregions retained after grid construction.")
+    optimal_search.add_argument("--max-subregions", type=int, default=None, help="Maximum number of data-driven subregions retained after minimum-size merging.")
     optimal_search.add_argument("--lambda-x", type=float, default=None, help="Weight on canonical spatial coordinates in the OT cost.")
     optimal_search.add_argument("--lambda-y", type=float, default=None, help="Weight on feature coordinates in the OT cost.")
     optimal_search.add_argument("--geometry-eps", type=float, default=None, help="Entropic OT regularization for geometry-only normalization.")
@@ -298,6 +337,17 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--overlap-jaccard-min", type=float, default=None, help="Minimum subregion-overlap Jaccard retained by the overlap-consistency graph.")
     optimal_search.add_argument("--overlap-contrast-scale", type=float, default=None, help="Contrast scale for gating the overlap-consistency penalty.")
     optimal_search.add_argument("--allow-observed-hull-geometry", action=argparse.BooleanOptionalAction, default=None, help="Allow observed-coordinate convex hull fallback when explicit region geometry is unavailable.")
+    optimal_search.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
+    optimal_search.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
+    optimal_search.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level cluster-local spot latent charts.")
+    optimal_search.add_argument("--auto-n-clusters", action=argparse.BooleanOptionalAction, default=None, help="Select the number of subregion clusters automatically from pilot OT-landmark geometry.")
+    optimal_search.add_argument("--candidate-n-clusters", default=None, help="Candidate K values for --auto-n-clusters, e.g. '15-25' or '15,16,17,18'.")
+    optimal_search.add_argument("--auto-k-max-score-subregions", type=int, default=None, help="Maximum sampled subregions used to score automatic K selection; 0 scores all.")
+    optimal_search.add_argument("--auto-k-gap-references", type=int, default=None, help="Reference resamples used by the automatic-K gap statistic.")
+    optimal_search.add_argument("--auto-k-mds-components", type=int, default=None, help="MDS embedding dimensions used by CH/DB/Gap automatic-K scores.")
+    optimal_search.add_argument("--auto-k-pilot-n-init", type=int, default=None, help="Restart count for the automatic-K pilot fit.")
+    optimal_search.add_argument("--auto-k-pilot-max-iter", type=int, default=None, help="Maximum iterations for the automatic-K pilot fit.")
+    optimal_search.add_argument("--min-subregions-per-cluster", type=int, default=None, help="Minimum number of subregions assigned to each subregion cluster when feasible.")
     optimal_search.add_argument("--max-iter", type=int, default=None, help="Maximum alternating-optimization iterations for final confirmatory fits.")
     optimal_search.add_argument("--tol", type=float, default=None, help="Support-shift tolerance for early stopping.")
     optimal_search.add_argument("--seed", type=int, default=None, help="Random seed.")
@@ -328,6 +378,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
     _set_if_not_none(config.paths, "spatial_y_key", args.spatial_y_key)
     _set_if_not_none(config.paths, "spatial_scale", args.spatial_scale)
     _set_if_not_none(config.paths, "region_obs_key", args.region_obs_key)
+    _set_if_not_none(config.paths, "region_geometry_json", args.region_geometry_json)
     _set_if_not_none(config.paths, "allow_umap_as_feature", args.allow_umap_as_feature)
     _set_if_not_none(config.paths, "spatial_scale", args.spatial_scale)
 
@@ -358,6 +409,17 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "overlap_jaccard_min",
         "overlap_contrast_scale",
         "allow_observed_hull_geometry",
+        "shape_diagnostics",
+        "shape_leakage_permutations",
+        "compute_spot_latent",
+        "auto_n_clusters",
+        "candidate_n_clusters",
+        "auto_k_max_score_subregions",
+        "auto_k_gap_references",
+        "auto_k_mds_components",
+        "auto_k_pilot_n_init",
+        "auto_k_pilot_max_iter",
+        "min_subregions_per_cluster",
         "max_iter",
         "tol",
         "seed",
@@ -378,6 +440,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_short_radius_um": "short_radius_um",
         "deep_mid_radius_um": "mid_radius_um",
         "deep_graph_layers": "graph_layers",
+        "deep_graph_aggr": "graph_aggr",
         "deep_graph_max_neighbors": "graph_max_neighbors",
         "deep_full_batch_max_cells": "full_batch_max_cells",
         "deep_validation_context_mode": "validation_context_mode",
@@ -397,8 +460,12 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_contrastive_weight": "contrastive_weight",
         "deep_variance_weight": "variance_weight",
         "deep_decorrelation_weight": "decorrelation_weight",
+        "deep_independence_weight": "independence_weight",
         "deep_output_embedding": "output_embedding",
         "deep_allow_joint_ot_embedding": "allow_joint_ot_embedding",
+        "deep_early_stopping_patience": "early_stopping_patience",
+        "deep_min_delta": "min_delta",
+        "deep_restore_best": "restore_best",
         "deep_save_model": "save_model",
         "pretrained_deep_model": "pretrained_model",
         "deep_output_obsm_key": "output_obsm_key",
@@ -427,6 +494,7 @@ def _resolve_deep_fit_config_from_args(args: argparse.Namespace) -> tuple[Multil
         "deep_short_radius_um": "short_radius_um",
         "deep_mid_radius_um": "mid_radius_um",
         "deep_graph_layers": "graph_layers",
+        "deep_graph_aggr": "graph_aggr",
         "deep_graph_max_neighbors": "graph_max_neighbors",
         "deep_full_batch_max_cells": "full_batch_max_cells",
         "deep_validation_context_mode": "validation_context_mode",
@@ -446,8 +514,12 @@ def _resolve_deep_fit_config_from_args(args: argparse.Namespace) -> tuple[Multil
         "deep_contrastive_weight": "contrastive_weight",
         "deep_variance_weight": "variance_weight",
         "deep_decorrelation_weight": "decorrelation_weight",
+        "deep_independence_weight": "independence_weight",
         "deep_output_embedding": "output_embedding",
         "deep_allow_joint_ot_embedding": "allow_joint_ot_embedding",
+        "deep_early_stopping_patience": "early_stopping_patience",
+        "deep_min_delta": "min_delta",
+        "deep_restore_best": "restore_best",
         "deep_save_model": "save_model",
         "pretrained_deep_model": "pretrained_model",
         "deep_output_obsm_key": "output_obsm_key",
@@ -499,6 +571,22 @@ def main() -> None:
             plot_spatial_y_key=args.plot_spatial_y_key,
             default_sample_id=args.default_sample_id,
             spatial_scale=args.spatial_scale,
+        )
+        print(json.dumps(manifest, indent=2))
+    elif args.command == "plot-sample-spot-latent":
+        manifest = plot_sample_spot_latent_maps_from_run_dir(
+            run_dir=Path(args.run_dir),
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            sample_obs_key=args.sample_obs_key,
+            source_file_obs_key=args.source_file_obs_key,
+            spot_latent_npz=args.spot_latent_npz,
+            latent_obsm_key=args.latent_obsm_key,
+            latent_cluster_obs_key=args.latent_cluster_obs_key,
+            plot_spatial_x_key=args.plot_spatial_x_key,
+            plot_spatial_y_key=args.plot_spatial_y_key,
+            default_sample_id=args.default_sample_id,
+            spatial_scale=args.spatial_scale,
+            max_occurrences_per_cluster=args.max_occurrences_per_cluster,
         )
         print(json.dumps(manifest, indent=2))
     elif args.command == "pool-inputs":
