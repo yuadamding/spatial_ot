@@ -54,10 +54,11 @@ Prefer PCA, standardized marker expression, or another calibrated latent space. 
 
 Two modes:
 
-- **data-driven subregion discovery** (default): mutually exclusive spatial subregions learned from observed coordinates, with sparse connected pieces merged to satisfy `min_cells`; the fitted boundary/shape geometry is taken from the observed member-cell point cloud rather than a hand-coded template
+- **data-driven subregion discovery** (default): mutually exclusive spatial subregions learned from observed coordinates plus the OT feature view, with sparse connected pieces merged to satisfy `min_cells`; the fitted boundary/shape geometry is taken from the observed member-cell point cloud rather than a hand-coded template
+- **deep graph segmentation**: set `--subregion-construction-method deep_segmentation` and provide a learned feature view, typically `--deep-feature-method autoencoder --deep-output-embedding context`; many coordinate seeds give full tissue coverage, then a spatial kNN boundary-refinement pass moves boundaries using learned embedding affinity before minimum-size merging
 - **explicit-region clustering**: pass `--region-obs-key` and ideally explicit geometry objects so boundary shape can be treated as nuisance
 
-For generated subregions, membership and boundary shape are data-driven from the observed member cells. For explicit-region runs without masks or polygons, boundary-shape invariance is not guaranteed unless you intentionally opt into the observed-coordinate convex-hull fallback via `--allow-observed-hull-geometry`.
+For generated subregions, membership and boundary shape are data-driven from the observed member cells. `--radius-um` is not a fixed ball/window membership radius in this mode; it is retained for compatibility and graph diagnostics. The realized subregion scale comes from `--basic-niche-size-um` or `--stride-um`, `--min-cells`, `--max-subregions`, spatial connectivity, and either feature-aware boundary refinement or deep graph segmentation. For explicit-region runs without masks or polygons, boundary-shape invariance is not guaranteed unless you intentionally opt into the observed-coordinate convex-hull fallback via `--allow-observed-hull-geometry`.
 
 For CLI explicit-region runs, pass `--region-geometry-json` with a JSON object containing `regions`, each with `region_id` plus `polygon_vertices`, `polygon_components`, or `mask`. Polygon coordinates are interpreted in scaled microns by default; set `"coordinate_units": "obs"` to multiply them by `--spatial-scale`.
 
@@ -95,7 +96,7 @@ cd spatial_ot
   --auto-n-clusters --candidate-n-clusters 15-25
 ```
 
-The selector runs one pilot OT fit at the largest candidate `K`, builds a scalable OT-landmark distance between subregions from the pilot fused transport-cost profiles, then scores candidate `K` values with Silhouette on that precomputed distance plus Gap / Calinski-Harabasz / Davies-Bouldin on a classical MDS embedding. The final `K` is chosen by majority vote and the model is refit at that selected `K`. This avoids all-pairs subregion OT and avoids running a full final fit for every candidate `K`.
+The selector runs one pilot OT fit at the largest candidate `K`, builds a scalable OT-landmark distance between subregions from the pilot fused transport-cost profiles, then scores candidate `K` values with Silhouette on that precomputed distance plus Gap / Calinski-Harabasz / Davies-Bouldin on a classical MDS embedding. The final `K` is chosen by majority vote and the model is refit at that selected `K`. This avoids all-pairs subregion OT and avoids running a full final fit for every candidate `K`, but it should be treated as exploratory model selection until stability and ablation checks are run around the selected `K`.
 
 The cluster-size constraint is defined on fitted subregions, not on cells or spots. Set `MIN_SUBREGIONS_PER_CLUSTER=50` or pass `--min-subregions-per-cluster 50` to require each subregion cluster to contain at least that many subregions when feasible; projected cell and spot labels remain downstream summaries.
 
@@ -186,11 +187,15 @@ bash prepare_all_spatial_ot_input.sh    # also verify each sample H5AD has the p
 WRITE_BACK_TO_SOURCE_INPUTS=1 bash prepare_all_spatial_ot_input.sh
                                         # opt in to copying the cohort cache back into source files
 bash run_prepared_cohort_gpu.sh         # verify the prepared pooled H5AD, then launch the remaining GPU OT run
+bash run_deep_segmentation_cohort_gpu.sh
+                                        # run the prepared cohort with autoencoder context features and deep graph segmentation
 ```
 
 Pooled coordinates place each sample on its own non-overlapping tile, so samples contribute jointly to latent/OT learning without being treated as one continuous tissue section.
 
 `run_prepared_cohort_gpu.sh` intentionally disables pooling and feature-cache refresh by default. It only accepts a pooled input that already has `X_spatial_ot_x_svd_512`, then delegates to `run.sh` with `COMPUTE_DEVICE=cuda` and `AUTO_N_CLUSTERS=1`.
+
+`run_deep_segmentation_cohort_gpu.sh` is the deep-boundary variant: it trains/uses an autoencoder context embedding, sets `SUBREGION_CONSTRUCTION_METHOD=deep_segmentation`, and then delegates to the same prepared-cohort runner.
 
 `obs` columns written by pooling:
 
@@ -221,12 +226,15 @@ Defaults relevant to safety / cost (override with the matching env var):
 - `BASIC_NICHE_SIZE_UM=50`, `MIN_CELLS=25`, `MAX_SUBREGIONS=5000`, `STRIDE_UM=$RADIUS_UM`
 - `AUTO_N_CLUSTERS=0` by default. Set `AUTO_N_CLUSTERS=1` with `CANDIDATE_N_CLUSTERS=15-25` to run pilot-based model selection before the final fit.
 - `MIN_SUBREGIONS_PER_CLUSTER=50` constrains the number of subregions per selected cluster; it does not constrain projected cell or spot counts.
+- `SUBREGION_FEATURE_WEIGHT=0.75`, `SUBREGION_FEATURE_DIMS=16` make generated subregion boundaries use local feature contrast in addition to spatial adjacency. Set the weight to `0` for coordinate-only construction.
+- `SUBREGION_CONSTRUCTION_METHOD=deep_segmentation` switches generated subregion detection to learned-affinity graph segmentation. `DEEP_SEGMENTATION_KNN=12`, `DEEP_SEGMENTATION_FEATURE_DIMS=32`, `DEEP_SEGMENTATION_FEATURE_WEIGHT=1.0`, and `DEEP_SEGMENTATION_SPATIAL_WEIGHT=0.05` control the graph cut.
 - `N_INIT=2`, `MAX_ITER=5`, `ALIGN_ITERS=2`, `GEOMETRY_SAMPLES=64`, `COMPRESSED_SUPPORT_SIZE=48` for the packaged cohort runner; raise these for a final high-depth confirmation run.
 - `SINKHORN_MAX_ITER=256`, `SINKHORN_TOL=1e-4` for CUDA OT solves in the packaged runner.
 - `SHAPE_LEAKAGE_PERMUTATIONS=16` keeps the default diagnostic pass light; raise it for publication-quality QC.
+- `SPATIAL_OT_LEAKAGE_RF_ESTIMATORS=120` controls the random-forest size used for shape and size/density leakage diagnostics.
 - `LIGHT_CELL_H5AD=1`, `H5AD_COMPRESSION=lzf`, `WRITE_SAMPLE_SPATIAL_MAPS=0` keep the default cohort output fast and visualization-focused; set `LIGHT_CELL_H5AD=0` to copy the full input matrix into `cells_multilevel_ot.h5ad`.
 - `PROGRESS_LOG=1` prints major fit stages and restart completion times during long cohort runs.
-- `REQUIRE_FULL_CELL_COVERAGE=0` (capped cohort runs report incomplete analyzed-subregion coverage instead of failing; set to `1` after tuning `STRIDE_UM`, `RADIUS_UM`, and `MAX_SUBREGIONS` when every spot must have a niche-context latent occurrence)
+- `REQUIRE_FULL_CELL_COVERAGE=0` (capped cohort runs report incomplete analyzed-subregion coverage instead of failing; set to `1` after tuning `STRIDE_UM`, `BASIC_NICHE_SIZE_UM`, and `MAX_SUBREGIONS` when every spot must have a niche-context latent occurrence)
 - `ALLOW_OBSERVED_HULL_GEOMETRY=0` (disabled — opt in only for exploratory runs)
 - `DEEP_FEATURE_METHOD=none` by default for fast pooled-cohort iteration. Set `DEEP_FEATURE_METHOD=autoencoder` or `graph_autoencoder` when you intentionally want to retrain the experimental deep adapter; set `DEEP_ALLOW_JOINT_OT_EMBEDDING=1` when intentionally using the `joint` deep embedding as the OT view.
 
@@ -277,7 +285,7 @@ Per-sample spot-latent fields are cluster-local, so they are rendered one sample
   --plot-spatial-x-key cell_x --plot-spatial-y-key cell_y
 ```
 
-For generated runs, `basic_niche_size_um` is only a target scale hint for data-driven atomic membership seeds (default `50 µm`). Fitted subregions are mutually exclusive by construction, sparse connected pieces are merged to satisfy `min_cells`, and OT boundary geometry is learned from the observed coordinates of the cells inside each final subregion.
+For generated runs, `basic_niche_size_um` is only a target scale hint for data-driven atomic membership seeds (default `50 µm`). Fitted subregions are mutually exclusive by construction, seed boundaries are learned from spatial position plus the OT feature view, sparse connected pieces are merged to satisfy `min_cells`, and OT boundary geometry is learned from the observed coordinates of the cells inside each final subregion. The package reports realized size/shape/density statistics because those realized subregions, not a nominal radius, are the biological units being clustered.
 
 ## Output artifacts
 
@@ -296,12 +304,13 @@ Multilevel OT writes:
 - a `deep_features` block describing whether a feature adapter was learned before OT
 - restart summaries and the selected restart
 - geometry-source counts and convex-hull fallback frequency
+- `subregion_construction`, `radius_um_semantics`, and `realized_subregion_statistics` blocks describing the actual clustered subregion units
 - assigned OT fallback frequency and the effective entropy values actually used by the solver
 - requested vs resolved Torch compute device
 - package version, git SHA, summary schema version
 - graph usage metadata (whether the deep encoder used a spatial graph; training-graph degree statistics; `graph_max_neighbors`)
-- `boundary_invariance_claim` (explicitly exploratory when observed-hull fallback was used)
-- random-fold and spatial-block shape-leakage diagnostics
+- `boundary_invariance_claim` (explicit geometry supports the strongest claim; observed point-cloud geometry is reported as normalized but not fully shape-invariant, and observed-hull fallback is exploratory)
+- random-fold and spatial-block shape-leakage diagnostics plus size/density leakage diagnostics
 - canonical-normalizer radius / interpolation diagnostics
 
 ## Legacy train path

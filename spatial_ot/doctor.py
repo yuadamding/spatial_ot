@@ -29,6 +29,11 @@ _SHELL_DEFAULT_CHECKS: tuple[tuple[str, str, str], ...] = (
     ("AUTO_K_PILOT_N_INIT", "ot.auto_k_pilot_n_init", "int"),
     ("AUTO_K_PILOT_MAX_ITER", "ot.auto_k_pilot_max_iter", "int"),
     ("MIN_SUBREGIONS_PER_CLUSTER", "ot.min_subregions_per_cluster", "int"),
+    ("SUBREGION_CONSTRUCTION_METHOD", "ot.subregion_construction_method", "str"),
+    ("DEEP_SEGMENTATION_KNN", "ot.deep_segmentation_knn", "int"),
+    ("DEEP_SEGMENTATION_FEATURE_DIMS", "ot.deep_segmentation_feature_dims", "int"),
+    ("DEEP_SEGMENTATION_FEATURE_WEIGHT", "ot.deep_segmentation_feature_weight", "float"),
+    ("DEEP_SEGMENTATION_SPATIAL_WEIGHT", "ot.deep_segmentation_spatial_weight", "float"),
 )
 
 
@@ -60,6 +65,8 @@ def _cast_value(raw: str, kind: str):
             stop = int(right.strip())
             return tuple(range(start, stop + 1))
         return tuple(int(part.strip()) for part in raw.split(",") if part.strip())
+    if kind == "str":
+        return str(raw)
     raise ValueError(f"Unknown cast kind {kind!r}")
 
 

@@ -32,6 +32,7 @@ from .geometry import (
     _standardize_features,
     _validate_fit_inputs,
     _validate_mutually_exclusive_memberships,
+    build_deep_graph_segmentation_subregions,
     build_partition_subregions_from_grid_tiles,
     build_composite_subregions_from_basic_niches,
     fit_ot_shape_normalizer,
@@ -2371,6 +2372,11 @@ def fit_multilevel_ot(
     overlap_jaccard_min: float = 0.15,
     overlap_contrast_scale: float = 1.0,
     basic_niche_size_um: float | None = 200.0,
+    subregion_construction_method: str = "data_driven",
+    deep_segmentation_knn: int = 12,
+    deep_segmentation_feature_dims: int = 32,
+    deep_segmentation_feature_weight: float = 1.0,
+    deep_segmentation_spatial_weight: float = 0.05,
     compute_spot_latent: bool = True,
     auto_n_clusters: bool = False,
     candidate_n_clusters: tuple[int, ...] | list[int] | str | None = None,
@@ -2422,6 +2428,9 @@ def fit_multilevel_ot(
         raise ValueError("auto_k_pilot_n_init and auto_k_pilot_max_iter must be at least 1")
     if int(min_subregions_per_cluster) < 1:
         raise ValueError("min_subregions_per_cluster must be at least 1")
+    construction_method = str(subregion_construction_method).strip().lower()
+    if construction_method not in {"data_driven", "deep_segmentation"}:
+        raise ValueError("subregion_construction_method must be 'data_driven' or 'deep_segmentation'.")
 
     _progress(
         f"standardizing feature matrix for {features.shape[0]} cells and {features.shape[1]} features"
@@ -2438,10 +2447,42 @@ def fit_multilevel_ot(
             subregion_members = [np.asarray(region.members, dtype=np.int32) for region in region_geometries]
             subregion_basic_niche_ids = [np.asarray([], dtype=np.int32) for _ in subregion_members]
         elif build_generated_subregions:
-            if basic_niche_size_um is not None:
+            target_scale_for_subregions = (
+                float(basic_niche_size_um)
+                if basic_niche_size_um is not None
+                else float(stride_um)
+            )
+            if construction_method == "deep_segmentation":
                 _progress(
-                    "building mutually exclusive data-driven spatial subregions "
-                    f"(radius={float(radius_um):g}um, stride={float(stride_um):g}um, cap={int(max_subregions)})"
+                    "building mutually exclusive deep-graph segmentation subregions "
+                    f"(target_scale={target_scale_for_subregions:g}um, knn={int(deep_segmentation_knn)}, "
+                    f"cap={int(max_subregions)}; learned embedding affinity drives boundary cuts)"
+                )
+                used_basic_niches = True
+                (
+                    subregion_centers_um,
+                    subregion_members,
+                    basic_niche_centers_um,
+                    basic_niche_members,
+                    subregion_basic_niche_ids,
+                ) = build_deep_graph_segmentation_subregions(
+                    coords_um=coords_um,
+                    segmentation_features=features,
+                    target_scale_um=target_scale_for_subregions,
+                    min_cells=min_cells,
+                    max_subregions=max_subregions,
+                    segmentation_knn=int(deep_segmentation_knn),
+                    segmentation_feature_dims=int(deep_segmentation_feature_dims),
+                    segmentation_feature_weight=float(deep_segmentation_feature_weight),
+                    segmentation_spatial_weight=float(deep_segmentation_spatial_weight),
+                    seed=seed,
+                )
+                proposal_region_geometries = _region_geometries_from_observed_points(subregion_members)
+            elif basic_niche_size_um is not None:
+                _progress(
+                    "building mutually exclusive data-driven spatial/feature subregions "
+                    f"(target_scale={float(basic_niche_size_um):g}um, stride={float(stride_um):g}um, "
+                    f"cap={int(max_subregions)}; radius_um is not a membership radius)"
                 )
                 used_basic_niches = True
                 (
@@ -2457,13 +2498,15 @@ def fit_multilevel_ot(
                     min_cells=min_cells,
                     max_subregions=max_subregions,
                     basic_niche_size_um=float(basic_niche_size_um),
+                    partition_features=features,
                     seed=seed,
                 )
                 proposal_region_geometries = _region_geometries_from_observed_points(subregion_members)
             else:
                 _progress(
-                    f"building mutually exclusive data-driven spatial subregions (radius={float(radius_um):g}um, "
-                    f"stride={float(stride_um):g}um, cap={int(max_subregions)}); geometry is data-driven"
+                    "building mutually exclusive data-driven spatial/feature subregions "
+                    f"(target_scale={float(stride_um):g}um, cap={int(max_subregions)}; "
+                    "radius_um is not a membership radius); geometry is data-driven"
                 )
                 (
                     subregion_centers_um,
@@ -2477,6 +2520,7 @@ def fit_multilevel_ot(
                     stride_um=stride_um,
                     min_cells=min_cells,
                     max_subregions=max_subregions,
+                    partition_features=features,
                     seed=seed,
                 )
                 subregion_basic_niche_ids = [np.asarray([], dtype=np.int32) for _ in subregion_members]

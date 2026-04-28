@@ -59,6 +59,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     prepare_helper_sh = (repo_root / "prepare_spatial_ot_input.sh").read_text()
     prepare_all_helper_sh = (repo_root / "prepare_all_spatial_ot_input.sh").read_text()
     prepared_gpu_sh = (repo_root / "run_prepared_cohort_gpu.sh").read_text()
+    deep_segmentation_sh = (repo_root / "run_deep_segmentation_cohort_gpu.sh").read_text()
     p2_sh = (repo_root / "run_p2_crc_multilevel_ot.sh").read_text()
     exploratory_sh = (repo_root / "run_p2_crc_multilevel_ot_exploratory_umap.sh").read_text()
     config_toml = (repo_root / "configs" / "multilevel_deep_example.toml").read_text()
@@ -100,6 +101,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-context}"' in run_sh
     assert 'DEEP_DEVICE="${DEEP_DEVICE:-cuda}"' in run_sh
     assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-32768}"' in run_sh
+    assert 'DEEP_PRETRAINED_MODEL="${DEEP_PRETRAINED_MODEL:-}"' in run_sh
+    assert 'DEEP_SEGMENTATION_REFINEMENT_ITERS="${DEEP_SEGMENTATION_REFINEMENT_ITERS:-6}"' in run_sh
     assert 'LAMBDA_X="${LAMBDA_X:-0.5}"' in run_sh
     assert 'LAMBDA_Y="${LAMBDA_Y:-1.0}"' in run_sh
     assert 'OT_EPS="${OT_EPS:-0.03}"' in run_sh
@@ -152,12 +155,15 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert '--max-subregions "$MAX_SUBREGIONS"' in run_sh
     assert '--radius-um "$RADIUS_UM"' in run_sh
     assert '--stride-um "$STRIDE_UM"' in run_sh
+    assert '--subregion-construction-method "$SUBREGION_CONSTRUCTION_METHOD"' in run_sh
+    assert '--deep-segmentation-knn "$DEEP_SEGMENTATION_KNN"' in run_sh
     assert '--lambda-x "$LAMBDA_X"' in run_sh
     assert '--lambda-y "$LAMBDA_Y"' in run_sh
     assert '--overlap-consistency-weight "$OVERLAP_CONSISTENCY_WEIGHT"' in run_sh
     assert '--deep-feature-method "$DEEP_FEATURE_METHOD"' in run_sh
     assert '--deep-output-embedding "$DEEP_OUTPUT_EMBEDDING"' in run_sh
     assert '--deep-device "$DEEP_DEVICE"' in run_sh
+    assert "--pretrained-deep-model" in run_sh
     assert "--allow-umap-as-feature" in run_sh
     assert "../.venv" in install_sh
     assert "python3" in install_sh
@@ -207,6 +213,11 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'MIN_SUBREGIONS_PER_CLUSTER="${MIN_SUBREGIONS_PER_CLUSTER:-50}"' in prepared_gpu_sh
     assert "exec bash run.sh" in prepared_gpu_sh
     assert "/storage/" not in prepared_gpu_sh
+    assert 'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-deep_segmentation}"' in deep_segmentation_sh
+    assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in deep_segmentation_sh
+    assert 'DEEP_SEGMENTATION_REFINEMENT_ITERS="${DEEP_SEGMENTATION_REFINEMENT_ITERS:-6}"' in deep_segmentation_sh
+    assert "run_prepared_cohort_gpu.sh" in deep_segmentation_sh
+    assert "/storage/" not in deep_segmentation_sh
     optimal_search_sh = (repo_root / "run_optimal_setting_search.sh").read_text()
     assert "../spatial_ot_input/spatial_ot_input_pooled.h5ad" in optimal_search_sh
     assert "../work/spatial_ot_runs/cohort_optimal_search" in optimal_search_sh
@@ -215,6 +226,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'MIN_SUBREGIONS_PER_CLUSTER="${MIN_SUBREGIONS_PER_CLUSTER:-50}"' in optimal_search_sh
     assert 'TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-20}"' in optimal_search_sh
     assert 'ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"' in optimal_search_sh
+    assert 'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-data_driven}"' in optimal_search_sh
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in optimal_search_sh
     assert 'DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-context}"' in optimal_search_sh
     assert '--min-subregions-per-cluster "$MIN_SUBREGIONS_PER_CLUSTER"' in optimal_search_sh
@@ -227,6 +239,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "min_cells = 25" in config_toml
     assert "max_subregions = 5000" in config_toml
     assert "allow_convex_hull_fallback = false" in config_toml
+    assert 'subregion_construction_method = "deep_segmentation"' in config_toml
     assert "auto_n_clusters = false" in config_toml
     assert "candidate_n_clusters = [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]" in config_toml
     assert "min_subregions_per_cluster = 50" in config_toml

@@ -4,6 +4,10 @@ import numpy as np
 
 from .types import MultilevelOTResult
 
+LEAKAGE_BALANCED_ACCURACY_WARNING = 0.35
+LEAKAGE_PERMUTATION_P95_MARGIN_WARNING = 0.02
+LEAKAGE_PERMUTATION_MEAN_EXCESS_WARNING = 0.05
+
 
 def assigned_transport_cost_decomposition(result: MultilevelOTResult) -> dict[str, float]:
     geometry = np.asarray(result.subregion_assigned_geometry_transport_costs, dtype=np.float64)
@@ -124,6 +128,47 @@ def _qc_warning(code: str, severity: str, message: str, *, value: float | int | 
     return payload
 
 
+def _finite_metric(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _leakage_qc_warning(
+    *,
+    diagnostics: dict | None,
+    code: str,
+    descriptor_label: str,
+) -> dict[str, object] | None:
+    if not diagnostics:
+        return None
+    observed = _finite_metric(diagnostics.get("balanced_accuracy"))
+    if observed is None:
+        return None
+    permutation = diagnostics.get("permutation")
+    if not isinstance(permutation, dict):
+        permutation = {}
+    perm_p95 = _finite_metric(permutation.get("perm_p95"))
+    excess = _finite_metric(permutation.get("excess"))
+    above_null = perm_p95 is not None and observed > perm_p95 + LEAKAGE_PERMUTATION_P95_MARGIN_WARNING
+    high_absolute = observed >= LEAKAGE_BALANCED_ACCURACY_WARNING
+    high_excess = excess is not None and excess >= LEAKAGE_PERMUTATION_MEAN_EXCESS_WARNING
+    if not (above_null or high_absolute or high_excess):
+        return None
+    return _qc_warning(
+        code,
+        "warning",
+        f"Subregion cluster labels are predictable from {descriptor_label}; treat biological niche interpretation as leakage-sensitive until null/ablation checks pass.",
+        value=float(observed),
+    )
+
+
 def build_qc_warnings(
     *,
     feature_embedding_warning: str | None,
@@ -138,6 +183,10 @@ def build_qc_warnings(
     transform_diagnostics: dict[str, float | None],
     forced_label_fraction: float,
     deep_summary: dict,
+    shape_leakage_diagnostics: dict | None = None,
+    density_leakage_diagnostics: dict | None = None,
+    subregion_construction: dict | None = None,
+    auto_k_enabled: bool = False,
 ) -> list[dict[str, object]]:
     warnings_out: list[dict[str, object]] = [
         _qc_warning(
@@ -146,6 +195,22 @@ def build_qc_warnings(
             "Auxiliary cell-level projection scores are approximate; primary cell labels are inherited from fitted mutually exclusive subregions.",
         )
     ]
+    if subregion_construction and not bool(subregion_construction.get("radius_used_for_membership", True)):
+        warnings_out.append(
+            _qc_warning(
+                "subregion_radius_not_membership_radius",
+                "info",
+                "Generated subregion membership is a data-driven mutually exclusive partition; radius_um is not a fixed neighborhood membership radius.",
+            )
+        )
+    if bool(auto_k_enabled):
+        warnings_out.append(
+            _qc_warning(
+                "auto_k_is_exploratory",
+                "info",
+                "Automatic K selection is an exploratory shortlist/final-refit convenience and should be confirmed with stability and ablation analysis.",
+            )
+        )
     if feature_embedding_warning == "umap_exploratory":
         warnings_out.append(
             _qc_warning(
@@ -218,6 +283,20 @@ def build_qc_warnings(
                 value=float(assigned_transport_cost_decomposition["geometry_transport_fraction"]),
             )
         )
+    shape_warning = _leakage_qc_warning(
+        diagnostics=shape_leakage_diagnostics,
+        code="shape_descriptors_predict_subregion_clusters",
+        descriptor_label="shape descriptors",
+    )
+    if shape_warning is not None:
+        warnings_out.append(shape_warning)
+    density_warning = _leakage_qc_warning(
+        diagnostics=density_leakage_diagnostics,
+        code="density_descriptors_predict_subregion_clusters",
+        descriptor_label="subregion size/density descriptors",
+    )
+    if density_warning is not None:
+        warnings_out.append(density_warning)
     if forced_label_fraction > 0.0:
         warnings_out.append(
             _qc_warning(

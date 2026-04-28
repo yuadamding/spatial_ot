@@ -148,6 +148,11 @@ class MultilevelOTConfig:
     overlap_jaccard_min: float = 0.15
     overlap_contrast_scale: float = 1.0
     allow_convex_hull_fallback: bool = False
+    subregion_construction_method: str = "data_driven"
+    deep_segmentation_knn: int = 12
+    deep_segmentation_feature_dims: int = 32
+    deep_segmentation_feature_weight: float = 1.0
+    deep_segmentation_spatial_weight: float = 0.05
     shape_diagnostics: bool = True
     shape_leakage_permutations: int = 64
     compute_spot_latent: bool = True
@@ -322,6 +327,21 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.overlap_jaccard_min must be between 0 and 1")
     if config.ot.overlap_contrast_scale <= 0:
         raise ValueError("ot.overlap_contrast_scale must be > 0")
+    valid_subregion_construction = {"data_driven", "deep_segmentation"}
+    config.ot.subregion_construction_method = str(config.ot.subregion_construction_method).strip().lower()
+    if config.ot.subregion_construction_method not in valid_subregion_construction:
+        raise ValueError(
+            "ot.subregion_construction_method must be one of "
+            f"{sorted(valid_subregion_construction)}, got '{config.ot.subregion_construction_method}'"
+        )
+    if config.ot.deep_segmentation_knn < 2:
+        raise ValueError("ot.deep_segmentation_knn must be at least 2")
+    if config.ot.deep_segmentation_feature_dims < 1:
+        raise ValueError("ot.deep_segmentation_feature_dims must be at least 1")
+    if config.ot.deep_segmentation_feature_weight < 0 or config.ot.deep_segmentation_spatial_weight < 0:
+        raise ValueError("ot.deep_segmentation_feature_weight and ot.deep_segmentation_spatial_weight must be >= 0")
+    if config.ot.deep_segmentation_feature_weight == 0 and config.ot.deep_segmentation_spatial_weight == 0:
+        raise ValueError("at least one deep segmentation edge weight must be positive")
     if config.ot.geometry_eps <= 0 or config.ot.ot_eps <= 0:
         raise ValueError("ot.geometry_eps and ot.ot_eps must be > 0")
     if config.ot.rho <= 0:

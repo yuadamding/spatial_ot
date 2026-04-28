@@ -132,6 +132,8 @@ def test_candidate_command_preserves_pretrained_deep_model_and_regularization_fl
     assert "--no-deep-restore-best" in command
     assert "--compute-spot-latent" in command
     assert command[command.index("--min-subregions-per-cluster") + 1] == str(config.ot.min_subregions_per_cluster)
+    assert command[command.index("--subregion-construction-method") + 1] == config.ot.subregion_construction_method
+    assert command[command.index("--deep-segmentation-knn") + 1] == str(config.ot.deep_segmentation_knn)
 
 
 def test_optimal_search_marks_timed_out_candidates(monkeypatch, tmp_path: Path) -> None:

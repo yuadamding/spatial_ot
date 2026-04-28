@@ -11,6 +11,7 @@ import matplotlib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import silhouette_score
+from sklearn.neighbors import NearestNeighbors
 import torch
 
 from ..config import DeepFeatureConfig, MultilevelExperimentConfig
@@ -19,6 +20,9 @@ from ..feature_source import resolve_h5ad_features
 from .._runtime import runtime_memory_snapshot as _runtime_memory_snapshot
 from .core import _resolve_compute_device, fit_multilevel_ot
 from .diagnostics import (
+    LEAKAGE_BALANCED_ACCURACY_WARNING,
+    LEAKAGE_PERMUTATION_MEAN_EXCESS_WARNING,
+    LEAKAGE_PERMUTATION_P95_MARGIN_WARNING,
     assigned_transport_cost_decomposition as _assigned_transport_cost_decomposition,
     build_qc_warnings as _build_qc_warnings,
     cell_subregion_coverage as _cell_subregion_coverage,
@@ -63,6 +67,26 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
+
+
 def _h5ad_compression_from_env() -> str | None:
     raw = os.environ.get("SPATIAL_OT_H5AD_COMPRESSION", "gzip").strip().lower()
     if raw in {"", "none", "0", "false", "no", "off"}:
@@ -104,6 +128,193 @@ def _cluster_count_dict(labels: np.ndarray, n_clusters: int) -> dict[str, int]:
         raise ValueError("cluster labels must be in [0, n_clusters).")
     counts = np.bincount(labels_arr, minlength=int(n_clusters))
     return {f"C{idx}": int(counts[idx]) for idx in range(int(n_clusters))}
+
+
+def _numeric_summary(values: object) -> dict[str, float | int | None]:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {
+            "count": 0,
+            "mean": None,
+            "std": None,
+            "min": None,
+            "q10": None,
+            "q25": None,
+            "median": None,
+            "q75": None,
+            "q90": None,
+            "max": None,
+        }
+    return {
+        "count": int(arr.size),
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "min": float(np.min(arr)),
+        "q10": float(np.quantile(arr, 0.10)),
+        "q25": float(np.quantile(arr, 0.25)),
+        "median": float(np.median(arr)),
+        "q75": float(np.quantile(arr, 0.75)),
+        "q90": float(np.quantile(arr, 0.90)),
+        "max": float(np.max(arr)),
+    }
+
+
+def _subregion_center_nn_distances(centers_um: np.ndarray) -> np.ndarray:
+    centers = np.asarray(centers_um, dtype=np.float32)
+    if centers.ndim != 2 or centers.shape[0] < 2:
+        return np.asarray([], dtype=np.float32)
+    distances, _ = NearestNeighbors(n_neighbors=2).fit(centers).kneighbors(centers)
+    return np.asarray(distances[:, 1], dtype=np.float32)
+
+
+def _density_descriptor_frame(shape_df: pd.DataFrame, result: MultilevelOTResult) -> pd.DataFrame:
+    n_subregions = len(result.subregion_members)
+    n_cells = np.asarray([len(members) for members in result.subregion_members], dtype=np.float64)
+    geometry_counts = np.asarray(result.subregion_geometry_point_counts, dtype=np.float64)
+    base = pd.DataFrame(
+        {
+            "subregion_id": np.arange(n_subregions, dtype=np.int32),
+            "n_cells": n_cells,
+            "log1p_n_cells": np.log1p(n_cells),
+            "geometry_point_count": geometry_counts,
+            "log1p_geometry_point_count": np.log1p(np.maximum(geometry_counts, 0.0)),
+        }
+    )
+    if "shape_area" in shape_df.columns:
+        area_df = shape_df[["subregion_id", "shape_area"]].copy()
+        base = base.merge(area_df, on="subregion_id", how="left")
+    else:
+        base["shape_area"] = np.nan
+    area = base["shape_area"].to_numpy(dtype=np.float64)
+    valid_area = area[np.isfinite(area) & (area > 0.0)]
+    fallback_area = float(np.median(valid_area)) if valid_area.size else 1.0
+    safe_area = np.where(np.isfinite(area) & (area > 0.0), area, fallback_area)
+    density = n_cells / np.maximum(safe_area, 1e-8)
+    base["shape_area"] = safe_area
+    base["log1p_shape_area"] = np.log1p(safe_area)
+    base["cell_density_per_um2"] = density
+    base["log1p_cell_density_per_um2"] = np.log1p(density)
+    return base
+
+
+def _realized_subregion_statistics(
+    *,
+    result: MultilevelOTResult,
+    shape_df: pd.DataFrame,
+    min_cells: int,
+) -> dict[str, object]:
+    n_cells = np.asarray([len(members) for members in result.subregion_members], dtype=np.float64)
+    basic_counts = np.asarray([len(ids) for ids in result.subregion_basic_niche_ids], dtype=np.float64)
+    geometry_counts = np.asarray(result.subregion_geometry_point_counts, dtype=np.float64)
+    density_df = _density_descriptor_frame(shape_df, result)
+    stats: dict[str, object] = {
+        "subregion_count": int(len(result.subregion_members)),
+        "minimum_cell_constraint": int(min_cells),
+        "minimum_cell_constraint_satisfied": bool(n_cells.size == 0 or np.min(n_cells) >= int(min_cells)),
+        "n_cells": _numeric_summary(n_cells),
+        "basic_niche_count": _numeric_summary(basic_counts),
+        "geometry_point_count": _numeric_summary(geometry_counts),
+        "center_nearest_neighbor_distance_um": _numeric_summary(
+            _subregion_center_nn_distances(result.subregion_centers_um)
+        ),
+        "cell_density_per_um2": _numeric_summary(density_df["cell_density_per_um2"].to_numpy(dtype=np.float64)),
+    }
+    shape_columns = {
+        "shape_area": "shape_area_um2",
+        "shape_perimeter": "shape_perimeter_um",
+        "shape_compactness": "shape_compactness",
+        "shape_aspect_ratio": "shape_aspect_ratio",
+        "shape_eccentricity": "shape_eccentricity",
+        "shape_radius_mean": "shape_radius_mean_um",
+        "shape_radius_std": "shape_radius_std_um",
+    }
+    for column, key in shape_columns.items():
+        if column in shape_df.columns:
+            stats[key] = _numeric_summary(shape_df[column].to_numpy(dtype=np.float64))
+    return stats
+
+
+def _subregion_construction_summary(
+    *,
+    build_generated_subregions: bool,
+    region_obs_key: str | None,
+    region_geometry_json: str | Path | None,
+    result: MultilevelOTResult,
+    radius_um: float,
+    stride_um: float,
+    min_cells: int,
+    max_subregions: int,
+    subregion_construction_method: str,
+    deep_segmentation_knn: int,
+    deep_segmentation_feature_dims: int,
+    deep_segmentation_feature_weight: float,
+    deep_segmentation_spatial_weight: float,
+    deep_summary: dict,
+) -> dict[str, object]:
+    generated = bool(build_generated_subregions)
+    target_scale = float(result.basic_niche_size_um) if result.basic_niche_size_um is not None else float(stride_um)
+    construction_method = str(subregion_construction_method).strip().lower()
+    if generated:
+        if construction_method == "deep_segmentation":
+            mode = "generated_deep_graph_segmentation"
+            membership_source = (
+                "observed_coordinates_plus_deep_embedding_affinity"
+                if bool(deep_summary.get("enabled"))
+                else "observed_coordinates_plus_ot_feature_affinity_deep_segmentation_mode"
+            )
+        else:
+            mode = "generated_data_driven_spatial_feature_partition"
+            membership_source = "observed_coordinates_plus_ot_feature_view"
+        boundary_shape_source = "observed_member_point_cloud"
+        radius_semantics = (
+            "radius_um is retained for backward compatibility and graph diagnostics; it is not used as a fixed "
+            "ball/window membership radius in generated data-driven subregion construction."
+        )
+    else:
+        mode = "explicit_region_obs_membership"
+        membership_source = f"obs[{region_obs_key}]" if region_obs_key is not None else "provided_subregion_members"
+        boundary_shape_source = "explicit_mask_or_polygon" if region_geometry_json is not None else "observed_member_point_cloud"
+        radius_semantics = (
+            "radius_um is retained for compatibility and graph diagnostics; explicit memberships come from the "
+            "provided region labels, not a radius query."
+        )
+    return {
+        "mode": mode,
+        "membership_source": membership_source,
+        "mutually_exclusive": True,
+        "requires_full_cell_coverage_for_generated_partitions": bool(generated),
+        "radius_used_for_membership": False,
+        "radius_um": float(radius_um),
+        "radius_um_semantics": radius_semantics,
+        "stride_um": float(stride_um),
+        "target_subregion_scale_um": target_scale,
+        "basic_niche_size_um": float(result.basic_niche_size_um) if result.basic_niche_size_um is not None else None,
+        "boundary_shape_source": boundary_shape_source,
+        "min_cells": int(min_cells),
+        "max_subregions": int(max_subregions),
+        "construction_method": construction_method,
+        "partition_feature_weight": _env_float("SPATIAL_OT_SUBREGION_FEATURE_WEIGHT", 0.75),
+        "partition_feature_dims": _env_int("SPATIAL_OT_SUBREGION_FEATURE_DIMS", 16),
+        "boundary_refinement_iters": _env_int("SPATIAL_OT_SUBREGION_BOUNDARY_REFINEMENT_ITERS", 2),
+        "boundary_refinement_knn": _env_int("SPATIAL_OT_SUBREGION_BOUNDARY_KNN", 12),
+        "seed_partition_kmeans_max_iter": _env_int("SPATIAL_OT_SUBREGION_KMEANS_MAX_ITER", 25),
+        "seed_partition_kmeans_batch_multiplier": _env_int("SPATIAL_OT_SUBREGION_KMEANS_BATCH_MULTIPLIER", 2),
+        "deep_segmentation": {
+            "enabled": bool(generated and construction_method == "deep_segmentation"),
+            "knn": int(deep_segmentation_knn),
+            "feature_dims": int(deep_segmentation_feature_dims),
+            "feature_weight": float(deep_segmentation_feature_weight),
+            "spatial_weight": float(deep_segmentation_spatial_weight),
+            "refinement_iters": _env_int("SPATIAL_OT_DEEP_SEGMENTATION_REFINEMENT_ITERS", 6),
+            "embedding_source": (
+                f"deep_{deep_summary.get('output_embedding')}"
+                if bool(deep_summary.get("enabled"))
+                else "ot_feature_view"
+            ),
+            "algorithm": "coordinate_seeded_spatial_knn_boundary_refinement_by_deep_affinity_then_connected_min_size_merge",
+        },
+    }
 
 
 def _cell_subregion_cluster_projection(
@@ -692,6 +903,11 @@ def run_multilevel_ot_on_h5ad(
     overlap_jaccard_min: float = 0.15,
     overlap_contrast_scale: float = 1.0,
     basic_niche_size_um: float | None = 200.0,
+    subregion_construction_method: str = "data_driven",
+    deep_segmentation_knn: int = 12,
+    deep_segmentation_feature_dims: int = 32,
+    deep_segmentation_feature_weight: float = 1.0,
+    deep_segmentation_spatial_weight: float = 0.05,
     shape_diagnostics: bool = True,
     shape_leakage_permutations: int = 64,
     compute_spot_latent: bool = True,
@@ -939,6 +1155,11 @@ def run_multilevel_ot_on_h5ad(
         overlap_jaccard_min=overlap_jaccard_min,
         overlap_contrast_scale=overlap_contrast_scale,
         compute_spot_latent=compute_spot_latent,
+        subregion_construction_method=subregion_construction_method,
+        deep_segmentation_knn=deep_segmentation_knn,
+        deep_segmentation_feature_dims=deep_segmentation_feature_dims,
+        deep_segmentation_feature_weight=deep_segmentation_feature_weight,
+        deep_segmentation_spatial_weight=deep_segmentation_spatial_weight,
         auto_n_clusters=auto_n_clusters,
         candidate_n_clusters=candidate_n_clusters,
         auto_k_max_score_subregions=auto_k_max_score_subregions,
@@ -961,6 +1182,7 @@ def run_multilevel_ot_on_h5ad(
     if shape_region_geometries is None and set(result.subregion_geometry_sources) == {"observed_point_cloud"}:
         shape_region_geometries = _region_geometries_from_observed_points(result.subregion_members)
     shape_df = _shape_descriptor_frame(result.subregion_members, coords_um, region_geometries=shape_region_geometries)
+    density_df = _density_descriptor_frame(shape_df, result)
     if shape_diagnostics:
         shape_leakage = _shape_leakage_balanced_accuracy(shape_df, result.subregion_cluster_labels, seed=seed)
         shape_leakage_block = _shape_leakage_spatial_block_accuracy(
@@ -975,10 +1197,36 @@ def run_multilevel_ot_on_h5ad(
             seed=seed,
             n_perm=shape_leakage_permutations,
         )
+        density_leakage = _shape_leakage_balanced_accuracy(density_df, result.subregion_cluster_labels, seed=seed)
+        density_leakage_block = _shape_leakage_spatial_block_accuracy(
+            shape_df=density_df,
+            labels=result.subregion_cluster_labels,
+            centers_um=result.subregion_centers_um,
+            seed=seed,
+        )
+        density_leakage_perm = _shape_leakage_permutation_baseline(
+            density_df,
+            result.subregion_cluster_labels,
+            seed=seed,
+            n_perm=shape_leakage_permutations,
+        )
     else:
         shape_leakage = None
         shape_leakage_block = None
         shape_leakage_perm = None
+        density_leakage = None
+        density_leakage_block = None
+        density_leakage_perm = None
+    shape_leakage_diagnostics = {
+        "balanced_accuracy": shape_leakage,
+        "spatial_block_accuracy": shape_leakage_block,
+        "permutation": shape_leakage_perm,
+    }
+    density_leakage_diagnostics = {
+        "balanced_accuracy": density_leakage,
+        "spatial_block_accuracy": density_leakage_block,
+        "permutation": density_leakage_perm,
+    }
     embedding_2d, embedding_name = _compute_subregion_embedding(result.subregion_atom_weights, seed=seed)
     silhouette = None
     n_unique_labels = np.unique(result.subregion_cluster_labels).size
@@ -1030,6 +1278,27 @@ def run_multilevel_ot_on_h5ad(
         deep_summary=deep_summary,
         feature_obsm_key=feature_obsm_key_used,
     )
+    subregion_construction = _subregion_construction_summary(
+        build_generated_subregions=build_generated_subregions,
+        region_obs_key=region_obs_key,
+        region_geometry_json=region_geometry_json,
+        result=result,
+        radius_um=radius_um,
+        stride_um=stride_um,
+        min_cells=min_cells,
+        max_subregions=max_subregions,
+        subregion_construction_method=subregion_construction_method,
+        deep_segmentation_knn=deep_segmentation_knn,
+        deep_segmentation_feature_dims=deep_segmentation_feature_dims,
+        deep_segmentation_feature_weight=deep_segmentation_feature_weight,
+        deep_segmentation_spatial_weight=deep_segmentation_spatial_weight,
+        deep_summary=deep_summary,
+    )
+    realized_subregion_statistics = _realized_subregion_statistics(
+        result=result,
+        shape_df=shape_df,
+        min_cells=min_cells,
+    )
     qc_warnings = _build_qc_warnings(
         feature_embedding_warning=feature_embedding_warning,
         fallback_fraction=float(fallback_fraction),
@@ -1043,6 +1312,10 @@ def run_multilevel_ot_on_h5ad(
         transform_diagnostics=transform_summary,
         forced_label_fraction=float(result.subregion_forced_label_mask.sum() / max(len(result.subregion_members), 1)),
         deep_summary=deep_summary,
+        shape_leakage_diagnostics=shape_leakage_diagnostics,
+        density_leakage_diagnostics=density_leakage_diagnostics,
+        subregion_construction=subregion_construction,
+        auto_k_enabled=bool(auto_n_clusters),
     )
     result_n_clusters = int(result.cluster_supports.shape[0])
     subregion_cluster_counts = _cluster_count_dict(result.subregion_cluster_labels, result_n_clusters)
@@ -1062,7 +1335,7 @@ def run_multilevel_ot_on_h5ad(
     geometry_sources = set(geometry_source_counts)
     no_geometry_fallback = float(np.mean(result.subregion_geometry_used_fallback.astype(np.float32))) == 0.0
     if no_geometry_fallback and geometry_sources == {"observed_point_cloud"}:
-        boundary_invariance_claim = "supported_with_data_driven_observed_geometry"
+        boundary_invariance_claim = "observed_geometry_normalized_not_full_shape_invariant"
     elif no_geometry_fallback:
         boundary_invariance_claim = "supported_with_explicit_geometry"
     else:
@@ -1103,6 +1376,7 @@ def run_multilevel_ot_on_h5ad(
             "spot_level_latent_charts_implemented": bool(compute_spot_latent),
             "auto_k_selection_implemented": True,
             "mutually_exclusive_subregions_implemented": True,
+            "deep_graph_subregion_segmentation_implemented": True,
         },
         "latent_source": _latent_source_label(feature_source, deep_summary),
         "communication_source": "none",
@@ -1126,7 +1400,17 @@ def run_multilevel_ot_on_h5ad(
         "requested_n_clusters": int(n_clusters),
         "auto_n_clusters": bool(auto_n_clusters),
         "auto_k_selection": result.auto_k_selection,
+        "auto_k_selection_role": "exploratory_shortlist_final_refit_requires_stability_confirmation",
         "atoms_per_cluster": int(atoms_per_cluster),
+        "subregion_construction": subregion_construction,
+        "subregion_construction_mode": str(subregion_construction["mode"]),
+        "subregion_construction_method": str(subregion_construction_method),
+        "deep_segmentation_knn": int(deep_segmentation_knn),
+        "deep_segmentation_feature_dims": int(deep_segmentation_feature_dims),
+        "deep_segmentation_feature_weight": float(deep_segmentation_feature_weight),
+        "deep_segmentation_spatial_weight": float(deep_segmentation_spatial_weight),
+        "radius_used_for_subregion_membership": bool(subregion_construction["radius_used_for_membership"]),
+        "radius_um_semantics": str(subregion_construction["radius_um_semantics"]),
         "radius_um": float(radius_um),
         "stride_um": float(stride_um),
         "basic_niche_size_um": float(result.basic_niche_size_um) if result.basic_niche_size_um is not None else None,
@@ -1194,6 +1478,7 @@ def run_multilevel_ot_on_h5ad(
         "boundary_separation": boundary_summary,
         "cost_reliability": cost_reliability,
         "transform_diagnostics": transform_summary,
+        "realized_subregion_statistics": realized_subregion_statistics,
         "selected_restart": int(result.selected_restart),
         "restart_summaries": result.restart_summaries,
         "subregion_cluster_counts": subregion_cluster_counts,
@@ -1216,10 +1501,15 @@ def run_multilevel_ot_on_h5ad(
         "shape_leakage_balanced_accuracy": shape_leakage,
         "shape_leakage_spatial_block_accuracy": shape_leakage_block,
         "shape_leakage_permutation": shape_leakage_perm,
-        "shape_leakage_diagnostics": {
-            "balanced_accuracy": shape_leakage,
-            "spatial_block_accuracy": shape_leakage_block,
-            "permutation": shape_leakage_perm,
+        "shape_leakage_diagnostics": shape_leakage_diagnostics,
+        "density_leakage_balanced_accuracy": density_leakage,
+        "density_leakage_spatial_block_accuracy": density_leakage_block,
+        "density_leakage_permutation": density_leakage_perm,
+        "density_leakage_diagnostics": density_leakage_diagnostics,
+        "leakage_qc_thresholds": {
+            "balanced_accuracy_warning": LEAKAGE_BALANCED_ACCURACY_WARNING,
+            "permutation_p95_margin_warning": LEAKAGE_PERMUTATION_P95_MARGIN_WARNING,
+            "permutation_mean_excess_warning": LEAKAGE_PERMUTATION_MEAN_EXCESS_WARNING,
         },
         **coverage_summary,
         **cell_prob_summary,
@@ -1253,8 +1543,10 @@ def run_multilevel_ot_on_h5ad(
         "method_notes": {
             "core": "shape-normalized cluster-specific semi-relaxed Wasserstein dictionary clustering",
             "geometry_normalization": "data-driven geometry samples from each subregion are OT-mapped into a shared unit-disk reference domain before clustering; generated subregions use their observed cell point cloud, explicit regions use supplied mask/polygon geometry, and degenerate 1-2 point subregions fall back to centered-and-scaled local coordinates without OT interpolation",
-            "geometry_proxy": "generated subregion memberships are learned from observed coordinates by data-driven spatial partitioning and graph-aware minimum-size merging; generated subregion boundary and shape are taken from observed member coordinates rather than a hand-coded template geometry",
-            "basic_niches": "when basic_niche_size_um is set, it is only a target scale hint for data-driven atomic membership seeds; fitted subregions are mutually exclusive unions with sparse pieces merged to satisfy min_cells, while geometry remains data-driven from observed cells",
+            "geometry_proxy": "generated subregion memberships are learned from observed coordinates plus the OT feature view by data-driven spatial partitioning and graph-aware minimum-size merging; generated subregion boundary and shape are taken from observed member coordinates rather than a hand-coded template geometry",
+            "deep_segmentation": "when subregion_construction_method='deep_segmentation', generated memberships start from many coordinate seeds for full tissue coverage, then a spatial kNN boundary-refinement pass moves boundaries using learned/deep feature affinity before connected small pieces are merged to satisfy min_cells and max_subregions",
+            "subregion_membership_radius": "radius_um is not a generated-subregion membership radius; generated memberships are a full-coverage mutually exclusive spatial/feature partition controlled by target scale, min_cells, max_subregions, and graph-aware merging",
+            "basic_niches": "when basic_niche_size_um is set, it is only a target scale hint for data-driven atomic membership seeds; fitted subregions are mutually exclusive spatial-graph connected pieces with sparse pieces merged to satisfy min_cells, while geometry remains data-driven from observed cells",
             "local_measure": "compressed empirical measures over canonical coordinates and standardized cell-level features",
             "local_matching": "semi-relaxed unbalanced Sinkhorn with fixed source marginal and relaxed target marginal",
             "overlap_consistency": "the overlap-penalty outputs are retained for backward-compatible diagnostics, but fitted subregion memberships are required to be mutually exclusive, so generated runs should report zero true-overlap edges",
@@ -1263,7 +1555,7 @@ def run_multilevel_ot_on_h5ad(
             "subregion_cluster_size": "cluster-size constraints are applied to the number of fitted subregions assigned to each subregion cluster, not to projected cell or spot labels",
             "cell_boundary_projection": "cell-level scores are an approximate projection from canonical-coordinate plus feature fit to assigned cluster atoms, modulated by fitted-subregion cluster evidence; they are not an exact posterior under the OT model",
             "spot_level_latent": "spot-level latent charts are cluster-local coordinates learned after the regional OT fit from aligned intrinsic coordinates, OT atom-posterior composition, and local atom-posterior composition at multiple canonical radii; different clusters have separate coordinate systems",
-            "auto_k_selection": "when enabled, a pilot OT fit at the largest candidate K builds a scalable OT-landmark subregion distance matrix from fused transport-cost profiles; Silhouette is scored on that precomputed distance and CH/DB/Gap on a classical MDS embedding before majority-vote K selection and final refit",
+            "auto_k_selection": "when enabled, a pilot OT fit at the largest candidate K builds a scalable OT-landmark subregion distance matrix from fused transport-cost profiles; Silhouette is scored on that precomputed distance and CH/DB/Gap on a classical MDS embedding before majority-vote K selection and final refit. Treat this as exploratory model selection until full stability and ablation checks are run around the selected K",
         },
         "deep_features": deep_summary,
     }
@@ -1328,6 +1620,11 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         overlap_consistency_weight=config.ot.overlap_consistency_weight,
         overlap_jaccard_min=config.ot.overlap_jaccard_min,
         overlap_contrast_scale=config.ot.overlap_contrast_scale,
+        subregion_construction_method=config.ot.subregion_construction_method,
+        deep_segmentation_knn=config.ot.deep_segmentation_knn,
+        deep_segmentation_feature_dims=config.ot.deep_segmentation_feature_dims,
+        deep_segmentation_feature_weight=config.ot.deep_segmentation_feature_weight,
+        deep_segmentation_spatial_weight=config.ot.deep_segmentation_spatial_weight,
         shape_diagnostics=config.ot.shape_diagnostics,
         shape_leakage_permutations=config.ot.shape_leakage_permutations,
         compute_spot_latent=config.ot.compute_spot_latent,

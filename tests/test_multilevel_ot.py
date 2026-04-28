@@ -18,6 +18,7 @@ from spatial_ot.multilevel.diagnostics import cell_subregion_coverage
 from spatial_ot.multilevel.geometry import (
     _region_geometries_from_observed_points,
     build_basic_niches,
+    build_deep_graph_segmentation_subregions,
     build_partition_subregions_from_grid_tiles,
 )
 from spatial_ot.multilevel.io import _cluster_count_dict
@@ -167,6 +168,181 @@ def test_build_subregions_respects_min_cells() -> None:
     assert all(len(m) >= 3 for m in members)
     counts = _cell_membership_counts(coords.shape[0], members)
     assert np.all(counts == 1)
+
+
+def test_feature_informed_subregion_construction_keeps_boundaries_data_driven(monkeypatch) -> None:
+    monkeypatch.setenv("SPATIAL_OT_SUBREGION_FEATURE_WEIGHT", "10.0")
+    monkeypatch.setenv("SPATIAL_OT_SUBREGION_FEATURE_DIMS", "2")
+    monkeypatch.setenv("SPATIAL_OT_SUBREGION_BOUNDARY_REFINEMENT_ITERS", "5")
+    monkeypatch.setenv("SPATIAL_OT_SUBREGION_BOUNDARY_KNN", "30")
+    rng = np.random.default_rng(211)
+    coords = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0], scale=0.35, size=(30, 2)),
+            rng.normal(loc=[0.2, 0.1], scale=0.35, size=(30, 2)),
+        ]
+    ).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[-3.0, 0.0], scale=0.1, size=(30, 2)),
+            rng.normal(loc=[3.0, 0.0], scale=0.1, size=(30, 2)),
+        ]
+    ).astype(np.float32)
+    truth = np.repeat(np.array([0, 1], dtype=np.int32), 30)
+
+    _, members, _, _, _ = build_composite_subregions_from_basic_niches(
+        coords_um=coords,
+        radius_um=0.5,
+        stride_um=0.5,
+        min_cells=10,
+        max_subregions=2,
+        basic_niche_size_um=0.5,
+        partition_features=features,
+        seed=211,
+    )
+
+    counts = _cell_membership_counts(coords.shape[0], members)
+    assert np.all(counts == 1)
+    purities = []
+    for member in members:
+        labels, label_counts = np.unique(truth[member], return_counts=True)
+        purities.append(float(label_counts.max() / label_counts.sum()))
+    assert min(purities) >= 0.9
+
+
+def test_deep_graph_segmentation_subregions_cut_learned_affinity_boundaries() -> None:
+    rng = np.random.default_rng(312)
+    y = np.linspace(-2.0, 2.0, 40, dtype=np.float32)
+    left = np.column_stack(
+        [
+            rng.normal(loc=-0.35, scale=0.08, size=y.shape[0]),
+            y + rng.normal(scale=0.03, size=y.shape[0]),
+        ]
+    )
+    right = np.column_stack(
+        [
+            rng.normal(loc=0.35, scale=0.08, size=y.shape[0]),
+            y + rng.normal(scale=0.03, size=y.shape[0]),
+        ]
+    )
+    coords = np.vstack([left, right]).astype(np.float32)
+    deep_embedding = np.vstack(
+        [
+            rng.normal(loc=[-4.0, 0.0], scale=0.05, size=(left.shape[0], 2)),
+            rng.normal(loc=[4.0, 0.0], scale=0.05, size=(right.shape[0], 2)),
+        ]
+    ).astype(np.float32)
+    truth = np.repeat(np.array([0, 1], dtype=np.int32), [left.shape[0], right.shape[0]])
+
+    centers, members, basic_centers, basic_members, basic_ids = build_deep_graph_segmentation_subregions(
+        coords_um=coords,
+        segmentation_features=deep_embedding,
+        target_scale_um=1.0,
+        min_cells=20,
+        max_subregions=2,
+        segmentation_knn=8,
+        segmentation_feature_dims=2,
+        segmentation_feature_weight=5.0,
+        segmentation_spatial_weight=0.01,
+        seed=312,
+    )
+
+    assert centers.shape[0] == len(members) == 2
+    assert basic_centers.shape[0] == len(basic_members)
+    assert len(basic_ids) == len(members)
+    counts = _cell_membership_counts(coords.shape[0], members)
+    assert np.all(counts == 1)
+    assert all(member.size >= 20 for member in members)
+    purities = []
+    for member in members:
+        _, label_counts = np.unique(truth[member], return_counts=True)
+        purities.append(float(label_counts.max() / label_counts.sum()))
+    assert min(purities) >= 0.95
+
+
+def test_deep_graph_segmentation_keeps_fine_min_size_subregions() -> None:
+    rng = np.random.default_rng(314)
+    coords = rng.uniform(0.0, 6.0, size=(720, 2)).astype(np.float32)
+    stripes = np.floor(coords[:, 0] * 2.0).astype(np.float32)
+    deep_embedding = np.column_stack(
+        [
+            stripes + rng.normal(scale=0.05, size=coords.shape[0]),
+            coords[:, 1] + rng.normal(scale=0.05, size=coords.shape[0]),
+        ]
+    ).astype(np.float32)
+
+    centers, members, _basic_centers, _basic_members, _basic_ids = build_deep_graph_segmentation_subregions(
+        coords_um=coords,
+        segmentation_features=deep_embedding,
+        target_scale_um=1.0,
+        min_cells=10,
+        max_subregions=30,
+        segmentation_knn=8,
+        segmentation_feature_dims=2,
+        segmentation_feature_weight=1.0,
+        segmentation_spatial_weight=0.05,
+        seed=314,
+    )
+
+    counts = _cell_membership_counts(coords.shape[0], members)
+    assert np.all(counts == 1)
+    assert centers.shape[0] == len(members)
+    assert len(members) >= 20
+    assert all(member.size >= 10 for member in members)
+
+
+def test_fit_multilevel_ot_uses_deep_graph_segmentation_mode() -> None:
+    rng = np.random.default_rng(313)
+    coords = np.vstack(
+        [
+            rng.normal(loc=[0.0, 0.0], scale=0.2, size=(36, 2)),
+            rng.normal(loc=[2.0, 0.0], scale=0.2, size=(36, 2)),
+        ]
+    ).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[-2.0, 0.0], scale=0.1, size=(36, 2)),
+            rng.normal(loc=[2.0, 0.0], scale=0.1, size=(36, 2)),
+        ]
+    ).astype(np.float32)
+
+    result = fit_multilevel_ot(
+        features=features,
+        coords_um=coords,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=1.0,
+        stride_um=1.0,
+        min_cells=12,
+        max_subregions=4,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=8,
+        align_iters=1,
+        allow_reflection=False,
+        allow_scale=False,
+        allow_convex_hull_fallback=False,
+        max_iter=1,
+        tol=1e-4,
+        basic_niche_size_um=1.0,
+        subregion_construction_method="deep_segmentation",
+        deep_segmentation_knn=8,
+        deep_segmentation_feature_dims=2,
+        deep_segmentation_feature_weight=5.0,
+        deep_segmentation_spatial_weight=0.01,
+        compute_spot_latent=False,
+        seed=313,
+        compute_device="cpu",
+    )
+
+    counts = _cell_membership_counts(coords.shape[0], result.subregion_members)
+    assert np.all(counts == 1)
+    assert all(len(member) >= 12 for member in result.subregion_members)
+    assert result.subregion_geometry_sources == ["observed_point_cloud"] * len(result.subregion_members)
 
 
 def test_batched_gpu_helpers_mark_nonconverged_finite_solves_as_fallback(monkeypatch) -> None:
@@ -1166,6 +1342,7 @@ def test_returned_costs_match_returned_atoms() -> None:
         stride_um=12.0,
         min_cells=15,
         max_subregions=20,
+        partition_features=_standardize_features(features),
         seed=7,
     )
     assert np.allclose(rebuilt_centers, result.subregion_centers_um)

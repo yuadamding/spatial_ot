@@ -280,6 +280,11 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--overlap-jaccard-min", type=float, default=None, help="Minimum subregion-overlap Jaccard retained by the overlap-consistency graph.")
     multilevel.add_argument("--overlap-contrast-scale", type=float, default=None, help="Contrast scale for gating the overlap-consistency penalty.")
     multilevel.add_argument("--allow-observed-hull-geometry", action=argparse.BooleanOptionalAction, default=None, help="Allow observed-coordinate convex hull fallback when explicit region geometry is unavailable.")
+    multilevel.add_argument("--subregion-construction-method", default=None, choices=["data_driven", "deep_segmentation"], help="Generated subregion construction mode. deep_segmentation cuts a spatial graph by learned/deep feature affinity before OT.")
+    multilevel.add_argument("--deep-segmentation-knn", type=int, default=None, help="Spatial kNN degree used by deep graph subregion segmentation.")
+    multilevel.add_argument("--deep-segmentation-feature-dims", type=int, default=None, help="Leading learned feature dimensions used for deep graph segmentation affinities.")
+    multilevel.add_argument("--deep-segmentation-feature-weight", type=float, default=None, help="Weight on learned-feature edge contrast during deep graph segmentation.")
+    multilevel.add_argument("--deep-segmentation-spatial-weight", type=float, default=None, help="Weight on spatial edge length during deep graph segmentation.")
     multilevel.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     multilevel.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
     multilevel.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level cluster-local spot latent charts.")
@@ -337,6 +342,11 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--overlap-jaccard-min", type=float, default=None, help="Minimum subregion-overlap Jaccard retained by the overlap-consistency graph.")
     optimal_search.add_argument("--overlap-contrast-scale", type=float, default=None, help="Contrast scale for gating the overlap-consistency penalty.")
     optimal_search.add_argument("--allow-observed-hull-geometry", action=argparse.BooleanOptionalAction, default=None, help="Allow observed-coordinate convex hull fallback when explicit region geometry is unavailable.")
+    optimal_search.add_argument("--subregion-construction-method", default=None, choices=["data_driven", "deep_segmentation"], help="Generated subregion construction mode. deep_segmentation cuts a spatial graph by learned/deep feature affinity before OT.")
+    optimal_search.add_argument("--deep-segmentation-knn", type=int, default=None, help="Spatial kNN degree used by deep graph subregion segmentation.")
+    optimal_search.add_argument("--deep-segmentation-feature-dims", type=int, default=None, help="Leading learned feature dimensions used for deep graph segmentation affinities.")
+    optimal_search.add_argument("--deep-segmentation-feature-weight", type=float, default=None, help="Weight on learned-feature edge contrast during deep graph segmentation.")
+    optimal_search.add_argument("--deep-segmentation-spatial-weight", type=float, default=None, help="Weight on spatial edge length during deep graph segmentation.")
     optimal_search.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     optimal_search.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
     optimal_search.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level cluster-local spot latent charts.")
@@ -409,6 +419,11 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "overlap_jaccard_min",
         "overlap_contrast_scale",
         "allow_observed_hull_geometry",
+        "subregion_construction_method",
+        "deep_segmentation_knn",
+        "deep_segmentation_feature_dims",
+        "deep_segmentation_feature_weight",
+        "deep_segmentation_spatial_weight",
         "shape_diagnostics",
         "shape_leakage_permutations",
         "compute_spot_latent",

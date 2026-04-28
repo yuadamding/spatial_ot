@@ -91,12 +91,86 @@ def _subregion_seed_kmeans_n_init() -> int:
 
 
 def _subregion_seed_kmeans_max_iter() -> int:
-    return max(5, _env_int("SPATIAL_OT_SUBREGION_KMEANS_MAX_ITER", 50))
+    return max(5, _env_int("SPATIAL_OT_SUBREGION_KMEANS_MAX_ITER", 25))
+
+
+def _subregion_seed_kmeans_batch_multiplier() -> int:
+    return max(1, _env_int("SPATIAL_OT_SUBREGION_KMEANS_BATCH_MULTIPLIER", 2))
+
+
+def _subregion_boundary_refinement_iters() -> int:
+    return max(0, _env_int("SPATIAL_OT_SUBREGION_BOUNDARY_REFINEMENT_ITERS", 2))
+
+
+def _subregion_boundary_refinement_knn() -> int:
+    return max(2, _env_int("SPATIAL_OT_SUBREGION_BOUNDARY_KNN", 12))
+
+
+def _subregion_partition_feature_weight() -> float:
+    return max(0.0, _env_float("SPATIAL_OT_SUBREGION_FEATURE_WEIGHT", 0.75))
+
+
+def _subregion_partition_feature_dims() -> int:
+    return max(0, _env_int("SPATIAL_OT_SUBREGION_FEATURE_DIMS", 16))
+
+
+def _deep_segmentation_knn_default() -> int:
+    return max(2, _env_int("SPATIAL_OT_DEEP_SEGMENTATION_KNN", 12))
+
+
+def _deep_segmentation_feature_dims_default() -> int:
+    return max(1, _env_int("SPATIAL_OT_DEEP_SEGMENTATION_FEATURE_DIMS", 32))
+
+
+def _deep_segmentation_feature_weight_default() -> float:
+    return max(0.0, _env_float("SPATIAL_OT_DEEP_SEGMENTATION_FEATURE_WEIGHT", 1.0))
+
+
+def _deep_segmentation_spatial_weight_default() -> float:
+    return max(0.0, _env_float("SPATIAL_OT_DEEP_SEGMENTATION_SPATIAL_WEIGHT", 0.05))
+
+
+def _deep_segmentation_refinement_iters_default() -> int:
+    return max(0, _env_int("SPATIAL_OT_DEEP_SEGMENTATION_REFINEMENT_ITERS", 6))
+
+
+def _leakage_rf_estimators() -> int:
+    return max(20, _env_int("SPATIAL_OT_LEAKAGE_RF_ESTIMATORS", 120))
+
+
+def _prepare_partition_features(
+    coords_um: np.ndarray,
+    partition_features: np.ndarray | None,
+    *,
+    target_scale_um: float,
+    feature_weight: float,
+    feature_dims: int,
+) -> np.ndarray:
+    coords = np.asarray(coords_um, dtype=np.float32)
+    centered = coords - coords.mean(axis=0, keepdims=True)
+    scale = float(np.sqrt(np.mean(np.sum(centered * centered, axis=1))))
+    scale = max(scale, float(target_scale_um), 1e-6)
+    spatial = centered / scale
+    if partition_features is None or float(feature_weight) <= 0.0 or int(feature_dims) <= 0:
+        return spatial.astype(np.float32)
+    features = np.asarray(partition_features, dtype=np.float32)
+    if features.ndim != 2 or features.shape[0] != coords.shape[0]:
+        raise ValueError("partition_features must have shape (n_cells, n_features).")
+    keep_dims = min(int(feature_dims), int(features.shape[1]))
+    if keep_dims <= 0:
+        return spatial.astype(np.float32)
+    feature_view = _standardize_features(features[:, :keep_dims])
+    joint = np.concatenate([spatial, float(feature_weight) * feature_view], axis=1)
+    return joint.astype(np.float32)
 
 
 def _fit_coordinate_seed_partition(
     coords_um: np.ndarray,
     *,
+    partition_features: np.ndarray | None = None,
+    target_scale_um: float,
+    feature_weight: float,
+    feature_dims: int,
     target_count: int,
     seed: int,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
@@ -107,11 +181,14 @@ def _fit_coordinate_seed_partition(
         members = [np.arange(n_cells, dtype=np.int32)]
         return np.asarray([coords.mean(axis=0)], dtype=np.float32), members
 
-    centered = coords - coords.mean(axis=0, keepdims=True)
-    scale = float(np.sqrt(np.mean(np.sum(centered * centered, axis=1))))
-    scale = max(scale, 1e-6)
-    x = (centered / scale).astype(np.float32)
-    batch_size = min(n_cells, max(4096, int(target_count) * 8))
+    x = _prepare_partition_features(
+        coords,
+        partition_features,
+        target_scale_um=float(target_scale_um),
+        feature_weight=float(feature_weight),
+        feature_dims=int(feature_dims),
+    )
+    batch_size = min(n_cells, max(8192, int(target_count) * _subregion_seed_kmeans_batch_multiplier()))
     model = MiniBatchKMeans(
         n_clusters=target_count,
         random_state=int(seed),
@@ -130,6 +207,75 @@ def _fit_coordinate_seed_partition(
         members.append(member)
         centers.append(_center_from_members(coords, member))
     return np.vstack(centers).astype(np.float32), members
+
+
+def _reindex_labels(labels: np.ndarray) -> np.ndarray:
+    labels = np.asarray(labels, dtype=np.int32)
+    unique = np.unique(labels)
+    remap = np.full(int(unique.max()) + 1, -1, dtype=np.int32)
+    remap[unique] = np.arange(unique.size, dtype=np.int32)
+    return remap[labels].astype(np.int32)
+
+
+def _members_from_labels(labels: np.ndarray) -> list[np.ndarray]:
+    labels = _reindex_labels(labels)
+    return [np.flatnonzero(labels == label).astype(np.int32) for label in range(int(labels.max()) + 1)]
+
+
+def _refine_partition_by_feature_boundaries(
+    coords_um: np.ndarray,
+    members: list[np.ndarray],
+    partition_features: np.ndarray | None,
+    *,
+    target_scale_um: float,
+    feature_weight: float,
+    spatial_weight: float = 1.0,
+    n_iters: int | None = None,
+    n_neighbors: int | None = None,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    refinement_iters = _subregion_boundary_refinement_iters() if n_iters is None else max(0, int(n_iters))
+    refinement_knn = _subregion_boundary_refinement_knn() if n_neighbors is None else max(2, int(n_neighbors))
+    if partition_features is None or float(feature_weight) <= 0.0 or refinement_iters <= 0:
+        centers = np.vstack([_center_from_members(coords_um, member) for member in members]).astype(np.float32)
+        return centers, members
+    coords = np.asarray(coords_um, dtype=np.float32)
+    features = np.asarray(partition_features, dtype=np.float32)
+    labels = _labels_from_partition(coords.shape[0], members)
+    labels = _reindex_labels(labels)
+    nn = NearestNeighbors(
+        n_neighbors=min(refinement_knn + 1, coords.shape[0]),
+        metric="euclidean",
+    )
+    nn.fit(coords)
+    neighbors = nn.kneighbors(coords, return_distance=False)
+    chunk_size = max(50000, _env_int("SPATIAL_OT_SUBREGION_BOUNDARY_CHUNK_SIZE", 100000))
+    scale_sq = max(float(target_scale_um) ** 2, 1e-6)
+    spatial_weight = max(0.0, float(spatial_weight))
+    for _ in range(refinement_iters):
+        members_iter = _members_from_labels(labels)
+        centers = np.vstack([_center_from_members(coords, member) for member in members_iter]).astype(np.float32)
+        feature_centers = np.vstack(_feature_centroids_from_members(features, members_iter)).astype(np.float32)
+        changed = 0
+        new_labels = labels.copy()
+        for start in range(0, coords.shape[0], chunk_size):
+            stop = min(start + chunk_size, coords.shape[0])
+            own = labels[start:stop, None]
+            neighbor_labels = labels[neighbors[start:stop]]
+            candidates = np.concatenate([own, neighbor_labels], axis=1)
+            spatial_delta = coords[start:stop, None, :] - centers[candidates]
+            spatial_score = np.sum(spatial_delta * spatial_delta, axis=2) / scale_sq
+            feature_delta = features[start:stop, None, :] - feature_centers[candidates]
+            feature_score = np.mean(feature_delta * feature_delta, axis=2)
+            scores = spatial_weight * spatial_score + float(feature_weight) * feature_score
+            assigned = candidates[np.arange(stop - start), np.argmin(scores, axis=1)].astype(np.int32)
+            changed += int(np.sum(assigned != labels[start:stop]))
+            new_labels[start:stop] = assigned
+        labels = _reindex_labels(new_labels)
+        if changed == 0:
+            break
+    out_members = _members_from_labels(labels)
+    out_centers = np.vstack([_center_from_members(coords, member) for member in out_members]).astype(np.float32)
+    return out_centers, out_members
 
 
 def _estimate_connectivity_radius_um(
@@ -199,6 +345,19 @@ def _labels_from_partition(n_cells: int, members: list[np.ndarray]) -> np.ndarra
     return labels
 
 
+def _feature_centroids_from_members(
+    features: np.ndarray | None,
+    members: list[np.ndarray],
+) -> list[np.ndarray] | None:
+    if features is None:
+        return None
+    x = np.asarray(features, dtype=np.float32)
+    return [
+        x[np.asarray(member, dtype=np.int32)].mean(axis=0).astype(np.float32)
+        for member in members
+    ]
+
+
 def _sort_partition_by_center(
     centers_um: np.ndarray,
     members: list[np.ndarray],
@@ -248,6 +407,9 @@ def _merge_data_driven_regions(
     component_ids: list[np.ndarray],
     min_cells: int,
     max_subregions: int,
+    partition_features: np.ndarray | None = None,
+    feature_weight: float = 0.0,
+    target_scale_um: float = 1.0,
 ) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray]]:
     min_cells = int(min_cells)
     if min_cells < 1:
@@ -260,6 +422,7 @@ def _merge_data_driven_regions(
     centers = [np.asarray(center, dtype=np.float32) for center in np.asarray(centers_um, dtype=np.float32)]
     member_list = [np.asarray(member, dtype=np.int32) for member in members]
     id_list = [np.asarray(ids, dtype=np.int32) for ids in component_ids]
+    feature_centers = _feature_centroids_from_members(partition_features, member_list)
     active = np.ones(len(member_list), dtype=bool)
     adjacency = _region_adjacency_from_knn(coords, member_list)
 
@@ -284,13 +447,21 @@ def _merge_data_driven_regions(
             target_pool = active_idx[active_idx != source]
         center_arr = np.vstack([centers[int(idx)] for idx in target_pool]).astype(np.float32)
         delta = center_arr - centers[source]
-        target = int(target_pool[int(np.argmin(np.sum(delta * delta, axis=1)))])
+        score = np.sum(delta * delta, axis=1) / max(float(target_scale_um) ** 2, 1e-6)
+        if feature_centers is not None and float(feature_weight) > 0.0:
+            feat_arr = np.vstack([feature_centers[int(idx)] for idx in target_pool]).astype(np.float32)
+            feat_delta = feat_arr - feature_centers[source]
+            score = score + float(feature_weight) * np.mean(feat_delta * feat_delta, axis=1)
+        target = int(target_pool[int(np.argmin(score))])
 
         merged_members = np.unique(np.concatenate([member_list[target], member_list[source]])).astype(np.int32)
         merged_ids = np.unique(np.concatenate([id_list[target], id_list[source]])).astype(np.int32)
         member_list[target] = merged_members
         id_list[target] = merged_ids
         centers[target] = _center_from_members(coords, merged_members)
+        if feature_centers is not None:
+            x = np.asarray(partition_features, dtype=np.float32)
+            feature_centers[target] = x[merged_members].mean(axis=0).astype(np.float32)
 
         active[source] = False
         source_neighbors = set(adjacency[source])
@@ -312,6 +483,108 @@ def _merge_data_driven_regions(
     return out_centers, out_members, out_ids
 
 
+def build_deep_graph_segmentation_subregions(
+    coords_um: np.ndarray,
+    segmentation_features: np.ndarray,
+    *,
+    target_scale_um: float,
+    min_cells: int,
+    max_subregions: int,
+    segmentation_knn: int | None = None,
+    segmentation_feature_dims: int | None = None,
+    segmentation_feature_weight: float | None = None,
+    segmentation_spatial_weight: float | None = None,
+    seed: int = 1337,
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
+    coords = np.asarray(coords_um, dtype=np.float32)
+    if coords.shape[0] == 0:
+        raise RuntimeError("No cells were provided, so no subregions can be created.")
+    if float(target_scale_um) <= 0:
+        raise ValueError("target_scale_um must be positive for deep graph segmentation.")
+    feature_arr = np.asarray(segmentation_features, dtype=np.float32)
+    if feature_arr.ndim != 2 or feature_arr.shape[0] != coords.shape[0]:
+        raise ValueError("segmentation_features must have shape (n_cells, n_features).")
+    feature_dims = (
+        _deep_segmentation_feature_dims_default()
+        if segmentation_feature_dims is None
+        else int(segmentation_feature_dims)
+    )
+    keep_dims = min(max(int(feature_dims), 1), int(feature_arr.shape[1]))
+    feature_view = _standardize_features(feature_arr[:, :keep_dims])
+    target_count = _target_data_driven_region_count(
+        coords,
+        target_scale_um=float(target_scale_um),
+        min_cells=int(min_cells),
+        max_subregions=int(max_subregions),
+    )
+    _, seed_members = _fit_coordinate_seed_partition(
+        coords,
+        partition_features=feature_view,
+        target_scale_um=float(target_scale_um),
+        feature_weight=(
+            _deep_segmentation_feature_weight_default()
+            if segmentation_feature_weight is None
+            else float(segmentation_feature_weight)
+        ),
+        feature_dims=int(feature_view.shape[1]),
+        target_count=target_count,
+        seed=int(seed),
+    )
+    _, refined_members = _refine_partition_by_feature_boundaries(
+        coords,
+        seed_members,
+        feature_view,
+        target_scale_um=float(target_scale_um),
+        feature_weight=(
+            _deep_segmentation_feature_weight_default()
+            if segmentation_feature_weight is None
+            else float(segmentation_feature_weight)
+        ),
+        spatial_weight=(
+            _deep_segmentation_spatial_weight_default()
+            if segmentation_spatial_weight is None
+            else float(segmentation_spatial_weight)
+        ),
+        n_iters=_deep_segmentation_refinement_iters_default(),
+        n_neighbors=_deep_segmentation_knn_default() if segmentation_knn is None else int(segmentation_knn),
+    )
+    connectivity_radius = _estimate_connectivity_radius_um(coords, target_scale_um=float(target_scale_um))
+    basic_centers, basic_members = _split_members_by_spatial_connectivity(
+        coords_um=coords,
+        members=refined_members,
+        connectivity_radius_um=connectivity_radius,
+    )
+    basic_ids = [np.asarray([idx], dtype=np.int32) for idx in range(len(basic_members))]
+    subregion_centers, subregion_members, subregion_basic_ids = _merge_data_driven_regions(
+        coords_um=coords,
+        centers_um=basic_centers,
+        members=basic_members,
+        component_ids=basic_ids,
+        min_cells=int(min_cells),
+        max_subregions=int(max_subregions),
+        partition_features=feature_view,
+        feature_weight=(
+            _deep_segmentation_feature_weight_default()
+            if segmentation_feature_weight is None
+            else float(segmentation_feature_weight)
+        ),
+        target_scale_um=float(target_scale_um),
+    )
+    subregion_centers, subregion_members, subregion_basic_ids = _sort_partition_by_center(
+        subregion_centers,
+        subregion_members,
+        subregion_basic_ids,
+    )
+    _validate_mutually_exclusive_memberships(coords.shape[0], subregion_members, require_full_coverage=True)
+    return (
+        subregion_centers.astype(np.float32),
+        [np.asarray(member, dtype=np.int32) for member in subregion_members],
+        basic_centers.astype(np.float32),
+        [np.asarray(member, dtype=np.int32) for member in basic_members],
+        [np.asarray(ids, dtype=np.int32) for ids in subregion_basic_ids],
+    )
+
+
 def build_data_driven_subregions(
     coords_um: np.ndarray,
     radius_um: float,
@@ -320,6 +593,9 @@ def build_data_driven_subregions(
     max_subregions: int,
     *,
     target_scale_um: float | None = None,
+    partition_features: np.ndarray | None = None,
+    partition_feature_weight: float | None = None,
+    partition_feature_dims: int | None = None,
     seed: int = 1337,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
     del radius_um
@@ -329,6 +605,22 @@ def build_data_driven_subregions(
     scale_um = float(target_scale_um) if target_scale_um is not None else float(stride_um)
     if scale_um <= 0 or float(stride_um) <= 0:
         raise ValueError("target scale and stride_um must be positive.")
+    feature_weight = (
+        _subregion_partition_feature_weight()
+        if partition_feature_weight is None
+        else max(0.0, float(partition_feature_weight))
+    )
+    feature_dims = (
+        _subregion_partition_feature_dims()
+        if partition_feature_dims is None
+        else max(0, int(partition_feature_dims))
+    )
+    feature_view = None
+    if partition_features is not None and feature_weight > 0.0 and feature_dims > 0:
+        feature_arr = np.asarray(partition_features, dtype=np.float32)
+        if feature_arr.ndim != 2 or feature_arr.shape[0] != coords.shape[0]:
+            raise ValueError("partition_features must have shape (n_cells, n_features).")
+        feature_view = _standardize_features(feature_arr[:, : min(feature_dims, feature_arr.shape[1])])
 
     target_count = _target_data_driven_region_count(
         coords,
@@ -336,7 +628,22 @@ def build_data_driven_subregions(
         min_cells=int(min_cells),
         max_subregions=int(max_subregions),
     )
-    _, seed_members = _fit_coordinate_seed_partition(coords, target_count=target_count, seed=int(seed))
+    _, seed_members = _fit_coordinate_seed_partition(
+        coords,
+        partition_features=feature_view,
+        target_scale_um=scale_um,
+        feature_weight=feature_weight,
+        feature_dims=feature_dims,
+        target_count=target_count,
+        seed=int(seed),
+    )
+    _, seed_members = _refine_partition_by_feature_boundaries(
+        coords,
+        seed_members,
+        feature_view,
+        target_scale_um=scale_um,
+        feature_weight=feature_weight,
+    )
     connectivity_radius = _estimate_connectivity_radius_um(coords, target_scale_um=scale_um)
     basic_centers, basic_members = _split_members_by_spatial_connectivity(
         coords_um=coords,
@@ -351,6 +658,9 @@ def build_data_driven_subregions(
         component_ids=basic_ids,
         min_cells=int(min_cells),
         max_subregions=int(max_subregions),
+        partition_features=feature_view,
+        feature_weight=feature_weight,
+        target_scale_um=scale_um,
     )
     subregion_centers, subregion_members, subregion_basic_ids = _sort_partition_by_center(
         subregion_centers,
@@ -412,6 +722,7 @@ def build_partition_subregions_from_grid_tiles(
     min_cells: int,
     max_subregions: int,
     *,
+    partition_features: np.ndarray | None = None,
     seed: int = 1337,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
     """Backward-compatible alias for data-driven subregion construction.
@@ -426,6 +737,7 @@ def build_partition_subregions_from_grid_tiles(
         min_cells=min_cells,
         max_subregions=max_subregions,
         target_scale_um=float(stride_um),
+        partition_features=partition_features,
         seed=int(seed),
     )
 
@@ -435,6 +747,8 @@ def build_basic_niches(
     niche_size_um: float,
     min_cells: int,
     max_subregions: int,
+    *,
+    partition_features: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
     """Build mutually exclusive data-driven atomic subregions.
 
@@ -448,6 +762,7 @@ def build_basic_niches(
         min_cells=int(min_cells),
         max_subregions=int(max_subregions),
         target_scale_um=float(niche_size_um),
+        partition_features=partition_features,
     )
     return centers, members
 
@@ -460,6 +775,7 @@ def build_composite_subregions_from_basic_niches(
     max_subregions: int,
     basic_niche_size_um: float,
     *,
+    partition_features: np.ndarray | None = None,
     seed: int = 1337,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
     """Build data-driven subregions plus atomic seed provenance."""
@@ -470,6 +786,7 @@ def build_composite_subregions_from_basic_niches(
         min_cells=min_cells,
         max_subregions=max_subregions,
         target_scale_um=float(basic_niche_size_um),
+        partition_features=partition_features,
         seed=int(seed),
     )
 
@@ -800,7 +1117,7 @@ def _shape_leakage_balanced_accuracy(shape_df: pd.DataFrame, labels: np.ndarray,
     numeric_cols = [c for c in shape_df.columns if c != "subregion_id" and np.issubdtype(shape_df[c].dtype, np.number)]
     x = shape_df[numeric_cols].to_numpy(dtype=np.float32)
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    clf = RandomForestClassifier(n_estimators=300, random_state=seed)
+    clf = RandomForestClassifier(n_estimators=_leakage_rf_estimators(), random_state=seed)
     scores = cross_val_score(clf, x, y, cv=cv, scoring="balanced_accuracy")
     return float(np.mean(scores))
 
@@ -828,7 +1145,7 @@ def _shape_leakage_spatial_block_accuracy(
     blocks = block_km.fit_predict(centers)
     numeric_cols = [c for c in shape_df.columns if c != "subregion_id" and np.issubdtype(shape_df[c].dtype, np.number)]
     x = shape_df[numeric_cols].to_numpy(dtype=np.float32)
-    clf = RandomForestClassifier(n_estimators=300, random_state=seed)
+    clf = RandomForestClassifier(n_estimators=_leakage_rf_estimators(), random_state=seed)
     scores: list[float] = []
     for block in np.unique(blocks):
         test_mask = blocks == block

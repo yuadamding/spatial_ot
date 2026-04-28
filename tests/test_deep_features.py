@@ -1061,10 +1061,16 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
         "assigned_ot_fallback_fraction",
         "boundary_invariance_claim",
         "shape_leakage_diagnostics",
+        "density_leakage_diagnostics",
+        "subregion_construction",
+        "realized_subregion_statistics",
         "normalizer_diagnostics",
     }
     assert required_summary_keys <= set(saved_summary)
     assert saved_summary["boundary_invariance_claim"] == "not_supported_observed_hull_fallback"
+    assert saved_summary["subregion_construction"]["radius_used_for_membership"] is False
+    assert saved_summary["radius_used_for_subregion_membership"] is False
+    assert saved_summary["realized_subregion_statistics"]["n_cells"]["count"] == saved_summary["n_subregions"]
     assert saved_summary["compute_device_requested"] == "cpu"
     assert saved_summary["compute_device_used"] == "cpu"
     assert saved_summary["deep_features"]["validation_context_mode"] == "inductive"
@@ -1386,7 +1392,7 @@ def test_run_multilevel_ot_on_h5ad_reports_deep_count_reconstruction(tmp_path) -
     assert count_summary["target_layer"] == "X"
     assert summary["geometry_source_counts"] == {"observed_point_cloud": summary["n_subregions"]}
     assert summary["shape_descriptor_source_counts"] == {"observed_point_cloud": summary["n_subregions"]}
-    assert summary["boundary_invariance_claim"] == "supported_with_data_driven_observed_geometry"
+    assert summary["boundary_invariance_claim"] == "observed_geometry_normalized_not_full_shape_invariant"
     assert summary["deep_features"]["latent_diagnostics"]["count_target_dim"] == counts.shape[1]
     saved_summary = json.loads((tmp_path / "count_multilevel_out" / "summary.json").read_text())
     assert saved_summary["deep_features"]["count_reconstruction"]["target_layer"] == "X"
