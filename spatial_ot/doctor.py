@@ -106,7 +106,7 @@ def _torch_info() -> dict[str, object]:
 
 def run_doctor(*, verbose: bool = True) -> dict[str, object]:
     repo_root = _repo_root()
-    run_sh_text = _read(repo_root / "run.sh")
+    run_sh_text = _read(repo_root / "scripts" / "run.sh")
 
     ot = MultilevelOTConfig()
     deep = DeepFeatureConfig()

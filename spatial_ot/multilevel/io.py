@@ -41,6 +41,7 @@ from .geometry import (
     _shape_leakage_balanced_accuracy,
     _shape_leakage_permutation_baseline,
     _shape_leakage_spatial_block_accuracy,
+    _validate_mutually_exclusive_memberships,
 )
 from .metadata import (
     extract_count_target as _extract_count_target,
@@ -117,7 +118,6 @@ def _method_stack_summary(
         "ot_feature_obsm_key": str(feature_obsm_key),
         "feature_input_mode": str(feature_source.get("input_mode", "obsm")),
         "feature_space_kind": str(feature_source.get("feature_space_kind", "unknown")),
-        "legacy_teacher_student_used": False,
         "communication_source": "none",
         "cell_label_mode": "fitted_subregion_cluster_membership",
         "cell_projection_mode": "auxiliary_approximate_cell_scores",
@@ -344,6 +344,10 @@ def _cell_subregion_cluster_projection(
     n_cells: int,
     result: MultilevelOTResult,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    try:
+        _validate_mutually_exclusive_memberships(int(n_cells), result.subregion_members)
+    except RuntimeError as exc:
+        raise ValueError("Cannot write primary cell niche labels because subregion memberships overlap or are invalid.") from exc
     n_clusters = int(result.cluster_supports.shape[0])
     labels = np.full(int(n_cells), -1, dtype=np.int32)
     probs = np.zeros((int(n_cells), n_clusters), dtype=np.float32)
@@ -583,11 +587,11 @@ def _save_multilevel_outputs(
     )
     summary.setdefault("method_notes", {})["spot_level_latent"] = (
         "Every row/spot occurrence inside every fitted regional niche is projected into a shared 2D diagnostic chart. "
-        "The default chart is OT-grounded atom-barycentric MDS: cluster anchors are learned from distances between "
+        "The default chart is OT-grounded atom-barycentric MDS: cluster anchors are learned from balanced OT distances between "
         "the fitted cluster atom measures, and each occurrence is placed inside its assigned cluster by barycentering "
         "the cluster's atom embedding with the occurrence's cost-gap-calibrated OT atom posterior. Raw aligned x/y coordinates are not "
         "concatenated into the default chart features, and cluster-local variance is not equalized to a fixed radius. "
-        "The legacy Fisher/local-PCA chart remains available only as an explicit diagnostic mode. Primary OT subregion "
+        "The Fisher/local-PCA chart remains available only as an explicit diagnostic mode. Primary OT subregion "
         "labels remain authoritative; the latent projection changes the chart geometry, not the fitted subregion labels. "
         "The H5AD stores a collapsed per-row preview; the NPZ stores the full occurrence-level latent field, posterior "
         "entropy, atom argmax, effective temperature, atom embeddings, and cluster anchors."
@@ -631,6 +635,10 @@ def _save_multilevel_outputs(
             "temperature_used",
             "weights",
             "atom_posteriors",
+            "cluster_anchor_distance",
+            "atom_mds_stress",
+            "atom_mds_positive_eigenvalue_mass_2d",
+            "atom_mds_negative_eigenvalue_mass_fraction",
         ],
         "cell_preview_obsm_key": "mlot_spot_latent_coords",
         "coordinate_scope": str(spot_latent_metadata["coordinate_scope"]),
@@ -653,12 +661,35 @@ def _save_multilevel_outputs(
         if np.isfinite(result.spot_latent_assignment_temperature)
         else None,
         "temperature_mode": str(result.spot_latent_temperature_mode),
+        "temperature_calibration": "default auto_entropy mode solves for a target median normalized atom-posterior entropy; fixed/manual and auto_cost_gap modes remain available for diagnostics",
         "temperature_used_summary": _numeric_summary(result.spot_latent_temperature_used),
         "posterior_entropy_summary": _numeric_summary(result.spot_latent_posterior_entropy),
         "normalized_posterior_entropy_summary": _numeric_summary(
             result.spot_latent_normalized_posterior_entropy
         ),
         "atom_confidence_summary": _numeric_summary(result.spot_latent_atom_confidence),
+        "cluster_anchor_distance_method": str(result.spot_latent_cluster_anchor_distance_method),
+        "cluster_anchor_mds_stress": float(result.spot_latent_cluster_mds_stress)
+        if np.isfinite(result.spot_latent_cluster_mds_stress)
+        else None,
+        "cluster_anchor_mds_positive_eigenvalue_mass_2d": float(
+            result.spot_latent_cluster_mds_positive_eigenvalue_mass_2d
+        )
+        if np.isfinite(result.spot_latent_cluster_mds_positive_eigenvalue_mass_2d)
+        else None,
+        "cluster_anchor_mds_negative_eigenvalue_mass_fraction": float(
+            result.spot_latent_cluster_mds_negative_eigenvalue_mass_fraction
+        )
+        if np.isfinite(result.spot_latent_cluster_mds_negative_eigenvalue_mass_fraction)
+        else None,
+        "atom_mds_stress_summary": _numeric_summary(result.spot_latent_atom_mds_stress),
+        "atom_mds_positive_eigenvalue_mass_2d_summary": _numeric_summary(
+            result.spot_latent_atom_mds_positive_eigenvalue_mass_2d
+        ),
+        "atom_mds_negative_eigenvalue_mass_fraction_summary": _numeric_summary(
+            result.spot_latent_atom_mds_negative_eigenvalue_mass_fraction
+        ),
+        "cell_preview_aggregation": "unweighted_occurrence_average_by_default; confidence-weighted preview coordinates are saved separately and weights should be used for opacity/QC rather than suppressing transitional cells",
         "global_within_scale": float(result.spot_latent_global_within_scale)
         if np.isfinite(result.spot_latent_global_within_scale)
         else None,
@@ -726,6 +757,10 @@ def _save_multilevel_outputs(
         result.cell_spot_latent_posterior_entropy.astype(np.float32)
     )
     cells_out.obsm["mlot_spot_latent_coords"] = result.cell_spot_latent_coords.astype(np.float32)
+    cells_out.obsm["mlot_spot_latent_unweighted_coords"] = result.cell_spot_latent_unweighted_coords.astype(np.float32)
+    cells_out.obsm["mlot_spot_latent_confidence_weighted_coords"] = (
+        result.cell_spot_latent_confidence_weighted_coords.astype(np.float32)
+    )
     if deep_embedding is not None and deep_obsm_key:
         cells_out.obsm[deep_obsm_key] = np.asarray(deep_embedding, dtype=np.float32)
     cells_out.uns["multilevel_ot"] = {
@@ -747,6 +782,12 @@ def _save_multilevel_outputs(
         "spot_level_latent_projection_mode": result.spot_latent_projection_mode,
         "spot_level_latent_chart_learning_mode": result.spot_latent_chart_learning_mode,
         "spot_level_latent_validation_role": result.spot_latent_validation_role,
+        "spot_level_latent_cluster_anchor_distance_method": result.spot_latent_cluster_anchor_distance_method,
+        "spot_level_latent_cluster_anchor_mds_stress": (
+            float(result.spot_latent_cluster_mds_stress)
+            if np.isfinite(result.spot_latent_cluster_mds_stress)
+            else None
+        ),
         "spot_level_latent_npz": str(spot_latent_path),
         "deep_obsm_key": deep_obsm_key,
         "method_layers": summary.get("method_layers"),
@@ -841,6 +882,12 @@ def _save_multilevel_outputs(
         temperature_used=result.spot_latent_temperature_used.astype(np.float32),
         weights=result.spot_latent_weights.astype(np.float32),
         atom_posteriors=result.spot_latent_atom_posteriors.astype(np.float32),
+        cluster_anchor_distance=result.spot_latent_cluster_anchor_distance.astype(np.float32),
+        atom_mds_stress=result.spot_latent_atom_mds_stress.astype(np.float32),
+        atom_mds_positive_eigenvalue_mass_2d=result.spot_latent_atom_mds_positive_eigenvalue_mass_2d.astype(np.float32),
+        atom_mds_negative_eigenvalue_mass_fraction=result.spot_latent_atom_mds_negative_eigenvalue_mass_fraction.astype(np.float32),
+        cell_spot_latent_unweighted_coords=result.cell_spot_latent_unweighted_coords.astype(np.float32),
+        cell_spot_latent_confidence_weighted_coords=result.cell_spot_latent_confidence_weighted_coords.astype(np.float32),
         cell_spot_latent_coords=result.cell_spot_latent_coords.astype(np.float32),
         cell_spot_latent_cluster_labels=result.cell_spot_latent_cluster_labels.astype(np.int32),
         cell_spot_latent_weights=result.cell_spot_latent_weights.astype(np.float32),
@@ -863,6 +910,16 @@ def _save_multilevel_outputs(
         global_within_scale=np.array(float(result.spot_latent_global_within_scale), dtype=np.float32),
         assignment_temperature=np.array(float(result.spot_latent_assignment_temperature), dtype=np.float32),
         temperature_mode=np.array(result.spot_latent_temperature_mode),
+        cluster_anchor_distance_method=np.array(result.spot_latent_cluster_anchor_distance_method),
+        cluster_anchor_mds_stress=np.array(float(result.spot_latent_cluster_mds_stress), dtype=np.float32),
+        cluster_anchor_mds_positive_eigenvalue_mass_2d=np.array(
+            float(result.spot_latent_cluster_mds_positive_eigenvalue_mass_2d),
+            dtype=np.float32,
+        ),
+        cluster_anchor_mds_negative_eigenvalue_mass_fraction=np.array(
+            float(result.spot_latent_cluster_mds_negative_eigenvalue_mass_fraction),
+            dtype=np.float32,
+        ),
     )
     np.savez_compressed(
         candidate_diag_path,
@@ -1361,6 +1418,19 @@ def run_multilevel_ot_on_h5ad(
     if sorted_costs.shape[1] >= 2:
         margin = float(np.mean(sorted_costs[:, 1] - sorted_costs[:, 0]))
     coverage_summary = _cell_subregion_coverage(int(adata.n_obs), result.subregion_members)
+    membership_validation_summary = {
+        "mutually_exclusive": bool(
+            int(coverage_summary["cell_subregion_duplicate_count"]) == 0
+            and int(coverage_summary["cell_subregion_max_memberships"]) <= 1
+        ),
+        "full_partition": bool(coverage_summary["cell_subregion_partition_complete"]),
+        "covered_cell_count": int(coverage_summary["covered_cell_count"]),
+        "uncovered_cell_count": int(coverage_summary["uncovered_cell_count"]),
+        "overlapping_cell_count": int(coverage_summary["cell_subregion_duplicate_count"]),
+        "max_memberships_per_cell": int(coverage_summary["cell_subregion_max_memberships"]),
+        "membership_mode": str(coverage_summary["subregion_membership_mode"]),
+        "enforcement": "hard_fail_on_empty_duplicate_out_of_range_or_cross_subregion_overlap",
+    }
     primary_cell_labels, primary_cell_probs, primary_cell_membership_counts = _cell_subregion_cluster_projection(
         n_cells=int(adata.n_obs),
         result=result,
@@ -1414,6 +1484,7 @@ def run_multilevel_ot_on_h5ad(
         deep_segmentation_spatial_weight=deep_segmentation_spatial_weight,
         deep_summary=deep_summary,
     )
+    subregion_construction["membership_validation"] = membership_validation_summary
     realized_subregion_statistics = _realized_subregion_statistics(
         result=result,
         shape_df=shape_df,
@@ -1601,6 +1672,7 @@ def run_multilevel_ot_on_h5ad(
         "cost_reliability": cost_reliability,
         "transform_diagnostics": transform_summary,
         "realized_subregion_statistics": realized_subregion_statistics,
+        "subregion_membership_validation": membership_validation_summary,
         "selected_restart": int(result.selected_restart),
         "restart_summaries": result.restart_summaries,
         "subregion_cluster_counts": subregion_cluster_counts,

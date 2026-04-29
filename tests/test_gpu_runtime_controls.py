@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from spatial_ot.config import DeepFeatureConfig
-from spatial_ot.deep_features import SpatialOTFeatureEncoder
+from spatial_ot.deep import SpatialOTFeatureEncoder
 from spatial_ot.multilevel.core import (
     _cluster_cost_matrix,
     _cuda_target_bytes,
@@ -54,7 +54,7 @@ def test_cuda_target_bytes_respects_visible_gpu_capacity(monkeypatch) -> None:
     )
 
     target_bytes = _cuda_target_bytes(device=torch.device("cuda:0"))
-    assert target_bytes == int(8 * (1024**3))
+    assert target_bytes == int(9 * (1024**3))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable in this environment")

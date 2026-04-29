@@ -204,7 +204,6 @@ def _deep_method_stack(
         "input_feature_mode": str(feature_source.get("input_mode", "obsm")),
         "feature_space_kind": str(feature_source.get("feature_space_kind", "unknown")),
         "output_obsm_key": str(output_obsm_key),
-        "legacy_teacher_student_used": False,
         "communication_source": "none",
     }
 

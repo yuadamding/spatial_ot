@@ -5,6 +5,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_DIR"
 
+default_cpu_threads() {
+  if command -v getconf >/dev/null 2>&1; then
+    getconf _NPROCESSORS_ONLN 2>/dev/null && return
+  fi
+  if command -v nproc >/dev/null 2>&1; then
+    nproc 2>/dev/null && return
+  fi
+  echo 1
+}
+
 VENV_DIR="${VENV_DIR:-../.venv}"
 PYTHON_BIN="${PYTHON_BIN:-${VENV_DIR}/bin/python}"
 INPUT_DIR="${INPUT_DIR:-../spatial_ot_input}"
@@ -68,12 +78,13 @@ LIGHT_CELL_H5AD="${LIGHT_CELL_H5AD:-1}"
 H5AD_COMPRESSION="${H5AD_COMPRESSION:-lzf}"
 WRITE_SAMPLE_SPATIAL_MAPS="${WRITE_SAMPLE_SPATIAL_MAPS:-0}"
 PROGRESS_LOG="${PROGRESS_LOG:-1}"
-CPU_THREADS="${CPU_THREADS:-28}"
+CPU_THREADS="${CPU_THREADS:-$(default_cpu_threads)}"
 TORCH_INTRAOP_THREADS="${TORCH_INTRAOP_THREADS:-$CPU_THREADS}"
 TORCH_INTEROP_THREADS="${TORCH_INTEROP_THREADS:-4}"
 CUDA_DEVICE_LIST="${CUDA_DEVICE_LIST:-all}"
 PARALLEL_RESTARTS="${PARALLEL_RESTARTS:-auto}"
 CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-50}"
+CUDA_MAX_TARGET_FRACTION="${CUDA_MAX_TARGET_FRACTION:-0.9}"
 X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-512}"
 X_TARGET_SUM="${X_TARGET_SUM:-10000}"
 PREPARED_FEATURE_OBSM_KEY="${PREPARED_FEATURE_OBSM_KEY:-X_spatial_ot_x_svd_${X_FEATURE_COMPONENTS}}"
@@ -145,11 +156,17 @@ export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$CPU_THREADS}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-$CPU_THREADS}"
 export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-$CPU_THREADS}"
 export BLIS_NUM_THREADS="${BLIS_NUM_THREADS:-$CPU_THREADS}"
+export NUMBA_NUM_THREADS="${NUMBA_NUM_THREADS:-$CPU_THREADS}"
+export OMP_DYNAMIC="${OMP_DYNAMIC:-FALSE}"
+export MKL_DYNAMIC="${MKL_DYNAMIC:-FALSE}"
 export SPATIAL_OT_TORCH_NUM_THREADS="${SPATIAL_OT_TORCH_NUM_THREADS:-$TORCH_INTRAOP_THREADS}"
 export SPATIAL_OT_TORCH_NUM_INTEROP_THREADS="${SPATIAL_OT_TORCH_NUM_INTEROP_THREADS:-$TORCH_INTEROP_THREADS}"
+export SPATIAL_OT_CPU_THREADS="${SPATIAL_OT_CPU_THREADS:-$CPU_THREADS}"
 export SPATIAL_OT_CUDA_DEVICE_LIST="${SPATIAL_OT_CUDA_DEVICE_LIST:-$CUDA_DEVICE_LIST}"
 export SPATIAL_OT_PARALLEL_RESTARTS="${SPATIAL_OT_PARALLEL_RESTARTS:-$PARALLEL_RESTARTS}"
 export SPATIAL_OT_CUDA_TARGET_VRAM_GB="${SPATIAL_OT_CUDA_TARGET_VRAM_GB:-$CUDA_TARGET_VRAM_GB}"
+export SPATIAL_OT_CUDA_MAX_TARGET_FRACTION="${SPATIAL_OT_CUDA_MAX_TARGET_FRACTION:-$CUDA_MAX_TARGET_FRACTION}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export SPATIAL_OT_X_SVD_COMPONENTS="${SPATIAL_OT_X_SVD_COMPONENTS:-$X_FEATURE_COMPONENTS}"
 export SPATIAL_OT_X_TARGET_SUM="${SPATIAL_OT_X_TARGET_SUM:-$X_TARGET_SUM}"
 export SPATIAL_OT_SINKHORN_MAX_ITER="${SPATIAL_OT_SINKHORN_MAX_ITER:-$SINKHORN_MAX_ITER}"
@@ -186,7 +203,7 @@ SAMPLE_SPOT_LATENT_PLOT_DIR="${SAMPLE_SPOT_LATENT_PLOT_DIR:-${OUTPUT_DIR}/sample
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Virtual environment python not found: $PYTHON_BIN" >&2
-  echo "Run 'bash install_env.sh' from the spatial_ot directory first." >&2
+  echo "Run 'bash scripts/install_env.sh' from the spatial_ot directory first." >&2
   exit 1
 fi
 
@@ -403,6 +420,52 @@ fi
   --seed "$SEED" \
   "${DEEP_FLAGS[@]}" \
   "${EXTRA_FLAGS[@]}"
+
+if [[ "$COMPUTE_DEVICE" == cuda* || "$DEEP_DEVICE" == cuda* ]]; then
+  "$PYTHON_BIN" - "$OUTPUT_DIR/summary.json" "$CUDA_TARGET_VRAM_GB" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+summary_path = Path(sys.argv[1])
+target_gb = float(sys.argv[2])
+if not summary_path.exists():
+    raise SystemExit(f"Expected run summary was not written: {summary_path}")
+summary = json.loads(summary_path.read_text())
+
+def _max_reserved_gb(record):
+    if not isinstance(record, dict):
+        return 0.0
+    value = record.get("max_memory_reserved_bytes")
+    try:
+        return float(value) / (1024.0 ** 3)
+    except (TypeError, ValueError):
+        return 0.0
+
+peaks = [
+    ("multilevel_ot", _max_reserved_gb(summary.get("runtime_memory"))),
+    ("deep_features", _max_reserved_gb((summary.get("deep_features") or {}).get("runtime_memory"))),
+]
+peak_name, peak_gb = max(peaks, key=lambda item: item[1])
+summary.setdefault("runtime_memory_qc", {})
+summary["runtime_memory_qc"].update(
+    {
+        "cuda_target_vram_gb": target_gb,
+        "observed_peak_reserved_gb": peak_gb,
+        "observed_peak_source": peak_name,
+        "within_target_band": bool(peak_gb >= 0.85 * target_gb and peak_gb <= 1.10 * target_gb),
+    }
+)
+summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+if target_gb > 0 and peak_gb < 0.85 * target_gb:
+    print(
+        "CUDA peak reserved memory was below the requested target band: "
+        f"observed={peak_gb:.2f} GiB from {peak_name}, target={target_gb:.2f} GiB. "
+        "Increase DEEP_BATCH_SIZE first, then DEEP_HIDDEN_DIM/DEEP_LAYERS if needed.",
+        file=sys.stderr,
+    )
+PY
+fi
 
 if [[ "$REQUIRE_FULL_CELL_COVERAGE" == "1" ]]; then
   "$PYTHON_BIN" - "$OUTPUT_DIR/summary.json" <<'PY'

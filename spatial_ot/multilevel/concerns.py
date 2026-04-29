@@ -107,8 +107,8 @@ def _common_run_env(summary: dict[str, object], run_dir: Path, *, omit: set[str]
 def _run_script_for_construction(summary: dict[str, object]) -> str:
     construction = summary.get("subregion_construction")
     if isinstance(construction, dict) and construction.get("construction_method") == "deep_segmentation":
-        return "run_deep_segmentation_cohort_gpu.sh"
-    return "run_prepared_cohort_gpu.sh"
+        return "scripts/run_deep_segmentation_cohort_gpu.sh"
+    return "scripts/run_prepared_cohort_gpu.sh"
 
 
 def _baseline_comparison(
@@ -142,7 +142,7 @@ def _suggest_coordinate_only_command(summary: dict[str, object], run_dir: Path) 
         _env_token("SUBREGION_CONSTRUCTION_METHOD", "data_driven"),
         _env_token("SUBREGION_FEATURE_WEIGHT", 0),
     ]
-    return " ".join(token for token in tokens if token is not None) + " bash run_prepared_cohort_gpu.sh"
+    return " ".join(token for token in tokens if token is not None) + " bash scripts/run_prepared_cohort_gpu.sh"
 
 
 def _suggest_stability_commands(summary: dict[str, object], run_dir: Path) -> list[str]:
@@ -283,7 +283,7 @@ def _ot_cost_comparability_status(summary: dict[str, object]) -> tuple[str, bool
     if not isinstance(reliability, dict):
         fallback_fraction = _float_or_zero(summary.get("assigned_ot_fallback_fraction"))
         return (
-            "legacy_assigned_costs_only",
+            "assigned_costs_only",
             fallback_fraction > 0,
             {
                 "cost_reliability": None,
@@ -324,7 +324,7 @@ def _spot_latent_visualization_status(summary: dict[str, object]) -> tuple[str, 
                 "spot_level_latent": spot_latent_evidence,
                 "required_interpretation": (
                     "Treat OT atom-barycentric spot latent maps as downstream diagnostic visualization. They are "
-                    "less label-supervised than the legacy Fisher chart, but still are not independent biological "
+                    "less label-supervised than the Fisher diagnostic chart, but still are not independent biological "
                     "validation without stability, leakage, and held-out-sample checks."
                 ),
             },
@@ -337,6 +337,67 @@ def _spot_latent_visualization_status(summary: dict[str, object]) -> tuple[str, 
                 "Treat Fisher/discriminative spot latent separation as label-conditional visualization, not "
                 "independent evidence of biological niche separation."
             ),
+        },
+    )
+
+
+def _summary_median(summary: dict[str, object], key: str) -> float | None:
+    value = summary.get(key)
+    if not isinstance(value, dict):
+        return None
+    median = value.get("median")
+    try:
+        out = float(median)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out else None
+
+
+def _within_niche_latent_claim_status(summary: dict[str, object]) -> tuple[str, bool, dict[str, object]]:
+    spot = summary.get("spot_level_latent")
+    if not isinstance(spot, dict) or not bool(spot.get("implemented")):
+        return "spot_latent_not_computed", True, {"spot_level_latent": spot}
+    blockers: list[str] = []
+    feature_source = summary.get("feature_source")
+    feature_source = feature_source if isinstance(feature_source, dict) else {}
+    feature_warning = summary.get("feature_embedding_warning") or feature_source.get("feature_embedding_warning")
+    feature_kind = feature_source.get("feature_space_kind")
+    if feature_warning == "umap_exploratory" or feature_kind == "umap_embedding":
+        blockers.append("umap_feature_space")
+    anchor_method = str(spot.get("cluster_anchor_distance_method", "")).lower()
+    if anchor_method not in {"balanced_ot", "sinkhorn_ot"}:
+        blockers.append("non_ot_cluster_anchor_distance")
+    stress = spot.get("cluster_anchor_mds_stress")
+    try:
+        stress_value = float(stress)
+    except (TypeError, ValueError):
+        stress_value = float("nan")
+    if not (stress_value == stress_value):
+        blockers.append("missing_cluster_anchor_mds_stress")
+    elif stress_value > 0.20:
+        blockers.append("high_cluster_anchor_mds_stress")
+    entropy_median = _summary_median(spot, "normalized_posterior_entropy_summary")
+    if entropy_median is None:
+        blockers.append("missing_posterior_entropy_summary")
+    elif entropy_median < 0.25 or entropy_median > 0.65:
+        blockers.append("posterior_entropy_outside_target_range")
+    if not bool(spot.get("held_out_sample_projection_available", False)):
+        blockers.append("missing_held_out_sample_projection")
+    if not bool(spot.get("unsupervised_baseline_available", False)):
+        blockers.append("missing_unsupervised_latent_baseline")
+    if not bool(spot.get("marker_axis_interpretation_available", False)):
+        blockers.append("missing_marker_or_cell_type_axis_interpretation")
+    status = "passed_within_niche_latent_claim_checks" if not blockers else "blocked_for_within_niche_latent_claim"
+    return (
+        status,
+        bool(blockers),
+        {
+            "spot_level_latent": spot,
+            "blockers": blockers,
+            "feature_embedding_warning": feature_warning,
+            "feature_space_kind": feature_kind,
+            "recommended_entropy_median_range": [0.25, 0.65],
+            "cluster_anchor_mds_stress_threshold": 0.20,
         },
     )
 
@@ -427,15 +488,31 @@ def build_concern_resolution_report(
     )
 
     spot_status, spot_evidence = _spot_latent_visualization_status(primary)
+    latent_claim_status, latent_claim_blocking, latent_claim_evidence = _within_niche_latent_claim_status(primary)
     concerns.append(
         {
             "code": "spot_latent_supervised_visualization",
             "status": spot_status,
             "blocking_for_primary_claim": False,
+            "blocking_for_within_niche_latent_claim": latent_claim_blocking,
             "evidence": spot_evidence,
             "required_fix": (
                 "Pair spot-latent maps with unsupervised baselines, posterior-entropy/atom-argmax diagnostics, "
                 "and held-out-sample controls before using visualization as support for biological interpretation."
+            ),
+        }
+    )
+    concerns.append(
+        {
+            "code": "within_niche_latent_heterogeneity_claim",
+            "status": latent_claim_status,
+            "blocking_for_primary_claim": False,
+            "blocking_for_within_niche_latent_claim": latent_claim_blocking,
+            "evidence": latent_claim_evidence,
+            "required_fix": (
+                "For within-niche latent biology, require non-UMAP features, OT-based cluster anchors, acceptable MDS "
+                "stress, calibrated posterior entropy, an unsupervised latent baseline, held-out-sample projection, "
+                "and marker/cell-type interpretation of latent axes."
             ),
         }
     )
@@ -477,13 +554,25 @@ def build_concern_resolution_report(
     )
 
     blocking = [item["code"] for item in concerns if item.get("blocking_for_primary_claim")]
+    latent_blocking = [item["code"] for item in concerns if item.get("blocking_for_within_niche_latent_claim")]
     report = {
         "run_dir": str(run_path),
         "summary_json": str(run_path / "summary.json"),
         "overall_status": "needs_validation" if blocking else "validation_concerns_addressed",
         "strict_validation_passed": not blocking,
         "primary_claim_status": "blocked_by_validation_concerns" if blocking else "ready_after_current_validation",
+        "claim_validation": {
+            "subregion_niche_clustering": {
+                "blocking_concerns": blocking,
+                "status": "blocked" if blocking else "ready_after_current_validation",
+            },
+            "within_niche_latent_heterogeneity": {
+                "blocking_concerns": latent_blocking,
+                "status": "blocked" if latent_blocking else "ready_after_current_validation",
+            },
+        },
         "blocking_concerns": blocking,
+        "within_niche_latent_blocking_concerns": latent_blocking,
         "n_cells": primary.get("n_cells"),
         "n_subregions": primary.get("n_subregions"),
         "n_clusters": primary.get("n_clusters"),

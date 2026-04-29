@@ -17,6 +17,7 @@ from spatial_ot.multilevel.embedding import compute_subregion_embedding, subregi
 from spatial_ot.multilevel.diagnostics import cell_subregion_coverage
 from spatial_ot.multilevel.geometry import (
     _region_geometries_from_observed_points,
+    _validate_mutually_exclusive_memberships,
     build_basic_niches,
     build_deep_graph_segmentation_subregions,
     build_partition_subregions_from_grid_tiles,
@@ -24,10 +25,14 @@ from spatial_ot.multilevel.geometry import (
 from spatial_ot.multilevel.io import _cluster_count_dict
 from spatial_ot.multilevel.model_selection import select_k_from_ot_landmark_costs
 from spatial_ot.multilevel.spot_latent import (
+    _cluster_atom_measure_sqdist,
     _global_discriminative_latent_chart,
+    _posterior_entropy,
+    _resolve_posterior_temperature,
     spot_latent_separation_diagnostics,
+    weighted_atom_posteriors,
 )
-from spatial_ot.multilevel_ot import (
+from spatial_ot.multilevel import (
     RegionGeometry,
     ShapeNormalizer,
     ShapeNormalizerDiagnostics,
@@ -165,6 +170,66 @@ def test_spot_latent_chart_does_not_force_separation_without_signal() -> None:
     assert np.allclose(latent, 0.0)
     assert diagnostics["minimum_between_cluster_distance_forced"] is False
     assert diagnostics["min_between_cluster_center_distance"] is None
+
+
+def test_spot_latent_cluster_anchor_distance_uses_balanced_ot_matching() -> None:
+    atom_coords = np.asarray(
+        [
+            [[0.0, 0.0], [10.0, 0.0]],
+            [[10.0, 0.0], [0.0, 0.0]],
+        ],
+        dtype=np.float32,
+    )
+    atom_features = np.zeros((2, 2, 1), dtype=np.float32)
+    weights = np.full((2, 2), 0.5, dtype=np.float32)
+
+    balanced = _cluster_atom_measure_sqdist(
+        atom_coords,
+        atom_features,
+        weights,
+        lambda_x=1.0,
+        lambda_y=0.0,
+        cost_scale_x=1.0,
+        cost_scale_y=1.0,
+        distance_mode="balanced_ot",
+    )
+    expected = _cluster_atom_measure_sqdist(
+        atom_coords,
+        atom_features,
+        weights,
+        lambda_x=1.0,
+        lambda_y=0.0,
+        cost_scale_x=1.0,
+        cost_scale_y=1.0,
+        distance_mode="expected_cross_cost",
+    )
+
+    assert balanced[0, 1] < 1e-6
+    assert expected[0, 1] > 40.0
+
+
+def test_spot_latent_auto_entropy_temperature_hits_target_range() -> None:
+    total_cost = np.asarray(
+        [
+            [0.0, 0.3, 1.2, 2.4],
+            [0.1, 0.5, 1.0, 1.8],
+            [0.0, 0.7, 0.8, 2.0],
+        ],
+        dtype=np.float32,
+    )
+    prototype_weights = np.full(4, 0.25, dtype=np.float32)
+
+    temperature = _resolve_posterior_temperature(
+        total_cost,
+        prototype_weights,
+        base_temperature=0.1,
+        mode="auto_entropy",
+    )
+    posterior = weighted_atom_posteriors(total_cost, prototype_weights, temperature=temperature)
+    _entropy, normalized = _posterior_entropy(posterior)
+
+    assert temperature > 0.0
+    assert 0.25 <= float(np.median(normalized)) <= 0.65
 
 
 def test_build_subregions_respects_min_cells() -> None:
@@ -736,6 +801,30 @@ def test_fit_rejects_duplicate_indices_inside_explicit_subregion() -> None:
         )
 
 
+def test_membership_validator_rejects_non_integer_indices() -> None:
+    with pytest.raises(RuntimeError, match="integer cell indices"):
+        _validate_mutually_exclusive_memberships(
+            4,
+            [
+                np.array([0, 1.5], dtype=np.float32),
+                np.array([2, 3], dtype=np.int32),
+            ],
+        )
+
+
+def test_membership_validator_reports_complete_partition_counts() -> None:
+    counts = _validate_mutually_exclusive_memberships(
+        5,
+        [
+            np.array([0, 2], dtype=np.int32),
+            np.array([1, 3, 4], dtype=np.int32),
+        ],
+        require_full_coverage=True,
+    )
+
+    assert np.array_equal(counts, np.ones(5, dtype=np.int32))
+
+
 def test_cell_subregion_coverage_counts_repeated_indices() -> None:
     summary = cell_subregion_coverage(
         3,
@@ -901,7 +990,13 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     assert np.all(result.spot_latent_temperature_used > 0.0)
     assert result.spot_latent_mode == "atom_barycentric_mds"
     assert result.spot_latent_chart_learning_mode == "model_grounded_atom_distance_mds_without_fisher_labels"
-    assert result.spot_latent_temperature_mode == "auto_cost_gap"
+    assert result.spot_latent_projection_mode == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    assert result.spot_latent_temperature_mode == "auto_entropy"
+    assert result.spot_latent_cluster_anchor_distance_method == "balanced_ot"
+    assert result.spot_latent_cluster_anchor_distance.shape == (2, 2)
+    assert result.spot_latent_atom_mds_stress.shape == (2,)
+    assert np.isfinite(result.spot_latent_cluster_mds_stress)
+    assert np.all(np.isfinite(result.spot_latent_atom_mds_stress))
     assert np.all(result.spot_latent_weights >= 0.0)
     assert np.array_equal(
         result.spot_latent_cluster_labels,
@@ -920,6 +1015,8 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
         between = float(np.linalg.norm(latent_centers_arr[0] - latent_centers_arr[1]))
         assert between > float(np.mean(within_radius))
     assert result.cell_spot_latent_coords.shape == (features.shape[0], 2)
+    assert result.cell_spot_latent_unweighted_coords.shape == (features.shape[0], 2)
+    assert result.cell_spot_latent_confidence_weighted_coords.shape == (features.shape[0], 2)
     assert result.cell_spot_latent_cluster_labels.shape == (features.shape[0],)
     assert result.cell_spot_latent_weights.shape == (features.shape[0],)
     assert result.cell_spot_latent_posterior_entropy.shape == (features.shape[0],)

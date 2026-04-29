@@ -13,17 +13,17 @@ from spatial_ot.cli import _resolve_deep_fit_config_from_args, build_parser
 from spatial_ot.config import DeepFeatureConfig, load_multilevel_config
 from spatial_ot.deep import graph as deep_graph
 from spatial_ot.deep.graph import aggregate_neighbor_mean_torch, build_neighbor_graph
-from spatial_ot.deep_features import (
+from spatial_ot.deep import (
     SpatialOTFeatureEncoder,
-    _split_validation,
     fit_deep_features,
     fit_deep_features_on_h5ad,
     transform_h5ad_with_deep_model,
 )
+from spatial_ot.deep.features import _split_validation
 from spatial_ot.deep.io import _extract_count_target as _extract_deep_count_target
 from spatial_ot.multilevel.metadata import extract_count_target as _extract_multilevel_count_target
 from spatial_ot.multilevel.io import _load_region_geometry_json
-from spatial_ot.multilevel_ot import run_multilevel_ot_on_h5ad
+from spatial_ot.multilevel import run_multilevel_ot_on_h5ad
 
 
 def test_deep_feature_encoder_fit_save_load(tmp_path) -> None:
@@ -377,7 +377,6 @@ def test_fit_deep_features_on_h5ad_outputs_artifacts(tmp_path) -> None:
     assert summary["latent_source"] == "deep_joint"
     assert summary["communication_source"] == "none"
     assert summary["method_stack"]["deep_feature_adapter"] == "graph_autoencoder"
-    assert summary["method_stack"]["legacy_teacher_student_used"] is False
     assert summary["deep_features"]["graph_max_neighbors"] == 5
     assert summary["deep_features"]["full_batch_max_cells"] == 50000
     assert summary["spatial_scale"] == 2.0
@@ -452,7 +451,6 @@ def test_transform_h5ad_with_deep_model_writes_embedding(tmp_path) -> None:
     assert summary["latent_source"] == "deep_intrinsic"
     assert summary["communication_source"] == "none"
     assert summary["method_stack"]["active_path"] == "deep-transform"
-    assert summary["method_stack"]["legacy_teacher_student_used"] is False
     assert summary["deep_features"]["pretrained_model_loaded"] is True
     assert summary["deep_features"]["graph_inference_mode"] == "batched"
     transformed = ad.read_h5ad(summary["outputs"]["embedded_h5ad"])
@@ -1182,7 +1180,7 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert "heterogeneous measures" in summary["method_layers"]["layer_2_subregion_heterogeneity_clustering"]
     assert "downstream projections" in summary["method_layers"]["layer_3_projection_and_visualization"]
     assert summary["capabilities"]["spot_level_latent_charts_implemented"] is True
-    assert summary["method_stack"]["spot_level_latent_projection"] == "ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    assert summary["method_stack"]["spot_level_latent_projection"] == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
     assert "spot_level_latent" in summary["outputs"]
     spot_latent_path = Path(summary["outputs"]["spot_level_latent"])
     assert spot_latent_path.exists()
@@ -1205,10 +1203,14 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert summary["spot_level_latent"]["latent_refinement"] == "atom_posterior_barycenter_without_local_pca_radius_equalization"
     assert summary["spot_level_latent"]["includes_aligned_coordinates_in_chart_features"] is False
     assert summary["spot_level_latent"]["uses_forced_cluster_local_radius"] is False
-    assert summary["spot_level_latent"]["temperature_mode"] == "auto_cost_gap"
+    assert summary["spot_level_latent"]["temperature_mode"] == "auto_entropy"
+    assert summary["spot_level_latent"]["cluster_anchor_distance_method"] == "balanced_ot"
+    assert "cluster_anchor_mds_stress" in summary["spot_level_latent"]
     assert summary["spot_level_latent"]["posterior_entropy_summary"]["count"] == spot_latent["latent_coords"].shape[0]
     saved = ad.read_h5ad(summary["outputs"]["h5ad"])
     assert "mlot_spot_latent_coords" in saved.obsm
+    assert "mlot_spot_latent_unweighted_coords" in saved.obsm
+    assert "mlot_spot_latent_confidence_weighted_coords" in saved.obsm
     assert saved.obsm["mlot_spot_latent_coords"].shape == (adata.n_obs, 2)
     assert "mlot_spot_latent_cluster_int" in saved.obs
     assert "mlot_spot_latent_posterior_entropy" in saved.obs
@@ -1216,17 +1218,23 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert saved.uns["multilevel_ot"]["spot_level_latent_mode"] == "atom_barycentric_mds"
     assert (
         saved.uns["multilevel_ot"]["spot_level_latent_projection_mode"]
-        == "ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+        == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
     )
+    assert saved.uns["multilevel_ot"]["spot_level_latent_cluster_anchor_distance_method"] == "balanced_ot"
     assert (
         saved.uns["multilevel_ot"]["spot_level_latent_validation_role"]
         == "diagnostic_visualization_not_independent_evidence"
     )
     assert spot_latent["spot_latent_mode"].item() == "atom_barycentric_mds"
-    assert spot_latent["latent_projection_mode"].item() == "ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    assert spot_latent["latent_projection_mode"].item() == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
     assert spot_latent["chart_learning_mode"].item() == "model_grounded_atom_distance_mds_without_fisher_labels"
     assert spot_latent["validation_role"].item() == "diagnostic_visualization_not_independent_evidence"
-    assert spot_latent["temperature_mode"].item() == "auto_cost_gap"
+    assert spot_latent["temperature_mode"].item() == "auto_entropy"
+    assert spot_latent["cluster_anchor_distance_method"].item() == "balanced_ot"
+    assert spot_latent["cluster_anchor_distance"].shape == (2, 2)
+    assert spot_latent["atom_mds_stress"].shape == (2,)
+    assert "cell_spot_latent_unweighted_coords" in spot_latent.files
+    assert "cell_spot_latent_confidence_weighted_coords" in spot_latent.files
     assert bool(spot_latent["unsupervised_baseline_required_for_validation"].item()) is True
     assert bool(spot_latent["label_permutation_control_recommended"].item()) is False
     assert bool(spot_latent["includes_aligned_coordinates_in_chart_features"].item()) is False

@@ -5,7 +5,6 @@ from importlib import import_module
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "DeepFeatureConfig": ("config", "DeepFeatureConfig"),
     "DeepFeatureResult": ("deep", "DeepFeatureResult"),
-    "ExperimentConfig": ("config", "ExperimentConfig"),
     "MultilevelExperimentConfig": ("config", "MultilevelExperimentConfig"),
     "MultilevelOTConfig": ("config", "MultilevelOTConfig"),
     "MultilevelPathConfig": ("config", "MultilevelPathConfig"),
@@ -17,7 +16,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "fit_deep_features_on_h5ad": ("deep", "fit_deep_features_on_h5ad"),
     "fit_multilevel_ot": ("multilevel", "fit_multilevel_ot"),
     "fit_ot_shape_normalizer": ("multilevel", "fit_ot_shape_normalizer"),
-    "load_config": ("config", "load_config"),
     "load_multilevel_config": ("config", "load_multilevel_config"),
     "make_reference_points_unit_disk": ("multilevel", "make_reference_points_unit_disk"),
     "plot_sample_niche_maps": ("multilevel", "plot_sample_niche_maps"),
@@ -34,7 +32,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "write_concern_resolution_report": ("multilevel", "write_concern_resolution_report"),
 }
 
-__version__ = "0.1.10"
+__version__ = "0.1.12"
 __all__ = list(_LAZY_EXPORTS)
 
 

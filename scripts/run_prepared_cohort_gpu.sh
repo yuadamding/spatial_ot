@@ -5,6 +5,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_DIR"
 
+default_cpu_threads() {
+  if command -v getconf >/dev/null 2>&1; then
+    getconf _NPROCESSORS_ONLN 2>/dev/null && return
+  fi
+  if command -v nproc >/dev/null 2>&1; then
+    nproc 2>/dev/null && return
+  fi
+  echo 1
+}
+
 VENV_DIR="${VENV_DIR:-../.venv}"
 PYTHON_BIN="${PYTHON_BIN:-${VENV_DIR}/bin/python}"
 INPUT_DIR="${INPUT_DIR:-../spatial_ot_input}"
@@ -13,10 +23,29 @@ X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-512}"
 PREPARED_FEATURE_OBSM_KEY="${PREPARED_FEATURE_OBSM_KEY:-X_spatial_ot_x_svd_${X_FEATURE_COMPONENTS}}"
 INPUT_H5AD="${INPUT_H5AD:-${INPUT_DIR}/${POOLED_INPUT_NAME}}"
 OUTPUT_DIR="${OUTPUT_DIR:-../outputs/spatial_ot/cohort_multilevel_ot_prepared_gpu}"
+CPU_THREADS="${CPU_THREADS:-$(default_cpu_threads)}"
+TORCH_INTRAOP_THREADS="${TORCH_INTRAOP_THREADS:-$CPU_THREADS}"
+TORCH_INTEROP_THREADS="${TORCH_INTEROP_THREADS:-4}"
+
+export CPU_THREADS
+export TORCH_INTRAOP_THREADS
+export TORCH_INTEROP_THREADS
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPU_THREADS}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CPU_THREADS}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$CPU_THREADS}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-$CPU_THREADS}"
+export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-$CPU_THREADS}"
+export BLIS_NUM_THREADS="${BLIS_NUM_THREADS:-$CPU_THREADS}"
+export NUMBA_NUM_THREADS="${NUMBA_NUM_THREADS:-$CPU_THREADS}"
+export OMP_DYNAMIC="${OMP_DYNAMIC:-FALSE}"
+export MKL_DYNAMIC="${MKL_DYNAMIC:-FALSE}"
+export SPATIAL_OT_TORCH_NUM_THREADS="${SPATIAL_OT_TORCH_NUM_THREADS:-$TORCH_INTRAOP_THREADS}"
+export SPATIAL_OT_TORCH_NUM_INTEROP_THREADS="${SPATIAL_OT_TORCH_NUM_INTEROP_THREADS:-$TORCH_INTEROP_THREADS}"
+export SPATIAL_OT_CPU_THREADS="${SPATIAL_OT_CPU_THREADS:-$CPU_THREADS}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Virtual environment python not found: $PYTHON_BIN" >&2
-  echo "Run 'bash install_env.sh' from the spatial_ot directory first." >&2
+  echo "Run 'bash scripts/install_env.sh' from the spatial_ot directory first." >&2
   exit 1
 fi
 
@@ -42,7 +71,7 @@ try:
         raise SystemExit(
             "Prepared cohort input is incomplete. Missing "
             + ", ".join(missing)
-            + ". Run 'bash prepare_all_spatial_ot_input.sh' first."
+            + ". Run 'bash scripts/prepare_all_spatial_ot_input.sh' first."
         )
 finally:
     adata.file.close()

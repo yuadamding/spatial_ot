@@ -45,7 +45,7 @@ resolve_python_bin() {
     fi
     if ! python_can_create_venv "$PYTHON_BIN"; then
       echo "Python executable '$PYTHON_BIN' cannot create a pip-enabled virtual environment." >&2
-      echo "Install the corresponding venv support package or choose another interpreter, for example: PYTHON_BIN=python3.10 bash install_env.sh" >&2
+      echo "Install the corresponding venv support package or choose another interpreter, for example: PYTHON_BIN=python3.10 bash scripts/install_env.sh" >&2
       exit 1
     fi
     printf '%s\n' "$PYTHON_BIN"
@@ -62,7 +62,7 @@ resolve_python_bin() {
 
   echo "Could not find a Python interpreter satisfying Python >= 3.${MIN_PYTHON_MINOR}." >&2
   echo "A usable interpreter must also support creating pip-enabled virtual environments." >&2
-  echo "Set PYTHON_BIN explicitly, for example: PYTHON_BIN=python3.10 bash install_env.sh" >&2
+  echo "Set PYTHON_BIN explicitly, for example: PYTHON_BIN=python3.10 bash scripts/install_env.sh" >&2
   exit 1
 }
 

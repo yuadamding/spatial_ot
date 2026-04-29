@@ -48,47 +48,28 @@ def test_no_generated_files_tracked_when_git_metadata_is_available() -> None:
         assert not any(path.endswith(suffix) for suffix in forbidden_suffixes)
 
 
-def test_package_version_matches_0_1_10_state() -> None:
+def test_package_version_matches_0_1_12_state() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
     package_init = (repo_root / "spatial_ot" / "__init__.py").read_text()
-    assert 'version = "0.1.10"' in pyproject_toml
-    assert '__version__ = "0.1.10"' in package_init
+    assert 'version = "0.1.12"' in pyproject_toml
+    assert '__version__ = "0.1.12"' in package_init
 
 
 def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     script_dir = repo_root / "scripts"
 
-    wrappers = {
-        "run.sh": "run.sh",
-        "install_env.sh": "install_env.sh",
-        "pool_spatial_ot_input.sh": "pool_spatial_ot_input.sh",
-        "prepare_spatial_ot_input.sh": "prepare_spatial_ot_input.sh",
-        "prepare_all_spatial_ot_input.sh": "prepare_all_spatial_ot_input.sh",
-        "run_prepared_cohort_gpu.sh": "run_prepared_cohort_gpu.sh",
-        "run_deep_segmentation_cohort_gpu.sh": "run_deep_segmentation_cohort_gpu.sh",
-        "run_optimal_setting_search.sh": "run_optimal_setting_search.sh",
-        "run_p2_crc_multilevel_ot.sh": "run_p2_crc_multilevel_ot.sh",
-        "run_p2_crc_multilevel_ot_exploratory_umap.sh": "run_p2_crc_multilevel_ot_exploratory_umap.sh",
-        "run_spatial_ot_input.sh": "run_spatial_ot_input.sh",
-    }
-    for wrapper_name, target_name in wrappers.items():
-        wrapper = (repo_root / wrapper_name).read_text()
-        assert f"scripts/{target_name}" in wrapper
-        assert 'exec bash "$SCRIPT_DIR/scripts/' in wrapper
+    assert not list(repo_root.glob("*.sh"))
 
     run_sh = (script_dir / "run.sh").read_text()
     install_sh = (script_dir / "install_env.sh").read_text()
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
-    helper_sh = (script_dir / "run_spatial_ot_input.sh").read_text()
     pool_helper_sh = (script_dir / "pool_spatial_ot_input.sh").read_text()
     prepare_helper_sh = (script_dir / "prepare_spatial_ot_input.sh").read_text()
     prepare_all_helper_sh = (script_dir / "prepare_all_spatial_ot_input.sh").read_text()
     prepared_gpu_sh = (script_dir / "run_prepared_cohort_gpu.sh").read_text()
     deep_segmentation_sh = (script_dir / "run_deep_segmentation_cohort_gpu.sh").read_text()
-    p2_sh = (script_dir / "run_p2_crc_multilevel_ot.sh").read_text()
-    exploratory_sh = (script_dir / "run_p2_crc_multilevel_ot_exploratory_umap.sh").read_text()
     config_toml = (repo_root / "configs" / "multilevel_deep_example.toml").read_text()
 
     assert "../spatial_ot_input" in run_sh
@@ -119,10 +100,11 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'ALLOW_UMAP_AS_FEATURE="${ALLOW_UMAP_AS_FEATURE:-0}"' in run_sh
     assert 'ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"' in run_sh
     assert 'SHAPE_LEAKAGE_PERMUTATIONS="${SHAPE_LEAKAGE_PERMUTATIONS:-16}"' in run_sh
-    assert 'CPU_THREADS="${CPU_THREADS:-28}"' in run_sh
+    assert 'CPU_THREADS="${CPU_THREADS:-$(default_cpu_threads)}"' in run_sh
     assert 'CUDA_DEVICE_LIST="${CUDA_DEVICE_LIST:-all}"' in run_sh
     assert 'PARALLEL_RESTARTS="${PARALLEL_RESTARTS:-auto}"' in run_sh
     assert 'CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-50}"' in run_sh
+    assert 'CUDA_MAX_TARGET_FRACTION="${CUDA_MAX_TARGET_FRACTION:-0.9}"' in run_sh
     assert 'X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-512}"' in run_sh
     assert 'X_TARGET_SUM="${X_TARGET_SUM:-10000}"' in run_sh
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-none}"' in run_sh
@@ -156,11 +138,17 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPU_THREADS}"' in run_sh
     assert 'export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CPU_THREADS}"' in run_sh
     assert 'export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$CPU_THREADS}"' in run_sh
+    assert 'export NUMBA_NUM_THREADS="${NUMBA_NUM_THREADS:-$CPU_THREADS}"' in run_sh
+    assert 'export OMP_DYNAMIC="${OMP_DYNAMIC:-FALSE}"' in run_sh
+    assert 'export MKL_DYNAMIC="${MKL_DYNAMIC:-FALSE}"' in run_sh
     assert 'export SPATIAL_OT_TORCH_NUM_THREADS="${SPATIAL_OT_TORCH_NUM_THREADS:-$TORCH_INTRAOP_THREADS}"' in run_sh
     assert 'export SPATIAL_OT_TORCH_NUM_INTEROP_THREADS="${SPATIAL_OT_TORCH_NUM_INTEROP_THREADS:-$TORCH_INTEROP_THREADS}"' in run_sh
+    assert 'export SPATIAL_OT_CPU_THREADS="${SPATIAL_OT_CPU_THREADS:-$CPU_THREADS}"' in run_sh
     assert 'export SPATIAL_OT_CUDA_DEVICE_LIST="${SPATIAL_OT_CUDA_DEVICE_LIST:-$CUDA_DEVICE_LIST}"' in run_sh
     assert 'export SPATIAL_OT_PARALLEL_RESTARTS="${SPATIAL_OT_PARALLEL_RESTARTS:-$PARALLEL_RESTARTS}"' in run_sh
     assert 'export SPATIAL_OT_CUDA_TARGET_VRAM_GB="${SPATIAL_OT_CUDA_TARGET_VRAM_GB:-$CUDA_TARGET_VRAM_GB}"' in run_sh
+    assert 'export SPATIAL_OT_CUDA_MAX_TARGET_FRACTION="${SPATIAL_OT_CUDA_MAX_TARGET_FRACTION:-$CUDA_MAX_TARGET_FRACTION}"' in run_sh
+    assert 'export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"' in run_sh
     assert 'export SPATIAL_OT_X_SVD_COMPONENTS="${SPATIAL_OT_X_SVD_COMPONENTS:-$X_FEATURE_COMPONENTS}"' in run_sh
     assert 'export SPATIAL_OT_X_TARGET_SUM="${SPATIAL_OT_X_TARGET_SUM:-$X_TARGET_SUM}"' in run_sh
     assert 'export SPATIAL_OT_SINKHORN_MAX_ITER="${SPATIAL_OT_SINKHORN_MAX_ITER:-$SINKHORN_MAX_ITER}"' in run_sh
@@ -192,6 +180,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'cell_subregion_coverage_fraction' in run_sh
     assert 'uncovered_cell_count' in run_sh
     assert "Run completed with incomplete analyzed-subregion coverage" in run_sh
+    assert "runtime_memory_qc" in run_sh
+    assert "observed_peak_reserved_gb" in run_sh
     assert '--min-cells "$MIN_CELLS"' in run_sh
     assert '--max-subregions "$MAX_SUBREGIONS"' in run_sh
     assert '--radius-um "$RADIUS_UM"' in run_sh
@@ -217,7 +207,6 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "anndata>=0.11.4,<0.12; python_version < '3.11'" in pyproject_toml
     assert "anndata>=0.12; python_version >= '3.11'" in pyproject_toml
     assert "tomli>=2.0; python_version < '3.11'" in pyproject_toml
-    assert "exec bash \"$SCRIPT_DIR/run.sh\"" in helper_sh
     assert "../spatial_ot_input" in pool_helper_sh
     assert "../.venv" in pool_helper_sh
     assert 'OUTPUT_H5AD="${OUTPUT_H5AD:-${INPUT_DIR}/spatial_ot_input_pooled.h5ad}"' in pool_helper_sh
@@ -238,12 +227,6 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "Missing prepared feature cache" in prepare_all_helper_sh
     assert "prepare_spatial_ot_input.sh" in prepare_all_helper_sh
     assert "distribute-prepared-inputs" in prepare_all_helper_sh
-    assert "POOL_ALL_INPUTS" in p2_sh
-    assert "POOL_ALL_INPUTS" in exploratory_sh
-    assert "FEATURE_OBSM_KEY" in exploratory_sh
-    assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-none}"' in exploratory_sh
-    assert "exec bash \"$SCRIPT_DIR/run.sh\"" in p2_sh
-    assert "exec bash \"$SCRIPT_DIR/run.sh\"" in exploratory_sh
     assert "../spatial_ot_input" in prepared_gpu_sh
     assert "../outputs/spatial_ot/cohort_multilevel_ot_prepared_gpu" in prepared_gpu_sh
     assert "../.venv" in prepared_gpu_sh
@@ -254,10 +237,20 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'AUTO_N_CLUSTERS="${AUTO_N_CLUSTERS:-1}"' in prepared_gpu_sh
     assert 'CANDIDATE_N_CLUSTERS="${CANDIDATE_N_CLUSTERS:-15-25}"' in prepared_gpu_sh
     assert 'MIN_SUBREGIONS_PER_CLUSTER="${MIN_SUBREGIONS_PER_CLUSTER:-50}"' in prepared_gpu_sh
+    assert 'CPU_THREADS="${CPU_THREADS:-$(default_cpu_threads)}"' in prepared_gpu_sh
+    assert 'export NUMBA_NUM_THREADS="${NUMBA_NUM_THREADS:-$CPU_THREADS}"' in prepared_gpu_sh
+    assert 'export SPATIAL_OT_CPU_THREADS="${SPATIAL_OT_CPU_THREADS:-$CPU_THREADS}"' in prepared_gpu_sh
     assert 'exec bash "$SCRIPT_DIR/run.sh"' in prepared_gpu_sh
     assert "/storage/" not in prepared_gpu_sh
+    assert "cohort_multilevel_ot_deep_segmentation_vram9_" in deep_segmentation_sh
     assert 'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-deep_segmentation}"' in deep_segmentation_sh
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in deep_segmentation_sh
+    assert 'DEEP_LATENT_DIM="${DEEP_LATENT_DIM:-64}"' in deep_segmentation_sh
+    assert 'DEEP_HIDDEN_DIM="${DEEP_HIDDEN_DIM:-1024}"' in deep_segmentation_sh
+    assert 'DEEP_LAYERS="${DEEP_LAYERS:-3}"' in deep_segmentation_sh
+    assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-131072}"' in deep_segmentation_sh
+    assert 'CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-9}"' in deep_segmentation_sh
+    assert 'SPATIAL_OT_CUDA_MAX_TARGET_FRACTION="${SPATIAL_OT_CUDA_MAX_TARGET_FRACTION:-$CUDA_MAX_TARGET_FRACTION}"' in deep_segmentation_sh
     assert 'DEEP_SEGMENTATION_REFINEMENT_ITERS="${DEEP_SEGMENTATION_REFINEMENT_ITERS:-6}"' in deep_segmentation_sh
     assert "run_prepared_cohort_gpu.sh" in deep_segmentation_sh
     assert "/storage/" not in deep_segmentation_sh
@@ -289,37 +282,30 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "candidate_n_clusters = [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]" in config_toml
     assert "min_subregions_per_cluster = 50" in config_toml
 
-    legacy_training_py = (repo_root / "spatial_ot" / "legacy" / "training.py").read_text()
-    legacy_training_facade_py = (repo_root / "spatial_ot" / "training.py").read_text()
     deep_io_py = (repo_root / "spatial_ot" / "deep" / "io.py").read_text()
     multilevel_io_py = (repo_root / "spatial_ot" / "multilevel" / "io.py").read_text()
-    assert '"method_family": "legacy_teacher_student"' in legacy_training_py
-    assert '"communication_source": "legacy"' in legacy_training_py
-    assert "from .legacy.training import *" in legacy_training_facade_py
     assert '"method_family": "deep_feature_adapter"' in deep_io_py
     assert '"communication_source": "none"' in deep_io_py
     assert '"method_family": "multilevel_ot"' in multilevel_io_py
     assert '"communication_source": "none"' in multilevel_io_py
 
 
-def test_legacy_namespace_is_canonical_and_root_modules_are_facades() -> None:
+def test_package_tree_excludes_removed_scaffold_and_root_facades() -> None:
     repo_root = Path(__file__).resolve().parents[1]
 
-    compatibility_modules = {
-        "communication": "from .legacy.communication import CommunicationResult, _masked_sinkhorn, fit_communication_flows",
-        "nn": "from .legacy.nn import *",
-        "ot": "from .legacy.ot import *",
-        "preprocessing": "from .legacy.preprocessing import *",
-        "programs": "from .legacy.programs import *",
-        "training": "from .legacy.training import *",
-        "visualization": "from .legacy.visualization import *",
-    }
-    for module_name, expected_import in compatibility_modules.items():
-        canonical_path = repo_root / "spatial_ot" / "legacy" / f"{module_name}.py"
-        facade_path = repo_root / "spatial_ot" / f"{module_name}.py"
-        assert canonical_path.exists(), canonical_path
-        facade_text = facade_path.read_text()
-        assert expected_import in facade_text
+    assert not (repo_root / "spatial_ot" / "legacy").exists()
+    for module_name in [
+        "communication",
+        "nn",
+        "ot",
+        "preprocessing",
+        "programs",
+        "training",
+        "visualization",
+    ]:
+        assert not (repo_root / "spatial_ot" / f"{module_name}.py").exists()
+    for config_name in ["crc_demo_programs.json", "p2_crc_smoke.toml", "p2_crc_pilot.toml"]:
+        assert not (repo_root / "configs" / config_name).exists()
 
 
 def test_root_package_exports_active_helpers_without_eager_import_failures() -> None:

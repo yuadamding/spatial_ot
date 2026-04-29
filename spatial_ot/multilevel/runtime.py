@@ -4,6 +4,8 @@ import os
 
 import torch
 
+_THREADPOOL_LIMITS = None
+
 
 def relative_change(new, old) -> float:
     import numpy as np
@@ -58,7 +60,8 @@ def cuda_target_bytes(device: torch.device | None = None) -> int:
         total_bytes = int(torch.cuda.get_device_properties(dev).total_memory)
     except Exception:
         return requested
-    safe_bytes = int(max(total_bytes * 0.8, 1 << 30))
+    max_fraction = min(max(env_float("SPATIAL_OT_CUDA_MAX_TARGET_FRACTION", 0.9), 0.1), 0.98)
+    safe_bytes = int(max(total_bytes * max_fraction, 1 << 30))
     return min(requested, safe_bytes)
 
 
@@ -121,6 +124,8 @@ def resolve_parallel_restart_workers(device_pool: list[str], n_init: int) -> int
 
 
 def configure_local_thread_budget(torch_threads: int, torch_interop_threads: int) -> None:
+    global _THREADPOOL_LIMITS
+
     torch_threads = max(int(torch_threads), 1)
     torch_interop_threads = max(int(torch_interop_threads), 1)
     for name in [
@@ -130,10 +135,14 @@ def configure_local_thread_budget(torch_threads: int, torch_interop_threads: int
         "NUMEXPR_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS",
         "BLIS_NUM_THREADS",
+        "NUMBA_NUM_THREADS",
     ]:
         os.environ[name] = str(torch_threads)
+    os.environ["OMP_DYNAMIC"] = "FALSE"
+    os.environ["MKL_DYNAMIC"] = "FALSE"
     os.environ["SPATIAL_OT_TORCH_NUM_THREADS"] = str(torch_threads)
     os.environ["SPATIAL_OT_TORCH_NUM_INTEROP_THREADS"] = str(torch_interop_threads)
+    os.environ["SPATIAL_OT_CPU_THREADS"] = str(torch_threads)
     try:
         torch.set_num_threads(torch_threads)
     except Exception:
@@ -142,3 +151,9 @@ def configure_local_thread_budget(torch_threads: int, torch_interop_threads: int
         torch.set_num_interop_threads(torch_interop_threads)
     except Exception:
         pass
+    try:
+        from threadpoolctl import threadpool_limits
+
+        _THREADPOOL_LIMITS = threadpool_limits(limits=torch_threads)
+    except Exception:
+        _THREADPOOL_LIMITS = None

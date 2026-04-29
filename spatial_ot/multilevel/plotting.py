@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import anndata as ad
@@ -9,6 +10,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import ConvexHull, QhullError
 
+from .geometry import _validate_mutually_exclusive_memberships
 from .spot_latent import spot_latent_mode_metadata
 
 
@@ -132,6 +134,23 @@ def _subregion_memberships_from_npz(npz_path: Path, *, n_obs: int) -> dict[int, 
     return groups
 
 
+def _validate_loaded_subregion_groups(
+    groups: dict[int, np.ndarray],
+    *,
+    n_obs: int,
+    source: str,
+) -> None:
+    if not groups:
+        return
+    members = [np.asarray(groups[int(subregion_id)], dtype=np.int64) for subregion_id in sorted(groups)]
+    try:
+        _validate_mutually_exclusive_memberships(int(n_obs), members)
+    except RuntimeError as exc:
+        raise ValueError(
+            f"Loaded subregion memberships from {source} must be mutually exclusive before plotting."
+        ) from exc
+
+
 def _load_subregion_memberships(
     *,
     obs: pd.DataFrame,
@@ -141,6 +160,7 @@ def _load_subregion_memberships(
 ) -> tuple[dict[int, np.ndarray], str, Path | None]:
     obs_groups, obs_source = _subregion_memberships_from_obs(obs)
     if obs_groups:
+        _validate_loaded_subregion_groups(obs_groups, n_obs=obs.shape[0], source=str(obs_source))
         return obs_groups, str(obs_source), None
     resolved_npz = _resolve_spot_latent_npz(
         cells_h5ad=cells_h5ad,
@@ -150,6 +170,11 @@ def _load_subregion_memberships(
     if resolved_npz is None:
         return {}, "unavailable", None
     npz_groups = _subregion_memberships_from_npz(resolved_npz, n_obs=obs.shape[0])
+    _validate_loaded_subregion_groups(
+        npz_groups,
+        n_obs=obs.shape[0],
+        source=f"spot_level_latent_npz[{resolved_npz}]",
+    )
     return npz_groups, "spot_level_latent_npz[cell_indices,subregion_ids]", resolved_npz
 
 
@@ -165,6 +190,11 @@ def _polygon_exteriors_from_geometry(geometry) -> list[np.ndarray]:
             exterior = np.asarray(part.exterior.coords, dtype=np.float32)
             if exterior.shape[0] >= 4:
                 polygons.append(exterior)
+        return polygons
+    if geometry.geom_type == "GeometryCollection":
+        polygons = []
+        for part in geometry.geoms:
+            polygons.extend(_polygon_exteriors_from_geometry(part))
         return polygons
     return []
 
@@ -199,6 +229,59 @@ def _subregion_boundary_polygons(coords: np.ndarray, *, concave_ratio: float = 0
         return []
     polygon = unique[hull.vertices]
     return [np.vstack([polygon, polygon[0]]).astype(np.float32)]
+
+
+def _polygon_area(vertices: np.ndarray) -> float:
+    arr = np.asarray(vertices, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] < 3:
+        return 0.0
+    x = arr[:, 0]
+    y = arr[:, 1]
+    return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) * 0.5)
+
+
+def _nonoverlapping_polygons_by_cluster(
+    polygon_records: list[tuple[int, np.ndarray]],
+) -> tuple[dict[int, list[np.ndarray]], int]:
+    if not polygon_records:
+        return {}, 0
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except Exception:
+        by_cluster: dict[int, list[np.ndarray]] = {}
+        for cid, polygon in polygon_records:
+            by_cluster.setdefault(int(cid), []).append(np.asarray(polygon, dtype=np.float32))
+        return by_cluster, 0
+
+    covered = None
+    clipped_count = 0
+    by_cluster: dict[int, list[np.ndarray]] = {}
+    ordered = sorted(
+        enumerate(polygon_records),
+        key=lambda item: (_polygon_area(item[1][1]), item[0]),
+    )
+    for _order, (cid, polygon) in ordered:
+        if _polygon_area(polygon) <= 0.0:
+            continue
+        geom = Polygon(np.asarray(polygon, dtype=np.float64))
+        if geom.is_empty:
+            continue
+        if not geom.is_valid:
+            geom = geom.buffer(0)
+        original_area = float(geom.area)
+        if covered is not None and not covered.is_empty:
+            geom = geom.difference(covered)
+        if geom.is_empty:
+            clipped_count += 1
+            continue
+        if original_area > 0.0 and float(geom.area) < original_area * 0.999:
+            clipped_count += 1
+        polygons = _polygon_exteriors_from_geometry(geom)
+        for clipped_polygon in polygons:
+            by_cluster.setdefault(int(cid), []).append(np.asarray(clipped_polygon, dtype=np.float32))
+        covered = geom if covered is None else unary_union([covered, geom])
+    return by_cluster, clipped_count
 
 
 def _latent_color_limits(latent: np.ndarray) -> dict[str, list[float]]:
@@ -611,13 +694,14 @@ def _plot_sample_subregion_cluster_maps(
             rasterized=sample_count > 20000,
         )
 
-        polygons_by_cluster: dict[int, list[np.ndarray]] = {}
+        polygon_records: list[tuple[int, np.ndarray]] = []
         cells_by_cluster: dict[int, int] = {}
         subregions_by_cluster: dict[int, int] = {}
         degenerate_centers_by_cluster: dict[int, list[np.ndarray]] = {}
         n_sample_subregions = 0
         n_filled_subregions = 0
         n_degenerate_subregions = 0
+        n_overlap_clipped_polygons = 0
         for members in subregion_groups.values():
             member_arr = np.asarray(members, dtype=np.int64)
             member_arr = member_arr[(member_arr >= 0) & (member_arr < obs.shape[0])]
@@ -632,12 +716,13 @@ def _plot_sample_subregion_cluster_maps(
             cells_by_cluster[cid] = cells_by_cluster.get(cid, 0) + int(member_arr.size)
             polygons = _subregion_boundary_polygons(coords_um[member_arr])
             if polygons:
-                polygons_by_cluster.setdefault(cid, []).extend(polygons)
+                polygon_records.extend((int(cid), polygon) for polygon in polygons)
                 n_filled_subregions += 1
             else:
                 n_degenerate_subregions += 1
                 degenerate_centers_by_cluster.setdefault(cid, []).append(coords_um[member_arr].mean(axis=0))
 
+        polygons_by_cluster, n_overlap_clipped_polygons = _nonoverlapping_polygons_by_cluster(polygon_records)
         for cid in sorted(polygons_by_cluster):
             _, color_hex = cluster_display.get(int(cid), (f"C{int(cid)}", "#4d4d4d"))
             collection = PolyCollection(
@@ -734,6 +819,7 @@ def _plot_sample_subregion_cluster_maps(
                 "n_subregions": int(n_sample_subregions),
                 "n_filled_subregions": int(n_filled_subregions),
                 "n_degenerate_subregions": int(n_degenerate_subregions),
+                "n_overlap_clipped_polygons": int(n_overlap_clipped_polygons),
                 "output_png": str(output_png),
             }
         )
@@ -757,6 +843,7 @@ def _plot_sample_subregion_cluster_maps(
         "subregion_membership_source": membership_source,
         "subregion_membership_npz": str(resolved_npz) if resolved_npz is not None else None,
         "polygon_boundary": "concave_hull_of_subregion_member_cells_with_convex_hull_fallback",
+        "polygon_overlap_handling": "filled subregion polygons are clipped by previously drawn polygons so the subregion-wise panel is visually mutually exclusive",
         "plots": plots,
     }
     manifest_path = output_dir / "sample_niche_plots_manifest.json"
@@ -882,6 +969,8 @@ def plot_sample_spot_latent_maps(
     validation_role = str(
         metadata.get("spot_level_latent_validation_role", "diagnostic_visualization_not_independent_evidence")
     )
+    cluster_anchor_distance_method = str(metadata.get("spot_level_latent_cluster_anchor_distance_method", "unknown"))
+    cluster_anchor_mds_stress: float | None = None
 
     def _payload_scalar(payload: np.lib.npyio.NpzFile, key: str, default: str) -> str:
         if key not in payload.files:
@@ -891,6 +980,15 @@ def plot_sample_spot_latent_maps(
             return str(value.item())
         except ValueError:
             return str(value.tolist())
+
+    def _payload_float(payload: np.lib.npyio.NpzFile, key: str) -> float | None:
+        if key not in payload.files:
+            return None
+        try:
+            value = float(payload[key].item())
+        except (TypeError, ValueError):
+            return None
+        return value if np.isfinite(value) else None
 
     if resolved_spot_latent_npz is not None and resolved_spot_latent_npz.exists():
         with np.load(resolved_spot_latent_npz) as payload:
@@ -902,6 +1000,12 @@ def plot_sample_spot_latent_maps(
             latent_projection_mode = _payload_scalar(payload, "latent_projection_mode", latent_projection_mode)
             chart_learning_mode = _payload_scalar(payload, "chart_learning_mode", chart_learning_mode)
             validation_role = _payload_scalar(payload, "validation_role", validation_role)
+            cluster_anchor_distance_method = _payload_scalar(
+                payload,
+                "cluster_anchor_distance_method",
+                cluster_anchor_distance_method,
+            )
+            cluster_anchor_mds_stress = _payload_float(payload, "cluster_anchor_mds_stress")
             if "subregion_ids" in payload.files:
                 occurrence_subregion_ids = np.asarray(payload["subregion_ids"], dtype=np.int32)
                 subregion_id_source = "occurrence_npz[subregion_ids]"
@@ -988,6 +1092,9 @@ def plot_sample_spot_latent_maps(
     cluster_display_anchors = _cluster_mean_latent_anchors(display_latent, cluster_ids)
     display_latent_limits = _latent_color_limits(display_latent[finite_latent & valid_cluster])
     within_niche_color_limits = _latent_color_limits_by_cluster(latent, cluster_ids)
+    color_scale_mode = os.environ.get("SPATIAL_OT_SPOT_LATENT_COLOR_SCALE", "global").strip().lower()
+    if color_scale_mode not in {"global", "within_cluster"}:
+        color_scale_mode = "global"
 
     plots: list[dict[str, object]] = []
     for sample_id in sample_ids:
@@ -1009,11 +1116,14 @@ def plot_sample_spot_latent_maps(
         local_latent_values = latent[occurrence_idx]
         local_cluster_ids = cluster_ids[occurrence_idx]
         latent_coords_um = occurrence_coords[occurrence_idx]
-        colors = _latent_to_within_cluster_rgb(
-            local_latent_values,
-            local_cluster_ids,
-            limits_by_cluster=within_niche_color_limits,
-        )
+        if color_scale_mode == "within_cluster":
+            colors = _latent_to_within_cluster_rgb(
+                local_latent_values,
+                local_cluster_ids,
+                limits_by_cluster=within_niche_color_limits,
+            )
+        else:
+            colors = _latent_to_rgb(local_latent_values, limits=display_latent_limits)
         boundary_polygons: list[np.ndarray] = []
         boundary_subregion_ids = occurrence_subregion_ids[sample_occurrence_idx]
         valid_boundary_ids = np.unique(boundary_subregion_ids[boundary_subregion_ids >= 0])
@@ -1152,8 +1262,11 @@ def plot_sample_spot_latent_maps(
         "coordinate_scope": str(latent_mode_metadata["coordinate_scope"]),
         "chart_learning_mode": chart_learning_mode,
         "validation_role": validation_role,
+        "cluster_anchor_distance_method": cluster_anchor_distance_method,
+        "cluster_anchor_mds_stress": cluster_anchor_mds_stress,
         "rendering": "whole_sample_within_niche_latent_rgb",
-        "color_encoding": "The side key uses the stored 2D spot-latent coordinates to show model-grounded between-cluster layout. Slide colors are robustly rescaled within each niche/cluster before RGB conversion so continuous within-niche heterogeneity uses the full color range. Treat this as diagnostic visualization, not independent validation.",
+        "color_scale_mode": color_scale_mode,
+        "color_encoding": "The side key uses the stored 2D spot-latent coordinates to show model-grounded between-cluster layout. Slide colors use global latent color scaling by default so colors remain comparable across clusters and samples; within-cluster rescaling is available only as an explicit diagnostic mode. Treat this as diagnostic visualization, not independent validation.",
         "includes_aligned_coordinates_in_chart_features": bool(
             latent_mode_metadata["includes_aligned_coordinates_in_chart_features"]
         ),

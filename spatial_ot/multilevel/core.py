@@ -2568,6 +2568,10 @@ def fit_multilevel_ot(
         subregion_members = [subregion_members[int(idx)] for idx in keep_idx]
         subregion_basic_niche_ids = [subregion_basic_niche_ids[int(idx)] for idx in keep_idx]
         region_geometries = [region_geometries[int(idx)] for idx in keep_idx]
+        try:
+            _validate_mutually_exclusive_memberships(features.shape[0], subregion_members)
+        except RuntimeError as exc:
+            raise ValueError("Subregion memberships must remain mutually exclusive after min_cells filtering.") from exc
     if centers_um is None:
         centers_um = np.vstack(
             [
@@ -2962,6 +2966,18 @@ def fit_multilevel_ot(
         spot_latent_temperature_used=spot_latent["spot_latent_temperature_used"].astype(np.float32),
         spot_latent_weights=spot_latent["spot_latent_weights"].astype(np.float32),
         spot_latent_atom_posteriors=spot_latent["spot_latent_atom_posteriors"].astype(np.float32),
+        spot_latent_cluster_anchor_distance=spot_latent["spot_latent_cluster_anchor_distance"].astype(np.float32),
+        spot_latent_atom_mds_stress=spot_latent["spot_latent_atom_mds_stress"].astype(np.float32),
+        spot_latent_atom_mds_positive_eigenvalue_mass_2d=spot_latent[
+            "spot_latent_atom_mds_positive_eigenvalue_mass_2d"
+        ].astype(np.float32),
+        spot_latent_atom_mds_negative_eigenvalue_mass_fraction=spot_latent[
+            "spot_latent_atom_mds_negative_eigenvalue_mass_fraction"
+        ].astype(np.float32),
+        cell_spot_latent_unweighted_coords=spot_latent["cell_spot_latent_unweighted_coords"].astype(np.float32),
+        cell_spot_latent_confidence_weighted_coords=spot_latent[
+            "cell_spot_latent_confidence_weighted_coords"
+        ].astype(np.float32),
         cell_spot_latent_coords=spot_latent["cell_spot_latent_coords"].astype(np.float32),
         cell_spot_latent_cluster_labels=spot_latent["cell_spot_latent_cluster_labels"].astype(np.int32),
         cell_spot_latent_weights=spot_latent["cell_spot_latent_weights"].astype(np.float32),
@@ -2975,6 +2991,16 @@ def fit_multilevel_ot(
         spot_latent_global_within_scale=float(spot_latent["spot_latent_global_within_scale"].item()),
         spot_latent_assignment_temperature=float(spot_latent["spot_latent_assignment_temperature"].item()),
         spot_latent_temperature_mode=str(spot_latent["spot_latent_temperature_mode"].item()),
+        spot_latent_cluster_anchor_distance_method=str(
+            spot_latent["spot_latent_cluster_anchor_distance_method"].item()
+        ),
+        spot_latent_cluster_mds_stress=float(spot_latent["spot_latent_cluster_mds_stress"].item()),
+        spot_latent_cluster_mds_positive_eigenvalue_mass_2d=float(
+            spot_latent["spot_latent_cluster_mds_positive_eigenvalue_mass_2d"].item()
+        ),
+        spot_latent_cluster_mds_negative_eigenvalue_mass_fraction=float(
+            spot_latent["spot_latent_cluster_mds_negative_eigenvalue_mass_fraction"].item()
+        ),
         cost_scale_x=float(cost_scale_x),
         cost_scale_y=float(cost_scale_y),
         objective_history=objective_history,

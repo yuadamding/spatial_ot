@@ -129,6 +129,12 @@ class MultilevelOTResult:
     spot_latent_temperature_used: np.ndarray
     spot_latent_weights: np.ndarray
     spot_latent_atom_posteriors: np.ndarray
+    spot_latent_cluster_anchor_distance: np.ndarray
+    spot_latent_atom_mds_stress: np.ndarray
+    spot_latent_atom_mds_positive_eigenvalue_mass_2d: np.ndarray
+    spot_latent_atom_mds_negative_eigenvalue_mass_fraction: np.ndarray
+    cell_spot_latent_unweighted_coords: np.ndarray
+    cell_spot_latent_confidence_weighted_coords: np.ndarray
     cell_spot_latent_coords: np.ndarray
     cell_spot_latent_cluster_labels: np.ndarray
     cell_spot_latent_weights: np.ndarray
@@ -140,6 +146,10 @@ class MultilevelOTResult:
     spot_latent_global_within_scale: float
     spot_latent_assignment_temperature: float
     spot_latent_temperature_mode: str
+    spot_latent_cluster_anchor_distance_method: str
+    spot_latent_cluster_mds_stress: float
+    spot_latent_cluster_mds_positive_eigenvalue_mass_2d: float
+    spot_latent_cluster_mds_negative_eigenvalue_mass_fraction: float
     cost_scale_x: float
     cost_scale_y: float
     objective_history: list[dict[str, float]]

@@ -7,6 +7,7 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
 from sklearn.neighbors import NearestNeighbors
 
+from .geometry import _validate_mutually_exclusive_memberships
 from .types import MultilevelOTResult
 
 
@@ -218,6 +219,10 @@ def _cell_labels_from_subregions(
     subregion_members: list[np.ndarray],
     subregion_labels: np.ndarray,
 ) -> np.ndarray:
+    try:
+        _validate_mutually_exclusive_memberships(int(n_cells), subregion_members)
+    except RuntimeError as exc:
+        raise ValueError("Cannot compute cell adjacency diagnostics because subregion memberships overlap or are invalid.") from exc
     labels = np.full(int(n_cells), -1, dtype=np.int32)
     membership_counts = np.zeros(int(n_cells), dtype=np.int32)
     for idx, members in enumerate(subregion_members):

@@ -1,10 +1,8 @@
 # Operational Scripts
 
 This directory is the canonical home for runnable project helpers.
-
-The repository root keeps tiny compatibility wrappers such as `run.sh` and
-`install_env.sh`, so existing commands still work. New scripts should be added
-here instead of the repository root.
+Root-level compatibility wrappers have been removed to keep the package compact.
+Run helpers from this directory, for example `bash scripts/run.sh`.
 
 Core entrypoints:
 

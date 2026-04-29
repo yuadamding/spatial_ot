@@ -405,6 +405,7 @@ def cell_subregion_coverage(n_cells: int, subregion_members: list[np.ndarray]) -
             "cell_subregion_duplicate_count": 0,
             "cell_subregion_duplicate_fraction": 0.0,
             "cell_subregion_max_memberships": 0,
+            "cell_subregion_mutually_exclusive": True,
             "cell_subregion_partition_complete": False,
             "subregion_membership_mode": "empty",
         }
@@ -419,6 +420,7 @@ def cell_subregion_coverage(n_cells: int, subregion_members: list[np.ndarray]) -
     uncovered_count = int(n_cells - covered_count)
     max_memberships = int(membership_counts.max(initial=0))
     partition_complete = bool(uncovered_count == 0 and duplicate_count == 0)
+    mutually_exclusive = bool(duplicate_count == 0 and max_memberships <= 1)
     if partition_complete:
         membership_mode = "mutually_exclusive_complete"
     elif duplicate_count == 0:
@@ -432,6 +434,7 @@ def cell_subregion_coverage(n_cells: int, subregion_members: list[np.ndarray]) -
         "cell_subregion_duplicate_count": duplicate_count,
         "cell_subregion_duplicate_fraction": float(duplicate_count / max(n_cells, 1)),
         "cell_subregion_max_memberships": max_memberships,
+        "cell_subregion_mutually_exclusive": mutually_exclusive,
         "cell_subregion_partition_complete": partition_complete,
         "subregion_membership_mode": membership_mode,
     }

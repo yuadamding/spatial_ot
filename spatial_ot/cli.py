@@ -7,14 +7,11 @@ from pathlib import Path
 
 from .config import (
     MultilevelExperimentConfig,
-    load_config,
     load_multilevel_config,
     validate_multilevel_config,
 )
 from .deep import fit_deep_features_on_h5ad, transform_h5ad_with_deep_model
 from .feature_source import prepare_h5ad_feature_cache
-from .legacy.training import run_experiment
-from .legacy.visualization import plot_preprocessed_inputs, plot_result_bundle
 from .multilevel import (
     plot_sample_niche_maps_from_run_dir,
     plot_sample_spot_latent_maps_from_run_dir,
@@ -26,26 +23,17 @@ from .pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_di
 
 
 def _configure_runtime_threads_from_env() -> None:
-    torch_threads = os.environ.get("SPATIAL_OT_TORCH_NUM_THREADS")
+    torch_threads = os.environ.get("SPATIAL_OT_TORCH_NUM_THREADS") or os.environ.get("OMP_NUM_THREADS")
     torch_interop_threads = os.environ.get("SPATIAL_OT_TORCH_NUM_INTEROP_THREADS")
     if torch_threads is None and torch_interop_threads is None:
         return
     try:
-        import torch
+        from .multilevel.runtime import configure_local_thread_budget
     except Exception:
         return
-
-    if torch_threads is not None:
-        value = int(torch_threads)
-        if value > 0:
-            torch.set_num_threads(value)
-    if torch_interop_threads is not None:
-        value = int(torch_interop_threads)
-        if value > 0:
-            try:
-                torch.set_num_interop_threads(value)
-            except RuntimeError:
-                pass
+    threads = int(torch_threads) if torch_threads is not None else max(int(os.cpu_count() or 1), 1)
+    interop_threads = int(torch_interop_threads) if torch_interop_threads is not None else 4
+    configure_local_thread_budget(threads, interop_threads)
 
 
 def _add_deep_args(parser: argparse.ArgumentParser) -> None:
@@ -95,31 +83,18 @@ def _add_deep_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run spatial_ot multilevel OT utilities and legacy scaffold commands.")
+    parser = argparse.ArgumentParser(description="Run spatial_ot multilevel OT utilities.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     doctor = sub.add_parser(
         "doctor",
-        help="Report package / torch / CUDA state and check run.sh shell defaults against dataclass defaults.",
+        help="Report package / torch / CUDA state and check scripts/run.sh shell defaults against dataclass defaults.",
     )
     doctor.add_argument(
         "--strict",
         action="store_true",
         help="Exit with non-zero status when the report status is not 'ok'.",
     )
-
-    train = sub.add_parser("train", help="Run a staged training experiment.")
-    train.add_argument("--config", required=True, help="Path to a TOML config file.")
-
-    plot_inputs = sub.add_parser("plot-inputs", help="Render a 2D overview of the preprocessed input data.")
-    plot_inputs.add_argument("--config", required=True, help="Path to a TOML config file.")
-    plot_inputs.add_argument("--output", help="Optional output PNG path.")
-    plot_inputs.add_argument("--cell-subset", type=int, help="Override cell subset size. Use 0 for all cells.")
-    plot_inputs.add_argument("--bin-subset", type=int, help="Override bin subset size. Use 0 for all bins.")
-
-    plot_results = sub.add_parser("plot-results", help="Render a visualization bundle from a finished run directory.")
-    plot_results.add_argument("--run-dir", required=True, help="Path to a spatial_ot run directory with saved outputs.")
-    plot_results.add_argument("--output-dir", help="Optional output directory for the figures.")
 
     plot_sample_niches = sub.add_parser(
         "plot-sample-niches",
@@ -296,7 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value to convert them into microns.")
     multilevel.add_argument("--n-clusters", type=int, default=None, help="Number of subregion clusters.")
     multilevel.add_argument("--atoms-per-cluster", type=int, default=None, help="Number of shared atoms per cluster.")
-    multilevel.add_argument("--radius-um", type=float, default=None, help="Legacy graph/diagnostic radius in microns; generated data-driven subregions do not use it as a fixed membership radius.")
+    multilevel.add_argument("--radius-um", type=float, default=None, help="Compatibility graph/diagnostic radius in microns; generated data-driven subregions do not use it as a fixed membership radius.")
     multilevel.add_argument("--stride-um", type=float, default=None, help="Subregion center stride in microns.")
     multilevel.add_argument("--basic-niche-size-um", type=float, default=None, help="Target scale in microns for data-driven atomic membership seeds. Set to 0 to disable this scale hint.")
     multilevel.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
@@ -360,7 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value to convert them into microns.")
     optimal_search.add_argument("--n-clusters", type=int, default=None, help="Baseline number of subregion clusters used to seed the search.")
     optimal_search.add_argument("--atoms-per-cluster", type=int, default=None, help="Number of shared atoms per cluster.")
-    optimal_search.add_argument("--radius-um", type=float, default=None, help="Legacy graph/diagnostic radius in microns; generated data-driven subregions do not use it as a fixed membership radius.")
+    optimal_search.add_argument("--radius-um", type=float, default=None, help="Compatibility graph/diagnostic radius in microns; generated data-driven subregions do not use it as a fixed membership radius.")
     optimal_search.add_argument("--stride-um", type=float, default=None, help="Baseline subregion center stride in microns.")
     optimal_search.add_argument("--basic-niche-size-um", type=float, default=None, help="Target scale in microns for data-driven atomic membership seeds.")
     optimal_search.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
@@ -603,23 +578,7 @@ def main() -> None:
         if args.strict and report.get("status") != "ok":
             raise SystemExit(1)
         return
-    if args.command == "train":
-        config = load_config(args.config)
-        summary = run_experiment(config)
-        print(json.dumps(summary, indent=2))
-    elif args.command == "plot-inputs":
-        config = load_config(args.config)
-        output_path = plot_preprocessed_inputs(
-            config=config,
-            cell_subset=args.cell_subset,
-            bin_subset=args.bin_subset,
-            output_path=args.output,
-        )
-        print(json.dumps({"output_path": str(output_path)}, indent=2))
-    elif args.command == "plot-results":
-        manifest = plot_result_bundle(run_dir=Path(args.run_dir), output_dir=Path(args.output_dir) if args.output_dir else None)
-        print(json.dumps(manifest, indent=2))
-    elif args.command == "plot-sample-niches":
+    if args.command == "plot-sample-niches":
         manifest = plot_sample_niche_maps_from_run_dir(
             run_dir=Path(args.run_dir),
             output_dir=Path(args.output_dir) if args.output_dir else None,

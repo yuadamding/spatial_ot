@@ -72,7 +72,7 @@ PY
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Virtual environment python not found: $PYTHON_BIN" >&2
-  echo "Run 'bash install_env.sh' from the spatial_ot directory first." >&2
+  echo "Run 'bash scripts/install_env.sh' from the spatial_ot directory first." >&2
   exit 1
 fi
 

@@ -676,26 +676,52 @@ def build_data_driven_subregions(
         [np.asarray(ids, dtype=np.int32) for ids in subregion_basic_ids],
     )
 
+def _coerce_membership_indices(
+    member: np.ndarray,
+    *,
+    n_cells: int,
+    subregion_index: int,
+) -> np.ndarray:
+    raw = np.asarray(member)
+    if raw.ndim != 1:
+        raise RuntimeError(
+            f"Subregion {int(subregion_index)} membership must be a one-dimensional array of integer cell indices."
+        )
+    if raw.size == 0:
+        raise RuntimeError("Constructed subregions must not be empty.")
+
+    if np.issubdtype(raw.dtype, np.integer):
+        member_arr = raw.astype(np.int64, copy=False)
+    elif raw.dtype == object:
+        flat = raw.reshape(-1)
+        if not all(isinstance(value, (int, np.integer)) and not isinstance(value, bool) for value in flat.tolist()):
+            raise RuntimeError("Constructed subregions must use integer cell indices.")
+        member_arr = raw.astype(np.int64, copy=False)
+    else:
+        raise RuntimeError("Constructed subregions must use integer cell indices.")
+
+    if int(member_arr.min()) < 0 or int(member_arr.max()) >= int(n_cells):
+        raise RuntimeError("Constructed subregions contain out-of-range cell indices.")
+    if np.unique(member_arr).size != member_arr.size:
+        raise RuntimeError("Constructed subregions contain duplicate cell indices.")
+    return member_arr
+
+
 def _validate_mutually_exclusive_memberships(
     n_cells: int,
     members: list[np.ndarray],
     *,
     require_full_coverage: bool = False,
-) -> None:
+) -> np.ndarray:
     counts = np.zeros(int(n_cells), dtype=np.int32)
-    for member in members:
-        member_arr = np.asarray(member, dtype=np.int64)
-        if member_arr.size == 0:
-            raise RuntimeError("Constructed subregions must not be empty.")
-        if int(member_arr.min()) < 0 or int(member_arr.max()) >= int(n_cells):
-            raise RuntimeError("Constructed subregions contain out-of-range cell indices.")
-        if np.unique(member_arr).size != member_arr.size:
-            raise RuntimeError("Constructed subregions contain duplicate cell indices.")
+    for idx, member in enumerate(members):
+        member_arr = _coerce_membership_indices(member, n_cells=int(n_cells), subregion_index=int(idx))
         np.add.at(counts, member_arr, 1)
     if int(counts.max(initial=0)) > 1:
         raise RuntimeError("Constructed subregions are not mutually exclusive.")
     if bool(require_full_coverage) and (counts.size == 0 or int(counts.min()) < 1):
         raise RuntimeError("Constructed subregions do not cover every cell exactly once.")
+    return counts
 
 
 def build_subregions(

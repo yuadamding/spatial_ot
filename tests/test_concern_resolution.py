@@ -84,6 +84,10 @@ def test_concern_report_requires_baseline_and_stability_for_feature_boundaries(t
     assert cost["status"] == "passed_common_epsilon_checks"
     spot = next(item for item in report["concerns"] if item["code"] == "spot_latent_supervised_visualization")
     assert spot["status"] == "diagnostic_only_supervised_by_fitted_ot_labels"
+    latent_claim = next(item for item in report["concerns"] if item["code"] == "within_niche_latent_heterogeneity_claim")
+    assert latent_claim["blocking_for_primary_claim"] is False
+    assert latent_claim["blocking_for_within_niche_latent_claim"] is True
+    assert "within_niche_latent_heterogeneity_claim" in report["within_niche_latent_blocking_concerns"]
 
 
 def test_concern_report_accepts_coordinate_baseline_and_writes_outputs(tmp_path: Path) -> None:
@@ -147,6 +151,31 @@ def test_concern_report_blocks_mixed_candidate_costs(tmp_path: Path) -> None:
     assert "ot_cost_comparability" in report["blocking_concerns"]
     cost = next(item for item in report["concerns"] if item["code"] == "ot_cost_comparability")
     assert cost["status"] == "mixed_candidate_costs_remaining"
+
+
+def test_concern_report_allows_clustering_but_blocks_unvalidated_latent_claim(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _write_summary(run_dir, coordinate_only=True, warnings=[], auto_k=False)
+    summary_path = run_dir / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["spot_level_latent"] = {
+        "implemented": True,
+        "projection": "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors",
+        "chart_learning_mode": "model_grounded_atom_distance_mds_without_fisher_labels",
+        "validation_role": "diagnostic_visualization_not_independent_evidence",
+        "cluster_anchor_distance_method": "balanced_ot",
+        "cluster_anchor_mds_stress": 0.08,
+        "normalized_posterior_entropy_summary": {"median": 0.45},
+    }
+    summary_path.write_text(json.dumps(summary))
+
+    report = build_concern_resolution_report(run_dir, coordinate_baseline_run_dir=run_dir, stability_run_dirs=[run_dir])
+
+    assert report["claim_validation"]["subregion_niche_clustering"]["status"] == "ready_after_current_validation"
+    assert report["claim_validation"]["within_niche_latent_heterogeneity"]["status"] == "blocked"
+    latent_claim = next(item for item in report["concerns"] if item["code"] == "within_niche_latent_heterogeneity_claim")
+    assert latent_claim["status"] == "blocked_for_within_niche_latent_claim"
+    assert "missing_held_out_sample_projection" in latent_claim["evidence"]["blockers"]
 
 
 def test_validate_run_concerns_strict_exits_nonzero_for_blockers(tmp_path: Path) -> None:
