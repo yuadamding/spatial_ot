@@ -117,14 +117,29 @@ class MultilevelOTResult:
     spot_latent_subregion_ids: np.ndarray
     spot_latent_cluster_labels: np.ndarray
     spot_latent_coords: np.ndarray
+    spot_latent_within_coords: np.ndarray
+    spot_latent_cluster_anchors: np.ndarray
+    spot_latent_atom_embedding: np.ndarray
     spot_latent_aligned_coords: np.ndarray
     spot_latent_cluster_probs: np.ndarray
     spot_latent_atom_confidence: np.ndarray
+    spot_latent_posterior_entropy: np.ndarray
+    spot_latent_normalized_posterior_entropy: np.ndarray
+    spot_latent_atom_argmax: np.ndarray
+    spot_latent_temperature_used: np.ndarray
     spot_latent_weights: np.ndarray
     spot_latent_atom_posteriors: np.ndarray
     cell_spot_latent_coords: np.ndarray
     cell_spot_latent_cluster_labels: np.ndarray
     cell_spot_latent_weights: np.ndarray
+    cell_spot_latent_posterior_entropy: np.ndarray
+    spot_latent_mode: str
+    spot_latent_chart_learning_mode: str
+    spot_latent_projection_mode: str
+    spot_latent_validation_role: str
+    spot_latent_global_within_scale: float
+    spot_latent_assignment_temperature: float
+    spot_latent_temperature_mode: str
     cost_scale_x: float
     cost_scale_y: float
     objective_history: list[dict[str, float]]

@@ -24,6 +24,7 @@ Always write outputs outside the package directory to keep it compact.
 - `spatial_ot/deep/`: reusable deep feature adapter
 - `spatial_ot/legacy/`: canonical home of the teacher-student scaffold
 - `spatial_ot/`: shared config/CLI plus thin backward-compatible facades for older import paths (`spatial_ot.training`, `spatial_ot.preprocessing`, `spatial_ot.multilevel_ot`, …)
+- `scripts/`: canonical operational shell/Python helpers; root-level shell files are tiny compatibility wrappers
 - `configs/`: TOML configs and demo prior programs
 - `tests/`: regression and multilevel OT tests
 
@@ -45,6 +46,8 @@ PYTHON_BIN=python3.10 VENV_DIR=../.venv EXTRAS=dev,viz,geometry,parallel bash in
 By default the script searches for a compatible Python (3.13 → 3.12 → 3.11 → 3.10 → 3) and recreates `../.venv` if the existing one is incompatible.
 
 The packaged path expects cohort H5AD inputs under the sibling directory `../spatial_ot_input/`.
+
+New operational helpers should live under `scripts/`; the root wrappers remain only so existing commands like `bash run.sh` and `bash install_env.sh` keep working.
 
 ## Multilevel OT — primary path
 
@@ -286,7 +289,7 @@ The Python API and TOML config still accept `auto`, `cuda`, `cuda:0`, `cuda:1`, 
 
 The niche-map command writes a paired figure for each sample: a subregion-wise filled polygon panel and a cell-wise inherited-label scatter panel. It reads `mlot_subregion_id` from `cells_multilevel_ot.h5ad` when available, otherwise recovers subregion membership from `spot_level_latent_multilevel_ot.npz`.
 
-Per-sample spot-latent fields are rendered as one whole-slide map per sample. The stored spot latent is a global Fisher/discriminative chart learned from OT atom-posterior/local-context features and the fitted OT subregion labels; cluster-local residuals preserve within-niche heterogeneity. No minimum-distance anchor repulsion or target-distance scaling is used, so weak between-cluster separation remains visible as a diagnostic limitation instead of being forced by the plotter. The slide map rescales colors within each niche/cluster before RGB conversion, overlays subregion outlines, and uses the side key to show the learned global latent separation.
+Per-sample spot-latent fields are rendered as one whole-slide map per sample. The default stored spot latent is now an OT-grounded atom-barycentric MDS chart: fitted cluster atom measures define global anchors, and each spot/cell occurrence is placed inside its assigned cluster by barycentering that cluster's atom embedding with a cost-gap-calibrated OT atom posterior. Raw aligned x/y coordinates are not concatenated into the default chart features, and cluster-local variance is not forced to a fixed display radius. The legacy supervised Fisher/local-PCA chart remains available only as an explicit diagnostic mode through `SPATIAL_OT_SPOT_LATENT_MODE=diagnostic_fisher_current`. The slide map rescales colors within each niche/cluster before RGB conversion, overlays subregion outlines, and uses the side key to show the model-grounded latent layout. This remains diagnostic visualization, not independent validation of niche discovery; use posterior entropy, atom-argmax maps, effective-temperature summaries, stability, leakage, and held-out-sample checks before interpreting biological heterogeneity.
 
 ```bash
 ../.venv/bin/python -m spatial_ot plot-sample-spot-latent \
@@ -305,7 +308,7 @@ Multilevel OT writes:
 - `cells_multilevel_ot.h5ad`
 - `subregions_multilevel_ot.parquet`
 - `cluster_supports_multilevel_ot.npz`
-- `spot_level_latent_multilevel_ot.npz` with occurrence-level `(subregion, spot)` global Fisher/discriminative latent coordinates
+- `spot_level_latent_multilevel_ot.npz` with occurrence-level `(subregion, spot)` OT atom-barycentric latent coordinates plus posterior entropy, atom argmax, effective temperature, cluster anchors, and atom embeddings
 - `multilevel_ot_spatial_map.png`, `multilevel_ot_subregion_embedding.png`, `multilevel_ot_atom_layouts.png`
 - `summary.json`
 - `deep_feature_model.pt`, `deep_feature_history.csv`, `deep_feature_config.json` (when deep features are enabled)
@@ -323,6 +326,22 @@ Multilevel OT writes:
 - `boundary_invariance_claim` (explicit geometry supports the strongest claim; observed point-cloud geometry is reported as normalized but not fully shape-invariant, and observed-hull fallback is exploratory)
 - random-fold and spatial-block shape-leakage diagnostics plus size/density leakage diagnostics
 - canonical-normalizer radius / interpolation diagnostics
+
+## Concern Resolution
+
+Deep/feature-aware boundaries, shape/density leakage, and automatic K selection are reported as validation concerns rather than hidden. After a run, write an explicit remediation report:
+
+```bash
+../.venv/bin/python -m spatial_ot validate-run-concerns \
+  --run-dir ../outputs/spatial_ot/cohort_multilevel_ot \
+  --coordinate-baseline-run-dir ../outputs/spatial_ot/cohort_multilevel_ot_coordinate_only_baseline \
+  --stability-run-dir ../outputs/spatial_ot/cohort_multilevel_ot_fixed_k16_seed1338 \
+  --leakage-ablation-run-dir ../outputs/spatial_ot/cohort_multilevel_ot_shape_ablation \
+  --leakage-ablation-run-dir ../outputs/spatial_ot/cohort_multilevel_ot_density_ablation \
+  --strict
+```
+
+The report writes `concern_resolution_report.json` and `.md` under the run directory. Packaged runs write this report by default; set `WRITE_CONCERN_REPORT=0` only for quick local debugging. Use `STRICT_CONCERN_REPORT=1` in shell runs, or `--strict` in the CLI, to fail when blockers remain. If the primary run used deep/feature-aware boundaries, the report gives a coordinate-only baseline command. If auto-K was used, it gives fixed-K stability commands around the selected K. Shape/density leakage ablation runs can be passed back into the report with repeated `--leakage-ablation-run-dir` arguments. Primary biological claims should be made only after the coordinate-only baseline, leakage/null checks, OT cost-comparability checks, and fixed-K stability runs agree.
 
 ## Legacy train path
 

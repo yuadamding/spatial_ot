@@ -1,0 +1,611 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Iterable
+
+
+def _read_summary(run_dir: str | Path) -> dict[str, object]:
+    path = Path(run_dir) / "summary.json"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing multilevel OT summary: {path}")
+    return json.loads(path.read_text())
+
+
+def _warning_codes(summary: dict[str, object]) -> set[str]:
+    return {
+        str(item.get("code"))
+        for item in summary.get("qc_warnings", [])
+        if isinstance(item, dict) and item.get("code") is not None
+    }
+
+
+def _is_coordinate_only_baseline(summary: dict[str, object] | None) -> bool:
+    if summary is None:
+        return False
+    construction = summary.get("subregion_construction")
+    if not isinstance(construction, dict):
+        return False
+    return bool(construction.get("coordinate_only_baseline", False))
+
+
+def _selected_k(summary: dict[str, object]) -> int | None:
+    auto_k = summary.get("auto_k_selection")
+    if isinstance(auto_k, dict) and auto_k.get("selected_k") is not None:
+        return int(auto_k["selected_k"])
+    if summary.get("n_clusters") is not None:
+        return int(summary["n_clusters"])
+    return None
+
+
+def _shell_value(value: object) -> str:
+    text = str(value)
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _env_token(key: str, value: object | None) -> str | None:
+    if value is None:
+        return None
+    return f"{key}={_shell_value(value)}"
+
+
+def _metric(value: object) -> str:
+    if isinstance(value, float):
+        return f"{value:.4g}"
+    if value is None:
+        return "NA"
+    return str(value)
+
+
+def _deep_model_path(summary: dict[str, object], run_dir: Path) -> Path | None:
+    deep_summary = summary.get("deep_features")
+    model_path = None
+    if isinstance(deep_summary, dict) and deep_summary.get("model_path"):
+        model_path = Path(str(deep_summary["model_path"]))
+    if model_path is None:
+        candidate = Path(str(summary.get("output_dir", run_dir))) / "deep_feature_model.pt"
+        model_path = candidate if candidate.exists() else None
+    return model_path if model_path is not None and model_path.exists() else None
+
+
+def _common_run_env(summary: dict[str, object], run_dir: Path, *, omit: set[str] | None = None) -> list[str]:
+    omit = omit or set()
+    construction = summary.get("subregion_construction")
+    construction = construction if isinstance(construction, dict) else {}
+    deep_summary = summary.get("deep_features")
+    deep_summary = deep_summary if isinstance(deep_summary, dict) else {}
+    deep_segmentation = construction.get("deep_segmentation")
+    deep_segmentation = deep_segmentation if isinstance(deep_segmentation, dict) else {}
+    min_cluster_size = summary.get("effective_min_subregions_per_cluster", summary.get("min_subregions_per_cluster"))
+    env_items = [
+        ("BASIC_NICHE_SIZE_UM", construction.get("basic_niche_size_um")),
+        ("RADIUS_UM", construction.get("radius_um")),
+        ("STRIDE_UM", construction.get("stride_um")),
+        ("MIN_CELLS", construction.get("min_cells")),
+        ("MAX_SUBREGIONS", construction.get("max_subregions")),
+        ("MIN_SUBREGIONS_PER_CLUSTER", min_cluster_size),
+        ("DEEP_FEATURE_METHOD", deep_summary.get("method") or "none"),
+        ("DEEP_OUTPUT_EMBEDDING", deep_summary.get("output_embedding")),
+        ("DEEP_OUTPUT_OBSM_KEY", deep_summary.get("output_feature_obsm_key")),
+        ("DEEP_SEGMENTATION_KNN", deep_segmentation.get("knn")),
+        ("DEEP_SEGMENTATION_FEATURE_DIMS", deep_segmentation.get("feature_dims")),
+        ("DEEP_SEGMENTATION_FEATURE_WEIGHT", deep_segmentation.get("feature_weight")),
+        ("DEEP_SEGMENTATION_SPATIAL_WEIGHT", deep_segmentation.get("spatial_weight")),
+        ("DEEP_SEGMENTATION_REFINEMENT_ITERS", deep_segmentation.get("refinement_iters")),
+        ("MAX_SPOT_LATENT_PLOT_OCCURRENCES", 0),
+        ("COMPUTE_SPOT_LATENT", 0),
+        ("PLOT_SAMPLE_SPOT_LATENT", 0),
+    ]
+    tokens = [_env_token(key, value) for key, value in env_items if key not in omit]
+    deep_model = _deep_model_path(summary, run_dir)
+    if deep_model is not None:
+        tokens.append(_env_token("DEEP_PRETRAINED_MODEL", deep_model.as_posix()))
+    return [token for token in tokens if token is not None]
+
+
+def _run_script_for_construction(summary: dict[str, object]) -> str:
+    construction = summary.get("subregion_construction")
+    if isinstance(construction, dict) and construction.get("construction_method") == "deep_segmentation":
+        return "run_deep_segmentation_cohort_gpu.sh"
+    return "run_prepared_cohort_gpu.sh"
+
+
+def _baseline_comparison(
+    primary: dict[str, object],
+    baseline: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if baseline is None:
+        return None
+    return {
+        "baseline_run_dir": str(baseline.get("output_dir")),
+        "baseline_is_coordinate_only": _is_coordinate_only_baseline(baseline),
+        "primary_n_subregions": primary.get("n_subregions"),
+        "baseline_n_subregions": baseline.get("n_subregions"),
+        "primary_n_clusters": primary.get("n_clusters"),
+        "baseline_n_clusters": baseline.get("n_clusters"),
+        "primary_coverage_fraction": primary.get("cell_subregion_coverage_fraction"),
+        "baseline_coverage_fraction": baseline.get("cell_subregion_coverage_fraction"),
+        "primary_warning_codes": sorted(_warning_codes(primary)),
+        "baseline_warning_codes": sorted(_warning_codes(baseline)),
+    }
+
+
+def _suggest_coordinate_only_command(summary: dict[str, object], run_dir: Path) -> str:
+    selected_k = _selected_k(summary) or int(summary.get("n_clusters", 8))
+    baseline_dir = f"{run_dir.as_posix()}_coordinate_only_baseline"
+    tokens = [
+        _env_token("OUTPUT_DIR", baseline_dir),
+        _env_token("AUTO_N_CLUSTERS", 0),
+        _env_token("N_CLUSTERS", selected_k),
+        *_common_run_env(summary, run_dir),
+        _env_token("SUBREGION_CONSTRUCTION_METHOD", "data_driven"),
+        _env_token("SUBREGION_FEATURE_WEIGHT", 0),
+    ]
+    return " ".join(token for token in tokens if token is not None) + " bash run_prepared_cohort_gpu.sh"
+
+
+def _suggest_stability_commands(summary: dict[str, object], run_dir: Path) -> list[str]:
+    selected_k = _selected_k(summary)
+    if selected_k is None:
+        return []
+    candidates = [max(2, selected_k - 1), selected_k, selected_k + 1]
+    commands = []
+    for k in candidates:
+        tokens = [
+            _env_token("OUTPUT_DIR", f"{run_dir.as_posix()}_fixed_k{k}_seed1338"),
+            _env_token("AUTO_N_CLUSTERS", 0),
+            _env_token("N_CLUSTERS", k),
+            _env_token("SEED", 1338),
+            *_common_run_env(summary, run_dir),
+            _env_token(
+                "SUBREGION_CONSTRUCTION_METHOD",
+                (
+                    summary.get("subregion_construction", {}).get("construction_method")
+                    if isinstance(summary.get("subregion_construction"), dict)
+                    else None
+                ),
+            ),
+        ]
+        commands.append(" ".join(token for token in tokens if token is not None) + f" bash {_run_script_for_construction(summary)}")
+    return commands
+
+
+def _suggest_leakage_ablation_commands(summary: dict[str, object], run_dir: Path, kind: str) -> list[str]:
+    selected_k = _selected_k(summary)
+    construction = summary.get("subregion_construction")
+    construction = construction if isinstance(construction, dict) else {}
+    base_scale = construction.get("basic_niche_size_um")
+    if selected_k is None or base_scale is None:
+        return []
+    try:
+        base_scale_f = float(base_scale)
+    except (TypeError, ValueError):
+        return []
+    scale_factor = 1.25 if kind == "shape" else 0.75
+    scaled = max(5.0, base_scale_f * scale_factor)
+    output = f"{run_dir.as_posix()}_{kind}_leakage_scale{scaled:g}_fixed_k{selected_k}"
+    tokens = [
+        _env_token("OUTPUT_DIR", output),
+        _env_token("AUTO_N_CLUSTERS", 0),
+        _env_token("N_CLUSTERS", selected_k),
+        _env_token("SEED", int(summary.get("seed", 1337)) + 1),
+        *_common_run_env(summary, run_dir, omit={"BASIC_NICHE_SIZE_UM"}),
+        _env_token("BASIC_NICHE_SIZE_UM", scaled),
+        _env_token(
+            "SUBREGION_CONSTRUCTION_METHOD",
+            (
+                construction.get("construction_method")
+                if kind == "shape"
+                else "data_driven"
+            ),
+        ),
+        _env_token("SUBREGION_FEATURE_WEIGHT", 0 if kind == "density" else construction.get("partition_feature_weight")),
+    ]
+    return [" ".join(token for token in tokens if token is not None) + f" bash {_run_script_for_construction(summary)}"]
+
+
+def _leakage_ablation_evidence(
+    summaries: list[dict[str, object]],
+    kind: str,
+) -> list[dict[str, object]]:
+    warning_code = f"{kind}_descriptors_predict_subregion_clusters"
+    rows = []
+    for summary in summaries:
+        construction = summary.get("subregion_construction")
+        construction = construction if isinstance(construction, dict) else {}
+        diagnostics = summary.get(f"{kind}_leakage_diagnostics")
+        rows.append(
+            {
+                "run_dir": str(summary.get("output_dir")),
+                "warning_present": warning_code in _warning_codes(summary),
+                "n_subregions": summary.get("n_subregions"),
+                "n_clusters": summary.get("n_clusters"),
+                "coverage_fraction": summary.get("cell_subregion_coverage_fraction"),
+                "subregion_cluster_count_min": summary.get("subregion_cluster_count_min"),
+                "construction_method": construction.get("construction_method"),
+                "coordinate_only_baseline": construction.get("coordinate_only_baseline"),
+                "basic_niche_size_um": construction.get("basic_niche_size_um"),
+                "diagnostics": diagnostics if isinstance(diagnostics, dict) else None,
+            }
+        )
+    return rows
+
+
+def _leakage_status(
+    summary: dict[str, object],
+    kind: str,
+    *,
+    leakage_ablation_summaries: list[dict[str, object]],
+) -> tuple[str, bool, dict[str, object]]:
+    diagnostics = summary.get(f"{kind}_leakage_diagnostics")
+    thresholds = summary.get("leakage_qc_thresholds")
+    codes = _warning_codes(summary)
+    warning_code = f"{kind}_descriptors_predict_subregion_clusters"
+    if not isinstance(diagnostics, dict):
+        return "not_run", False, {"diagnostics": None, "thresholds": thresholds, "ablation_runs": []}
+    ablation_runs = _leakage_ablation_evidence(leakage_ablation_summaries, kind)
+    if warning_code not in codes:
+        return (
+            "passed_current_thresholds",
+            False,
+            {"diagnostics": diagnostics, "thresholds": thresholds, "ablation_runs": ablation_runs},
+        )
+    if not ablation_runs:
+        return (
+            "needs_leakage_ablation",
+            True,
+            {"diagnostics": diagnostics, "thresholds": thresholds, "ablation_runs": ablation_runs},
+        )
+    warning_flags = [bool(item["warning_present"]) for item in ablation_runs]
+    if any(warning_flags):
+        return (
+            "leakage_persists_after_ablation",
+            True,
+            {"diagnostics": diagnostics, "thresholds": thresholds, "ablation_runs": ablation_runs},
+        )
+    return (
+        "ablation_runs_passed_current_thresholds",
+        False,
+        {"diagnostics": diagnostics, "thresholds": thresholds, "ablation_runs": ablation_runs},
+    )
+
+
+def _float_or_zero(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _ot_cost_comparability_status(summary: dict[str, object]) -> tuple[str, bool, dict[str, object]]:
+    reliability = summary.get("cost_reliability")
+    if not isinstance(reliability, dict):
+        fallback_fraction = _float_or_zero(summary.get("assigned_ot_fallback_fraction"))
+        return (
+            "legacy_assigned_costs_only",
+            fallback_fraction > 0,
+            {
+                "cost_reliability": None,
+                "assigned_ot_fallback_fraction": fallback_fraction,
+                "note": "Full candidate effective-epsilon diagnostics were not available in this summary.",
+            },
+        )
+    mixed_eps = _float_or_zero(reliability.get("mixed_candidate_effective_eps_fraction"))
+    mixed_fallback = _float_or_zero(reliability.get("mixed_candidate_fallback_fraction"))
+    fallback_all = _float_or_zero(reliability.get("fallback_fraction_all_costs"))
+    fallback_assigned = _float_or_zero(reliability.get("fallback_fraction_assigned"))
+    blocking = mixed_eps > 0 or mixed_fallback > 0
+    if blocking:
+        status = "mixed_candidate_costs_remaining"
+    elif fallback_all > 0 or fallback_assigned > 0:
+        status = "common_epsilon_fallback_used"
+    else:
+        status = "passed_common_epsilon_checks"
+    return status, blocking, {"cost_reliability": reliability}
+
+
+def _spot_latent_visualization_status(summary: dict[str, object]) -> tuple[str, dict[str, object]]:
+    spot_latent = summary.get("spot_level_latent")
+    if not isinstance(spot_latent, dict) or not bool(spot_latent.get("implemented")):
+        return "not_computed", {"spot_level_latent": spot_latent}
+    spot_latent_evidence = dict(spot_latent)
+    if "chart_learning_mode" not in spot_latent_evidence and "fisher" in str(
+        spot_latent_evidence.get("projection", "")
+    ).lower():
+        spot_latent_evidence["chart_learning_mode"] = "supervised_by_fitted_ot_subregion_labels"
+    spot_latent_evidence.setdefault("validation_role", "diagnostic_visualization_not_independent_evidence")
+    chart_mode = str(spot_latent_evidence.get("chart_learning_mode", "")).lower()
+    projection = str(spot_latent_evidence.get("projection", "")).lower()
+    if "supervised" not in chart_mode and "fisher" not in projection:
+        return (
+            "diagnostic_only_model_grounded_atom_barycentric",
+            {
+                "spot_level_latent": spot_latent_evidence,
+                "required_interpretation": (
+                    "Treat OT atom-barycentric spot latent maps as downstream diagnostic visualization. They are "
+                    "less label-supervised than the legacy Fisher chart, but still are not independent biological "
+                    "validation without stability, leakage, and held-out-sample checks."
+                ),
+            },
+        )
+    return (
+        "diagnostic_only_supervised_by_fitted_ot_labels",
+        {
+            "spot_level_latent": spot_latent_evidence,
+            "required_interpretation": (
+                "Treat Fisher/discriminative spot latent separation as label-conditional visualization, not "
+                "independent evidence of biological niche separation."
+            ),
+        },
+    )
+
+
+def build_concern_resolution_report(
+    run_dir: str | Path,
+    *,
+    coordinate_baseline_run_dir: str | Path | None = None,
+    stability_run_dirs: Iterable[str | Path] = (),
+    leakage_ablation_run_dirs: Iterable[str | Path] = (),
+) -> dict[str, object]:
+    run_path = Path(run_dir)
+    primary = _read_summary(run_path)
+    baseline = _read_summary(coordinate_baseline_run_dir) if coordinate_baseline_run_dir is not None else None
+    warning_codes = _warning_codes(primary)
+    baseline_ok = _is_coordinate_only_baseline(baseline)
+    baseline_comparison = _baseline_comparison(primary, baseline)
+    stability_dirs = [Path(item) for item in stability_run_dirs]
+    stability_summaries = [_read_summary(path) for path in stability_dirs]
+    leakage_ablation_dirs = [Path(item) for item in leakage_ablation_run_dirs]
+    leakage_ablation_summaries = [_read_summary(path) for path in leakage_ablation_dirs]
+    selected_k = _selected_k(primary)
+
+    concerns: list[dict[str, object]] = []
+    concerns.append(
+        {
+            "code": "feature_boundary_circularity",
+            "status": "addressed_by_coordinate_only_baseline" if baseline_ok else "needs_coordinate_only_baseline",
+            "blocking_for_primary_claim": not baseline_ok,
+            "evidence": {
+                "warning_present": "feature_aware_boundary_circularity_risk" in warning_codes,
+                "subregion_construction": primary.get("subregion_construction"),
+                "baseline_comparison": baseline_comparison,
+            },
+            "required_fix": (
+                "Run a coordinate-only boundary baseline using the same OT feature view and selected K, then compare "
+                "cluster enrichments, sample composition, subregion statistics, and biological conclusions."
+            ),
+            "suggested_commands": [_suggest_coordinate_only_command(primary, run_path)] if not baseline_ok else [],
+        }
+    )
+    concerns.append(
+        {
+            "code": "coordinate_only_boundary_baseline",
+            "status": "available" if baseline_ok else "missing",
+            "blocking_for_primary_claim": not baseline_ok,
+            "evidence": baseline_comparison,
+            "required_fix": "Treat deep/feature-aware segmentation as exploratory until a coordinate-only boundary baseline is available.",
+        }
+    )
+
+    for kind in ("shape", "density"):
+        status, blocking, evidence = _leakage_status(
+            primary,
+            kind,
+            leakage_ablation_summaries=leakage_ablation_summaries,
+        )
+        concerns.append(
+            {
+                "code": f"{kind}_leakage",
+                "status": status,
+                "blocking_for_primary_claim": blocking,
+                "evidence": evidence,
+                "required_fix": (
+                    f"Run {kind}-aware ablations/nulls and require the biological conclusion to be stable when "
+                    f"{kind} descriptors are controlled, permuted, or used as a negative-control predictor."
+                ),
+                "suggested_commands": (
+                    _suggest_leakage_ablation_commands(primary, run_path, kind)
+                    if status == "needs_leakage_ablation"
+                    else []
+                ),
+            }
+        )
+
+    cost_status, cost_blocking, cost_evidence = _ot_cost_comparability_status(primary)
+    concerns.append(
+        {
+            "code": "ot_cost_comparability",
+            "status": cost_status,
+            "blocking_for_primary_claim": cost_blocking,
+            "evidence": cost_evidence,
+            "required_fix": (
+                "Use strict common-effective-epsilon candidate cost comparison. Mixed candidate effective epsilon "
+                "or fallback states after stabilization should block primary claims."
+            ),
+        }
+    )
+
+    spot_status, spot_evidence = _spot_latent_visualization_status(primary)
+    concerns.append(
+        {
+            "code": "spot_latent_supervised_visualization",
+            "status": spot_status,
+            "blocking_for_primary_claim": False,
+            "evidence": spot_evidence,
+            "required_fix": (
+                "Pair spot-latent maps with unsupervised baselines, posterior-entropy/atom-argmax diagnostics, "
+                "and held-out-sample controls before using visualization as support for biological interpretation."
+            ),
+        }
+    )
+
+    fixed_k_runs = [
+        {
+            "run_dir": str(path),
+            "n_clusters": summary.get("n_clusters"),
+            "seed": summary.get("seed"),
+            "auto_n_clusters": summary.get("auto_n_clusters"),
+            "qc_warning_count": summary.get("qc_warning_count"),
+        }
+        for path, summary in zip(stability_dirs, stability_summaries, strict=False)
+    ]
+    has_fixed_selected_k = any(
+        item.get("n_clusters") == selected_k and item.get("auto_n_clusters") is False
+        for item in fixed_k_runs
+    )
+    concerns.append(
+        {
+            "code": "auto_k_exploratory",
+            "status": "fixed_k_stability_runs_available" if has_fixed_selected_k else "needs_fixed_k_stability",
+            "blocking_for_primary_claim": not has_fixed_selected_k,
+            "evidence": {
+                "selected_k": selected_k,
+                "criterion_votes": (
+                    primary.get("auto_k_selection", {}).get("criterion_votes")
+                    if isinstance(primary.get("auto_k_selection"), dict)
+                    else None
+                ),
+                "fixed_k_runs": fixed_k_runs,
+            },
+            "required_fix": (
+                "Use auto-K as a shortlist only. Refit fixed K values around the selected K across seeds, then compare "
+                "co-assignment stability, cluster-size repairs, leakage diagnostics, and biological enrichments."
+            ),
+            "suggested_commands": _suggest_stability_commands(primary, run_path) if not has_fixed_selected_k else [],
+        }
+    )
+
+    blocking = [item["code"] for item in concerns if item.get("blocking_for_primary_claim")]
+    report = {
+        "run_dir": str(run_path),
+        "summary_json": str(run_path / "summary.json"),
+        "overall_status": "needs_validation" if blocking else "validation_concerns_addressed",
+        "strict_validation_passed": not blocking,
+        "primary_claim_status": "blocked_by_validation_concerns" if blocking else "ready_after_current_validation",
+        "blocking_concerns": blocking,
+        "n_cells": primary.get("n_cells"),
+        "n_subregions": primary.get("n_subregions"),
+        "n_clusters": primary.get("n_clusters"),
+        "qc_warning_codes": sorted(warning_codes),
+        "concerns": concerns,
+    }
+    return report
+
+
+def write_concern_resolution_report(
+    run_dir: str | Path,
+    *,
+    coordinate_baseline_run_dir: str | Path | None = None,
+    stability_run_dirs: Iterable[str | Path] = (),
+    leakage_ablation_run_dirs: Iterable[str | Path] = (),
+    output_json: str | Path | None = None,
+    output_md: str | Path | None = None,
+) -> dict[str, object]:
+    report = build_concern_resolution_report(
+        run_dir,
+        coordinate_baseline_run_dir=coordinate_baseline_run_dir,
+        stability_run_dirs=stability_run_dirs,
+        leakage_ablation_run_dirs=leakage_ablation_run_dirs,
+    )
+    run_path = Path(run_dir)
+    json_path = Path(output_json) if output_json is not None else run_path / "concern_resolution_report.json"
+    md_path = Path(output_md) if output_md is not None else run_path / "concern_resolution_report.md"
+    json_path.write_text(json.dumps(report, indent=2))
+    lines = [
+        "# Concern Resolution Report",
+        "",
+        f"- Run: `{report['run_dir']}`",
+        f"- Overall status: `{report['overall_status']}`",
+        f"- Blocking concerns: `{', '.join(report['blocking_concerns']) or 'none'}`",
+        "",
+        "## Concerns",
+    ]
+    for item in report["concerns"]:
+        lines.extend(
+            [
+                "",
+                f"### {item['code']}",
+                "",
+                f"- Status: `{item['status']}`",
+                f"- Blocking for primary claim: `{bool(item['blocking_for_primary_claim'])}`",
+                f"- Required fix: {item['required_fix']}",
+            ]
+        )
+        evidence = item.get("evidence")
+        if isinstance(evidence, dict):
+            cost_reliability = evidence.get("cost_reliability")
+            if isinstance(cost_reliability, dict):
+                lines.append(
+                    "- Cost reliability: "
+                    f"fallback_all={_metric(cost_reliability.get('fallback_fraction_all_costs'))}, "
+                    f"fallback_assigned={_metric(cost_reliability.get('fallback_fraction_assigned'))}, "
+                    f"mixed_eps={_metric(cost_reliability.get('mixed_candidate_effective_eps_fraction'))}, "
+                    f"mixed_fallback={_metric(cost_reliability.get('mixed_candidate_fallback_fraction'))}"
+                )
+            spot_latent = evidence.get("spot_level_latent")
+            if isinstance(spot_latent, dict):
+                lines.append(
+                    "- Spot latent role: "
+                    f"implemented={bool(spot_latent.get('implemented'))}, "
+                    f"chart_learning_mode={spot_latent.get('chart_learning_mode', 'unspecified')}, "
+                    f"validation_role={spot_latent.get('validation_role', 'diagnostic')}"
+                )
+            baseline_comparison = evidence.get("baseline_comparison")
+            if isinstance(baseline_comparison, dict):
+                lines.append(
+                    "- Baseline comparison: "
+                    f"primary subregions={baseline_comparison.get('primary_n_subregions')}, "
+                    f"baseline subregions={baseline_comparison.get('baseline_n_subregions')}, "
+                    f"primary coverage={_metric(baseline_comparison.get('primary_coverage_fraction'))}, "
+                    f"baseline coverage={_metric(baseline_comparison.get('baseline_coverage_fraction'))}"
+                )
+            diagnostics = evidence.get("diagnostics")
+            if isinstance(diagnostics, dict):
+                permutation = diagnostics.get("permutation")
+                permutation = permutation if isinstance(permutation, dict) else {}
+                lines.append(
+                    "- Primary diagnostics: "
+                    f"balanced_accuracy={_metric(diagnostics.get('balanced_accuracy'))}, "
+                    f"spatial_block_accuracy={_metric(diagnostics.get('spatial_block_accuracy'))}, "
+                    f"permutation_excess={_metric(permutation.get('excess'))}"
+                )
+            ablation_runs = evidence.get("ablation_runs")
+            if isinstance(ablation_runs, list) and ablation_runs:
+                lines.append("- Ablation evidence:")
+                for run in ablation_runs:
+                    if not isinstance(run, dict):
+                        continue
+                    diagnostics = run.get("diagnostics")
+                    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+                    lines.append(
+                        "  - "
+                        f"`{run.get('run_dir')}`: "
+                        f"warning_present={bool(run.get('warning_present'))}, "
+                        f"method={run.get('construction_method')}, "
+                        f"coordinate_only={bool(run.get('coordinate_only_baseline'))}, "
+                        f"scale_um={_metric(run.get('basic_niche_size_um'))}, "
+                        f"balanced_accuracy={_metric(diagnostics.get('balanced_accuracy'))}"
+                    )
+            fixed_k_runs = evidence.get("fixed_k_runs")
+            if isinstance(fixed_k_runs, list) and fixed_k_runs:
+                lines.append("- Fixed-K evidence:")
+                for run in fixed_k_runs:
+                    if not isinstance(run, dict):
+                        continue
+                    lines.append(
+                        "  - "
+                        f"`{run.get('run_dir')}`: "
+                        f"K={run.get('n_clusters')}, seed={run.get('seed')}, "
+                        f"auto_k={bool(run.get('auto_n_clusters'))}, "
+                        f"qc_warning_count={run.get('qc_warning_count')}"
+                    )
+        commands = item.get("suggested_commands") or []
+        if commands:
+            lines.append("- Suggested command(s):")
+            for command in commands:
+                lines.append(f"  - `{command}`")
+    md_path.write_text("\n".join(lines) + "\n")
+    report["outputs"] = {"json": str(json_path), "markdown": str(md_path)}
+    json_path.write_text(json.dumps(report, indent=2))
+    return report

@@ -887,9 +887,21 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     assert result.spot_latent_subregion_ids.shape == (expected_spot_occurrences,)
     assert result.spot_latent_cluster_labels.shape == (expected_spot_occurrences,)
     assert result.spot_latent_coords.shape == (expected_spot_occurrences, 2)
+    assert result.spot_latent_within_coords.shape == (expected_spot_occurrences, 2)
+    assert result.spot_latent_cluster_anchors.shape == (2, 2)
+    assert result.spot_latent_atom_embedding.shape == (2, 2, 2)
     assert result.spot_latent_aligned_coords.shape == (expected_spot_occurrences, 2)
     assert result.spot_latent_atom_posteriors.shape == (expected_spot_occurrences, 2)
     assert np.allclose(result.spot_latent_atom_posteriors.sum(axis=1), 1.0, atol=1e-5)
+    assert result.spot_latent_posterior_entropy.shape == (expected_spot_occurrences,)
+    assert result.spot_latent_normalized_posterior_entropy.shape == (expected_spot_occurrences,)
+    assert result.spot_latent_atom_argmax.shape == (expected_spot_occurrences,)
+    assert result.spot_latent_temperature_used.shape == (expected_spot_occurrences,)
+    assert np.all(result.spot_latent_posterior_entropy >= -1e-6)
+    assert np.all(result.spot_latent_temperature_used > 0.0)
+    assert result.spot_latent_mode == "atom_barycentric_mds"
+    assert result.spot_latent_chart_learning_mode == "model_grounded_atom_distance_mds_without_fisher_labels"
+    assert result.spot_latent_temperature_mode == "auto_cost_gap"
     assert np.all(result.spot_latent_weights >= 0.0)
     assert np.array_equal(
         result.spot_latent_cluster_labels,
@@ -910,6 +922,7 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     assert result.cell_spot_latent_coords.shape == (features.shape[0], 2)
     assert result.cell_spot_latent_cluster_labels.shape == (features.shape[0],)
     assert result.cell_spot_latent_weights.shape == (features.shape[0],)
+    assert result.cell_spot_latent_posterior_entropy.shape == (features.shape[0],)
     covered_latent = result.cell_spot_latent_cluster_labels >= 0
     assert np.any(covered_latent)
     assert np.all(np.isfinite(result.cell_spot_latent_coords[covered_latent]))

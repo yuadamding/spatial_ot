@@ -2,4 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "$SCRIPT_DIR/scripts/prepare_spatial_ot_input.sh" "$@"
+REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_DIR"
+
+exec bash "$SCRIPT_DIR/run.sh" "$@"

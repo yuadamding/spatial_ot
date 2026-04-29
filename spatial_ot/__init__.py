@@ -11,6 +11,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "MultilevelPathConfig": ("config", "MultilevelPathConfig"),
     "RegionGeometry": ("multilevel", "RegionGeometry"),
     "SpatialOTFeatureEncoder": ("deep", "SpatialOTFeatureEncoder"),
+    "build_concern_resolution_report": ("multilevel", "build_concern_resolution_report"),
     "distribute_pooled_feature_cache_to_inputs": ("pooling", "distribute_pooled_feature_cache_to_inputs"),
     "fit_deep_features": ("deep", "fit_deep_features"),
     "fit_deep_features_on_h5ad": ("deep", "fit_deep_features_on_h5ad"),
@@ -30,8 +31,10 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "run_multilevel_ot_on_h5ad": ("multilevel", "run_multilevel_ot_on_h5ad"),
     "run_multilevel_ot_with_config": ("multilevel", "run_multilevel_ot_with_config"),
     "transform_h5ad_with_deep_model": ("deep", "transform_h5ad_with_deep_model"),
+    "write_concern_resolution_report": ("multilevel", "write_concern_resolution_report"),
 }
 
+__version__ = "0.1.10"
 __all__ = list(_LAZY_EXPORTS)
 
 

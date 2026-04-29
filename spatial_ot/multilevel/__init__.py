@@ -12,6 +12,10 @@ from .core import (
     fit_multilevel_ot,
     weighted_similarity_fit,
 )
+from .concerns import (
+    build_concern_resolution_report,
+    write_concern_resolution_report,
+)
 from .geometry import (
     _shape_descriptor_frame,
     _shape_leakage_balanced_accuracy,
@@ -77,6 +81,7 @@ __all__ = [
     "build_subregions",
     "effective_min_cluster_size",
     "build_composite_subregions_from_basic_niches",
+    "build_concern_resolution_report",
     "fit_multilevel_ot",
     "fit_ot_shape_normalizer",
     "make_reference_points_unit_disk",
@@ -94,4 +99,5 @@ __all__ = [
     "sample_geometry_points",
     "select_k_from_ot_landmark_costs",
     "weighted_similarity_fit",
+    "write_concern_resolution_report",
 ]

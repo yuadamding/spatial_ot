@@ -2899,6 +2899,7 @@ def fit_multilevel_ot(
         spot_latent = empty_spot_level_latent_charts(
             n_cells=int(features.shape[0]),
             atoms_per_cluster=int(atom_coords.shape[1]),
+            n_clusters=int(atom_coords.shape[0]),
         )
 
     return MultilevelOTResult(
@@ -2947,14 +2948,33 @@ def fit_multilevel_ot(
         spot_latent_subregion_ids=spot_latent["spot_latent_subregion_ids"].astype(np.int32),
         spot_latent_cluster_labels=spot_latent["spot_latent_cluster_labels"].astype(np.int32),
         spot_latent_coords=spot_latent["spot_latent_coords"].astype(np.float32),
+        spot_latent_within_coords=spot_latent["spot_latent_within_coords"].astype(np.float32),
+        spot_latent_cluster_anchors=spot_latent["spot_latent_cluster_anchors"].astype(np.float32),
+        spot_latent_atom_embedding=spot_latent["spot_latent_atom_embedding"].astype(np.float32),
         spot_latent_aligned_coords=spot_latent["spot_latent_aligned_coords"].astype(np.float32),
         spot_latent_cluster_probs=spot_latent["spot_latent_cluster_probs"].astype(np.float32),
         spot_latent_atom_confidence=spot_latent["spot_latent_atom_confidence"].astype(np.float32),
+        spot_latent_posterior_entropy=spot_latent["spot_latent_posterior_entropy"].astype(np.float32),
+        spot_latent_normalized_posterior_entropy=spot_latent[
+            "spot_latent_normalized_posterior_entropy"
+        ].astype(np.float32),
+        spot_latent_atom_argmax=spot_latent["spot_latent_atom_argmax"].astype(np.int32),
+        spot_latent_temperature_used=spot_latent["spot_latent_temperature_used"].astype(np.float32),
         spot_latent_weights=spot_latent["spot_latent_weights"].astype(np.float32),
         spot_latent_atom_posteriors=spot_latent["spot_latent_atom_posteriors"].astype(np.float32),
         cell_spot_latent_coords=spot_latent["cell_spot_latent_coords"].astype(np.float32),
         cell_spot_latent_cluster_labels=spot_latent["cell_spot_latent_cluster_labels"].astype(np.int32),
         cell_spot_latent_weights=spot_latent["cell_spot_latent_weights"].astype(np.float32),
+        cell_spot_latent_posterior_entropy=spot_latent[
+            "cell_spot_latent_posterior_entropy"
+        ].astype(np.float32),
+        spot_latent_mode=str(spot_latent["spot_latent_mode"].item()),
+        spot_latent_chart_learning_mode=str(spot_latent["spot_latent_chart_learning_mode"].item()),
+        spot_latent_projection_mode=str(spot_latent["spot_latent_projection_mode"].item()),
+        spot_latent_validation_role=str(spot_latent["spot_latent_validation_role"].item()),
+        spot_latent_global_within_scale=float(spot_latent["spot_latent_global_within_scale"].item()),
+        spot_latent_assignment_temperature=float(spot_latent["spot_latent_assignment_temperature"].item()),
+        spot_latent_temperature_mode=str(spot_latent["spot_latent_temperature_mode"].item()),
         cost_scale_x=float(cost_scale_x),
         cost_scale_y=float(cost_scale_y),
         objective_history=objective_history,

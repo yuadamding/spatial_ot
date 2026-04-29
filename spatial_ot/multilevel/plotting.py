@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import ConvexHull, QhullError
 
+from .spot_latent import spot_latent_mode_metadata
+
 
 def cluster_palette(n_clusters: int) -> np.ndarray:
     cmap_name = "tab20" if n_clusters <= 20 else "gist_ncar"
@@ -872,12 +874,34 @@ def plot_sample_spot_latent_maps(
     occurrence_weights: np.ndarray
     occurrence_subregion_ids: np.ndarray
     subregion_id_source = "unavailable"
+    spot_latent_mode = str(metadata.get("spot_level_latent_mode", "atom_barycentric_mds"))
+    latent_projection_mode = str(
+        metadata.get("spot_level_latent_projection_mode", metadata.get("spot_level_latent_mode", ""))
+    )
+    chart_learning_mode = str(metadata.get("spot_level_latent_chart_learning_mode", ""))
+    validation_role = str(
+        metadata.get("spot_level_latent_validation_role", "diagnostic_visualization_not_independent_evidence")
+    )
+
+    def _payload_scalar(payload: np.lib.npyio.NpzFile, key: str, default: str) -> str:
+        if key not in payload.files:
+            return default
+        value = payload[key]
+        try:
+            return str(value.item())
+        except ValueError:
+            return str(value.tolist())
+
     if resolved_spot_latent_npz is not None and resolved_spot_latent_npz.exists():
         with np.load(resolved_spot_latent_npz) as payload:
             occurrence_cell_indices = np.asarray(payload["cell_indices"], dtype=np.int64)
             latent = np.asarray(payload["latent_coords"], dtype=np.float32)
             cluster_ids = np.asarray(payload["cluster_labels"], dtype=np.int32)
             occurrence_weights = np.asarray(payload["weights"], dtype=np.float32) if "weights" in payload.files else np.ones(latent.shape[0], dtype=np.float32)
+            spot_latent_mode = _payload_scalar(payload, "spot_latent_mode", spot_latent_mode)
+            latent_projection_mode = _payload_scalar(payload, "latent_projection_mode", latent_projection_mode)
+            chart_learning_mode = _payload_scalar(payload, "chart_learning_mode", chart_learning_mode)
+            validation_role = _payload_scalar(payload, "validation_role", validation_role)
             if "subregion_ids" in payload.files:
                 occurrence_subregion_ids = np.asarray(payload["subregion_ids"], dtype=np.int32)
                 subregion_id_source = "occurrence_npz[subregion_ids]"
@@ -908,6 +932,14 @@ def plot_sample_spot_latent_maps(
             subregion_id_source = "obs[mlot_subregion_int]"
         else:
             occurrence_subregion_ids = np.full(latent.shape[0], -1, dtype=np.int32)
+
+    latent_mode_metadata = spot_latent_mode_metadata(spot_latent_mode)
+    if not latent_projection_mode:
+        latent_projection_mode = str(latent_mode_metadata["latent_projection_mode"])
+    if not chart_learning_mode:
+        chart_learning_mode = str(latent_mode_metadata["chart_learning_mode"])
+    if not validation_role:
+        validation_role = str(latent_mode_metadata["validation_role"])
 
     if latent.ndim != 2 or latent.shape[1] != 2:
         raise ValueError("Spot latent coordinates must have shape (n_observations, 2).")
@@ -1115,9 +1147,17 @@ def plot_sample_spot_latent_maps(
         "plot_spatial_x_key": str(resolved_x_key),
         "plot_spatial_y_key": str(resolved_y_key),
         "spatial_scale": float(resolved_scale),
-        "coordinate_scope": "global_fisher_latent_with_per_niche_color_scaling",
+        "spot_latent_mode": spot_latent_mode,
+        "latent_projection_mode": latent_projection_mode,
+        "coordinate_scope": str(latent_mode_metadata["coordinate_scope"]),
+        "chart_learning_mode": chart_learning_mode,
+        "validation_role": validation_role,
         "rendering": "whole_sample_within_niche_latent_rgb",
-        "color_encoding": "The side key uses the learned global Fisher/discriminative 2D latent coordinates to show OT-supported between-cluster separation without forcing a minimum or target cluster distance. Slide colors are robustly rescaled within each niche/cluster before RGB conversion so continuous within-niche heterogeneity uses the full color range.",
+        "color_encoding": "The side key uses the stored 2D spot-latent coordinates to show model-grounded between-cluster layout. Slide colors are robustly rescaled within each niche/cluster before RGB conversion so continuous within-niche heterogeneity uses the full color range. Treat this as diagnostic visualization, not independent validation.",
+        "includes_aligned_coordinates_in_chart_features": bool(
+            latent_mode_metadata["includes_aligned_coordinates_in_chart_features"]
+        ),
+        "uses_forced_cluster_local_radius": bool(latent_mode_metadata["uses_forced_cluster_local_radius"]),
         "latent_color_limits": within_niche_color_limits,
         "within_niche_latent_color_limits": within_niche_color_limits,
         "display_latent_limits": display_latent_limits,

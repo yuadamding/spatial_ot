@@ -234,6 +234,10 @@ def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tm
             dtype=np.float32,
         ),
         weights=np.ones(8, dtype=np.float32),
+        spot_latent_mode=np.array("atom_barycentric_mds"),
+        latent_projection_mode=np.array("ot_atom_barycentric_mds_over_cluster_atom_posteriors"),
+        chart_learning_mode=np.array("model_grounded_atom_distance_mds_without_fisher_labels"),
+        validation_role=np.array("diagnostic_visualization_not_independent_evidence"),
     )
 
     manifest = plot_sample_spot_latent_maps_from_run_dir(
@@ -248,7 +252,16 @@ def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tm
     assert manifest["n_plots"] == 2
     assert manifest["rendering"] == "whole_sample_within_niche_latent_rgb"
     assert manifest["max_occurrences_per_sample"] == 0
-    assert manifest["coordinate_scope"] == "global_fisher_latent_with_per_niche_color_scaling"
+    assert (
+        manifest["coordinate_scope"]
+        == "cluster_atom_measure_mds_anchors_plus_atom_posterior_barycentric_within_cluster_residual"
+    )
+    assert manifest["chart_learning_mode"] == "model_grounded_atom_distance_mds_without_fisher_labels"
+    assert manifest["validation_role"] == "diagnostic_visualization_not_independent_evidence"
+    assert manifest["spot_latent_mode"] == "atom_barycentric_mds"
+    assert manifest["includes_aligned_coordinates_in_chart_features"] is False
+    assert manifest["uses_forced_cluster_local_radius"] is False
+    assert "diagnostic visualization" in manifest["color_encoding"]
     assert manifest["latent_source"] == "occurrence_npz"
     assert manifest["subregion_id_source"] == "occurrence_npz[subregion_ids]"
     assert manifest["subregion_boundary_overlay"] == "concave_hull_of_sample_occurrence_subregion_members"

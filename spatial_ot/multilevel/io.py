@@ -57,7 +57,10 @@ from .plotting import (
     plot_sample_spatial_maps,
     plot_sample_spatial_maps_from_run_dir as plot_sample_spatial_maps_from_run_dir,
 )
-from .spot_latent import spot_latent_separation_diagnostics as _spot_latent_separation_diagnostics
+from .spot_latent import (
+    spot_latent_mode_metadata,
+    spot_latent_separation_diagnostics as _spot_latent_separation_diagnostics,
+)
 from .types import MultilevelOTResult, RegionGeometry
 
 
@@ -571,21 +574,23 @@ def _save_multilevel_outputs(
         )
     summary["outputs"] = outputs
     spot_latent_computed = bool(summary.get("compute_spot_latent", True)) and result.spot_latent_coords.shape[0] > 0
+    spot_latent_metadata = spot_latent_mode_metadata(result.spot_latent_mode)
     summary.setdefault("capabilities", {})["spot_level_latent_charts_implemented"] = bool(spot_latent_computed)
     summary.setdefault("method_stack", {})["spot_level_latent_projection"] = (
-        "global_fisher_discriminative_chart_over_ot_atom_posteriors_aligned_coords_and_local_context"
+        str(spot_latent_metadata["latent_projection_mode"])
         if spot_latent_computed
         else "disabled"
     )
     summary.setdefault("method_notes", {})["spot_level_latent"] = (
-        "Every row/spot occurrence inside every fitted regional niche is projected into a shared 2D chart. The chart is "
-        "learned from aligned intrinsic coordinates, OT atom-posterior composition, and local atom-posterior composition "
-        "at multiple canonical radii. It first learns cluster-local PCA residuals for within-niche heterogeneity, then "
-        "learns a weighted Fisher/discriminative global chart from the fitted OT subregion labels. No minimum-distance "
-        "anchor repulsion or target-distance scaling is used: weak between-cluster separation is retained as a diagnostic "
-        "signal instead of being forced by the plotter. Primary OT subregion labels remain authoritative; the latent "
-        "projection changes the chart geometry, not the fitted subregion labels. The H5AD stores a collapsed per-row "
-        "preview; the NPZ stores the full occurrence-level latent field."
+        "Every row/spot occurrence inside every fitted regional niche is projected into a shared 2D diagnostic chart. "
+        "The default chart is OT-grounded atom-barycentric MDS: cluster anchors are learned from distances between "
+        "the fitted cluster atom measures, and each occurrence is placed inside its assigned cluster by barycentering "
+        "the cluster's atom embedding with the occurrence's cost-gap-calibrated OT atom posterior. Raw aligned x/y coordinates are not "
+        "concatenated into the default chart features, and cluster-local variance is not equalized to a fixed radius. "
+        "The legacy Fisher/local-PCA chart remains available only as an explicit diagnostic mode. Primary OT subregion "
+        "labels remain authoritative; the latent projection changes the chart geometry, not the fitted subregion labels. "
+        "The H5AD stores a collapsed per-row preview; the NPZ stores the full occurrence-level latent field, posterior "
+        "entropy, atom argmax, effective temperature, atom embeddings, and cluster anchors."
     )
     summary.setdefault("method_notes", {})["cell_cluster_labels"] = (
         "Primary H5AD labels mlot_cluster_int and mlot_subregion_cluster_int inherit each row's fitted mutually exclusive "
@@ -614,16 +619,52 @@ def _save_multilevel_outputs(
             "subregion_ids",
             "cluster_labels",
             "latent_coords",
+            "within_coords",
+            "cluster_anchors",
+            "atom_embedding",
             "aligned_coords",
             "cluster_probs",
             "atom_confidence",
+            "posterior_entropy",
+            "normalized_posterior_entropy",
+            "atom_argmax",
+            "temperature_used",
             "weights",
             "atom_posteriors",
         ],
         "cell_preview_obsm_key": "mlot_spot_latent_coords",
-        "coordinate_scope": "global_fisher_discriminative_with_cluster_local_residual",
-        "latent_refinement": "local_pca_residual_plus_weighted_fisher_discriminant",
-        "local_context_radii_canonical": [0.25, 0.5, 1.0],
+        "coordinate_scope": str(spot_latent_metadata["coordinate_scope"]),
+        "chart_learning_mode": str(spot_latent_metadata["chart_learning_mode"]),
+        "validation_role": str(spot_latent_metadata["validation_role"]),
+        "unsupervised_baseline_required_for_validation": bool(
+            spot_latent_metadata["unsupervised_baseline_required_for_validation"]
+        ),
+        "label_permutation_control_recommended": bool(
+            spot_latent_metadata["label_permutation_control_recommended"]
+        ),
+        "latent_refinement": str(spot_latent_metadata["latent_refinement"]),
+        "includes_aligned_coordinates_in_chart_features": bool(
+            spot_latent_metadata["includes_aligned_coordinates_in_chart_features"]
+        ),
+        "uses_forced_cluster_local_radius": bool(spot_latent_metadata["uses_forced_cluster_local_radius"]),
+        "posterior_entropy_obs_key": "mlot_spot_latent_posterior_entropy",
+        "atom_argmax_occurrence_array": "atom_argmax",
+        "assignment_temperature": float(result.spot_latent_assignment_temperature)
+        if np.isfinite(result.spot_latent_assignment_temperature)
+        else None,
+        "temperature_mode": str(result.spot_latent_temperature_mode),
+        "temperature_used_summary": _numeric_summary(result.spot_latent_temperature_used),
+        "posterior_entropy_summary": _numeric_summary(result.spot_latent_posterior_entropy),
+        "normalized_posterior_entropy_summary": _numeric_summary(
+            result.spot_latent_normalized_posterior_entropy
+        ),
+        "atom_confidence_summary": _numeric_summary(result.spot_latent_atom_confidence),
+        "global_within_scale": float(result.spot_latent_global_within_scale)
+        if np.isfinite(result.spot_latent_global_within_scale)
+        else None,
+        "local_context_radii_canonical": [0.25, 0.5, 1.0]
+        if bool(spot_latent_metadata["includes_aligned_coordinates_in_chart_features"])
+        else [],
         "honest_separation_diagnostics": spot_latent_diagnostics,
     }
 
@@ -681,6 +722,9 @@ def _save_multilevel_outputs(
     cells_out.obs["mlot_spot_latent_cluster_id"] = pd.Categorical(spot_label_names)
     cells_out.obs["mlot_spot_latent_cluster_int"] = result.cell_spot_latent_cluster_labels.astype(np.int32)
     cells_out.obs["mlot_spot_latent_weight"] = result.cell_spot_latent_weights.astype(np.float32)
+    cells_out.obs["mlot_spot_latent_posterior_entropy"] = (
+        result.cell_spot_latent_posterior_entropy.astype(np.float32)
+    )
     cells_out.obsm["mlot_spot_latent_coords"] = result.cell_spot_latent_coords.astype(np.float32)
     if deep_embedding is not None and deep_obsm_key:
         cells_out.obsm[deep_obsm_key] = np.asarray(deep_embedding, dtype=np.float32)
@@ -699,7 +743,10 @@ def _save_multilevel_outputs(
         "primary_cluster_obs_key": "mlot_cluster_int",
         "subregion_cluster_obs_key": "mlot_subregion_cluster_int",
         "projected_cluster_obs_key": "mlot_projected_cluster_int",
-        "spot_level_latent_mode": "occurrence_level_global_fisher_discriminative_chart",
+        "spot_level_latent_mode": result.spot_latent_mode,
+        "spot_level_latent_projection_mode": result.spot_latent_projection_mode,
+        "spot_level_latent_chart_learning_mode": result.spot_latent_chart_learning_mode,
+        "spot_level_latent_validation_role": result.spot_latent_validation_role,
         "spot_level_latent_npz": str(spot_latent_path),
         "deep_obsm_key": deep_obsm_key,
         "method_layers": summary.get("method_layers"),
@@ -782,18 +829,40 @@ def _save_multilevel_outputs(
         subregion_ids=result.spot_latent_subregion_ids.astype(np.int32),
         cluster_labels=result.spot_latent_cluster_labels.astype(np.int32),
         latent_coords=result.spot_latent_coords.astype(np.float32),
+        within_coords=result.spot_latent_within_coords.astype(np.float32),
+        cluster_anchors=result.spot_latent_cluster_anchors.astype(np.float32),
+        atom_embedding=result.spot_latent_atom_embedding.astype(np.float32),
         aligned_coords=result.spot_latent_aligned_coords.astype(np.float32),
         cluster_probs=result.spot_latent_cluster_probs.astype(np.float32),
         atom_confidence=result.spot_latent_atom_confidence.astype(np.float32),
+        posterior_entropy=result.spot_latent_posterior_entropy.astype(np.float32),
+        normalized_posterior_entropy=result.spot_latent_normalized_posterior_entropy.astype(np.float32),
+        atom_argmax=result.spot_latent_atom_argmax.astype(np.int32),
+        temperature_used=result.spot_latent_temperature_used.astype(np.float32),
         weights=result.spot_latent_weights.astype(np.float32),
         atom_posteriors=result.spot_latent_atom_posteriors.astype(np.float32),
         cell_spot_latent_coords=result.cell_spot_latent_coords.astype(np.float32),
         cell_spot_latent_cluster_labels=result.cell_spot_latent_cluster_labels.astype(np.int32),
         cell_spot_latent_weights=result.cell_spot_latent_weights.astype(np.float32),
-        latent_projection_mode=np.array(
-            "global_fisher_discriminative_chart_over_ot_atom_posteriors_aligned_coords_and_local_context"
+        cell_spot_latent_posterior_entropy=result.cell_spot_latent_posterior_entropy.astype(np.float32),
+        spot_latent_mode=np.array(result.spot_latent_mode),
+        latent_projection_mode=np.array(result.spot_latent_projection_mode),
+        chart_learning_mode=np.array(result.spot_latent_chart_learning_mode),
+        validation_role=np.array(result.spot_latent_validation_role),
+        unsupervised_baseline_required_for_validation=np.array(
+            bool(spot_latent_metadata["unsupervised_baseline_required_for_validation"])
         ),
-        latent_refinement=np.array("local_pca_residual_plus_weighted_fisher_discriminant"),
+        label_permutation_control_recommended=np.array(
+            bool(spot_latent_metadata["label_permutation_control_recommended"])
+        ),
+        latent_refinement=np.array(str(spot_latent_metadata["latent_refinement"])),
+        includes_aligned_coordinates_in_chart_features=np.array(
+            bool(spot_latent_metadata["includes_aligned_coordinates_in_chart_features"])
+        ),
+        uses_forced_cluster_local_radius=np.array(bool(spot_latent_metadata["uses_forced_cluster_local_radius"])),
+        global_within_scale=np.array(float(result.spot_latent_global_within_scale), dtype=np.float32),
+        assignment_temperature=np.array(float(result.spot_latent_assignment_temperature), dtype=np.float32),
+        temperature_mode=np.array(result.spot_latent_temperature_mode),
     )
     np.savez_compressed(
         candidate_diag_path,
@@ -1124,7 +1193,9 @@ def run_multilevel_ot_on_h5ad(
             "batch_correction": "disabled",
             "count_reconstruction": count_reconstruction_summary,
             "pretrained_model_loaded": bool(deep_config.pretrained_model is not None),
-            "validation_used_for_early_stopping": bool(deep_config.validation != "none"),
+            "validation_used_for_early_stopping": bool(
+                deep_config.pretrained_model is None and active_deep_config.validation != "none"
+            ),
             "runtime_memory": latent_diagnostics.get("runtime_memory"),
             "feature_schema": feature_schema,
             "validation_report": validation_report,
@@ -1621,7 +1692,7 @@ def run_multilevel_ot_on_h5ad(
             "support_sharing": "subregions assigned to the same cluster reuse the same shared atom dictionary but keep subregion-specific mixture weights",
             "subregion_cluster_size": "cluster-size constraints are applied to the number of fitted subregions assigned to each subregion cluster, not to projected cell or spot labels",
             "cell_boundary_projection": "cell-level scores are an approximate projection from canonical-coordinate plus feature fit to assigned cluster atoms, modulated by fitted-subregion cluster evidence; they are not an exact posterior under the OT model",
-            "spot_level_latent": "spot-level latent charts are learned after the regional OT fit from aligned intrinsic coordinates, OT atom-posterior composition, and local atom-posterior composition at multiple canonical radii; local PCA residuals preserve within-niche heterogeneity, and a weighted Fisher/discriminative projection gives the chart a shared global coordinate system without forcing a minimum or target between-cluster distance",
+            "spot_level_latent": "spot-level latent charts are learned after the regional OT fit. The default chart is OT atom-barycentric MDS: fitted cluster atom measures define global anchors, and each occurrence is placed by barycentering its assigned cluster's atom embedding with a cost-gap-calibrated OT atom posterior. Raw aligned coordinates are not concatenated into the default chart features, cluster-local variance is not forced to a fixed radius, and posterior entropy/atom-argmax/effective-temperature diagnostics are saved. Treat this as diagnostic visualization, not independent validation",
             "auto_k_selection": "when enabled, a pilot OT fit at the largest candidate K builds a scalable OT-landmark subregion distance matrix from fused transport-cost profiles; Silhouette is scored on that precomputed distance and CH/DB/Gap on a classical MDS embedding before majority-vote K selection and final refit. Treat this as exploratory model selection until full stability and ablation checks are run around the selected K",
         },
         "deep_features": deep_summary,

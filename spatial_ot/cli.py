@@ -19,6 +19,7 @@ from .multilevel import (
     plot_sample_niche_maps_from_run_dir,
     plot_sample_spot_latent_maps_from_run_dir,
     run_multilevel_ot_with_config,
+    write_concern_resolution_report,
 )
 from .optimal_search import run_multilevel_optimal_search
 from .pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_directory
@@ -161,6 +162,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum occurrence points drawn in each whole-sample latent map. Use 0 for all.",
     )
 
+    validate_run = sub.add_parser(
+        "validate-run-concerns",
+        help="Write a concern-resolution report for a finished multilevel OT run.",
+    )
+    validate_run.add_argument("--run-dir", required=True, help="Finished multilevel OT run directory.")
+    validate_run.add_argument(
+        "--coordinate-baseline-run-dir",
+        default=None,
+        help="Optional coordinate-only baseline run directory used to address boundary-circularity concerns.",
+    )
+    validate_run.add_argument(
+        "--stability-run-dir",
+        action="append",
+        default=[],
+        help="Optional fixed-K stability run directory. Repeat for multiple runs.",
+    )
+    validate_run.add_argument(
+        "--leakage-ablation-run-dir",
+        action="append",
+        default=[],
+        help="Optional shape/density leakage-ablation run directory. Repeat for multiple runs.",
+    )
+    validate_run.add_argument(
+        "--strict",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Exit with status 1 when blocking primary-claim validation concerns remain.",
+    )
+    validate_run.add_argument("--output-json", default=None, help="Optional JSON report path.")
+    validate_run.add_argument("--output-md", default=None, help="Optional Markdown report path.")
+
     pool_inputs = sub.add_parser(
         "pool-inputs",
         help="Pool multiple cohort H5AD files into one non-overlapping AnnData for joint latent learning and niche discovery.",
@@ -297,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--deep-segmentation-spatial-weight", type=float, default=None, help="Weight on spatial edge length during deep graph segmentation.")
     multilevel.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     multilevel.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
-    multilevel.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level cluster-local spot latent charts.")
+    multilevel.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level OT atom-barycentric spot latent diagnostic charts.")
     multilevel.add_argument("--auto-n-clusters", action=argparse.BooleanOptionalAction, default=None, help="Select the number of subregion clusters automatically from pilot OT-landmark geometry.")
     multilevel.add_argument("--candidate-n-clusters", default=None, help="Candidate K values for --auto-n-clusters, e.g. '15-25' or '15,16,17,18'.")
     multilevel.add_argument("--auto-k-max-score-subregions", type=int, default=None, help="Maximum sampled subregions used to score automatic K selection; 0 scores all.")
@@ -361,7 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--deep-segmentation-spatial-weight", type=float, default=None, help="Weight on spatial edge length during deep graph segmentation.")
     optimal_search.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     optimal_search.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
-    optimal_search.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level cluster-local spot latent charts.")
+    optimal_search.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level OT atom-barycentric spot latent diagnostic charts.")
     optimal_search.add_argument("--auto-n-clusters", action=argparse.BooleanOptionalAction, default=None, help="Select the number of subregion clusters automatically from pilot OT-landmark geometry.")
     optimal_search.add_argument("--candidate-n-clusters", default=None, help="Candidate K values for --auto-n-clusters, e.g. '15-25' or '15,16,17,18'.")
     optimal_search.add_argument("--auto-k-max-score-subregions", type=int, default=None, help="Maximum sampled subregions used to score automatic K selection; 0 scores all.")
@@ -619,6 +651,20 @@ def main() -> None:
             max_occurrences_per_cluster=args.max_occurrences_per_sample,
         )
         print(json.dumps(manifest, indent=2))
+    elif args.command == "validate-run-concerns":
+        report = write_concern_resolution_report(
+            run_dir=Path(args.run_dir),
+            coordinate_baseline_run_dir=Path(args.coordinate_baseline_run_dir)
+            if args.coordinate_baseline_run_dir
+            else None,
+            stability_run_dirs=[Path(item) for item in args.stability_run_dir],
+            leakage_ablation_run_dirs=[Path(item) for item in args.leakage_ablation_run_dir],
+            output_json=Path(args.output_json) if args.output_json else None,
+            output_md=Path(args.output_md) if args.output_md else None,
+        )
+        print(json.dumps(report, indent=2))
+        if args.strict and report.get("blocking_concerns"):
+            raise SystemExit(1)
     elif args.command == "pool-inputs":
         summary = pool_h5ads_in_directory(
             input_dir=args.input_dir,

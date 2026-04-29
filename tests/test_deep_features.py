@@ -1182,22 +1182,55 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert "heterogeneous measures" in summary["method_layers"]["layer_2_subregion_heterogeneity_clustering"]
     assert "downstream projections" in summary["method_layers"]["layer_3_projection_and_visualization"]
     assert summary["capabilities"]["spot_level_latent_charts_implemented"] is True
-    assert summary["method_stack"]["spot_level_latent_projection"] == "global_fisher_discriminative_chart_over_ot_atom_posteriors_aligned_coords_and_local_context"
+    assert summary["method_stack"]["spot_level_latent_projection"] == "ot_atom_barycentric_mds_over_cluster_atom_posteriors"
     assert "spot_level_latent" in summary["outputs"]
     spot_latent_path = Path(summary["outputs"]["spot_level_latent"])
     assert spot_latent_path.exists()
     spot_latent = np.load(spot_latent_path)
     assert spot_latent["latent_coords"].shape[1] == 2
+    assert spot_latent["within_coords"].shape == spot_latent["latent_coords"].shape
+    assert spot_latent["cluster_anchors"].shape[1] == 2
+    assert spot_latent["atom_embedding"].shape[2] == 2
     assert spot_latent["aligned_coords"].shape[1] == 2
     assert np.allclose(spot_latent["atom_posteriors"].sum(axis=1), 1.0, atol=1e-5)
-    assert summary["spot_level_latent"]["coordinate_scope"] == "global_fisher_discriminative_with_cluster_local_residual"
-    assert summary["spot_level_latent"]["latent_refinement"] == "local_pca_residual_plus_weighted_fisher_discriminant"
+    assert spot_latent["posterior_entropy"].shape[0] == spot_latent["latent_coords"].shape[0]
+    assert spot_latent["normalized_posterior_entropy"].shape[0] == spot_latent["latent_coords"].shape[0]
+    assert spot_latent["atom_argmax"].shape[0] == spot_latent["latent_coords"].shape[0]
+    assert spot_latent["temperature_used"].shape[0] == spot_latent["latent_coords"].shape[0]
+    assert summary["spot_level_latent"]["coordinate_scope"] == "cluster_atom_measure_mds_anchors_plus_atom_posterior_barycentric_within_cluster_residual"
+    assert summary["spot_level_latent"]["chart_learning_mode"] == "model_grounded_atom_distance_mds_without_fisher_labels"
+    assert summary["spot_level_latent"]["validation_role"] == "diagnostic_visualization_not_independent_evidence"
+    assert summary["spot_level_latent"]["unsupervised_baseline_required_for_validation"] is True
+    assert summary["spot_level_latent"]["label_permutation_control_recommended"] is False
+    assert summary["spot_level_latent"]["latent_refinement"] == "atom_posterior_barycenter_without_local_pca_radius_equalization"
+    assert summary["spot_level_latent"]["includes_aligned_coordinates_in_chart_features"] is False
+    assert summary["spot_level_latent"]["uses_forced_cluster_local_radius"] is False
+    assert summary["spot_level_latent"]["temperature_mode"] == "auto_cost_gap"
+    assert summary["spot_level_latent"]["posterior_entropy_summary"]["count"] == spot_latent["latent_coords"].shape[0]
     saved = ad.read_h5ad(summary["outputs"]["h5ad"])
     assert "mlot_spot_latent_coords" in saved.obsm
     assert saved.obsm["mlot_spot_latent_coords"].shape == (adata.n_obs, 2)
     assert "mlot_spot_latent_cluster_int" in saved.obs
+    assert "mlot_spot_latent_posterior_entropy" in saved.obs
     assert saved.uns["multilevel_ot"]["method_layers"] == summary["method_layers"]
-    assert spot_latent["latent_projection_mode"].item() == "global_fisher_discriminative_chart_over_ot_atom_posteriors_aligned_coords_and_local_context"
+    assert saved.uns["multilevel_ot"]["spot_level_latent_mode"] == "atom_barycentric_mds"
+    assert (
+        saved.uns["multilevel_ot"]["spot_level_latent_projection_mode"]
+        == "ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    )
+    assert (
+        saved.uns["multilevel_ot"]["spot_level_latent_validation_role"]
+        == "diagnostic_visualization_not_independent_evidence"
+    )
+    assert spot_latent["spot_latent_mode"].item() == "atom_barycentric_mds"
+    assert spot_latent["latent_projection_mode"].item() == "ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    assert spot_latent["chart_learning_mode"].item() == "model_grounded_atom_distance_mds_without_fisher_labels"
+    assert spot_latent["validation_role"].item() == "diagnostic_visualization_not_independent_evidence"
+    assert spot_latent["temperature_mode"].item() == "auto_cost_gap"
+    assert bool(spot_latent["unsupervised_baseline_required_for_validation"].item()) is True
+    assert bool(spot_latent["label_permutation_control_recommended"].item()) is False
+    assert bool(spot_latent["includes_aligned_coordinates_in_chart_features"].item()) is False
+    assert bool(spot_latent["uses_forced_cluster_local_radius"].item()) is False
     assert "latent_anchor_repulsion_min_distance" not in spot_latent.files
 
 

@@ -48,20 +48,47 @@ def test_no_generated_files_tracked_when_git_metadata_is_available() -> None:
         assert not any(path.endswith(suffix) for suffix in forbidden_suffixes)
 
 
+def test_package_version_matches_0_1_10_state() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    pyproject_toml = (repo_root / "pyproject.toml").read_text()
+    package_init = (repo_root / "spatial_ot" / "__init__.py").read_text()
+    assert 'version = "0.1.10"' in pyproject_toml
+    assert '__version__ = "0.1.10"' in package_init
+
+
 def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     repo_root = Path(__file__).resolve().parents[1]
+    script_dir = repo_root / "scripts"
 
-    run_sh = (repo_root / "run.sh").read_text()
-    install_sh = (repo_root / "install_env.sh").read_text()
+    wrappers = {
+        "run.sh": "run.sh",
+        "install_env.sh": "install_env.sh",
+        "pool_spatial_ot_input.sh": "pool_spatial_ot_input.sh",
+        "prepare_spatial_ot_input.sh": "prepare_spatial_ot_input.sh",
+        "prepare_all_spatial_ot_input.sh": "prepare_all_spatial_ot_input.sh",
+        "run_prepared_cohort_gpu.sh": "run_prepared_cohort_gpu.sh",
+        "run_deep_segmentation_cohort_gpu.sh": "run_deep_segmentation_cohort_gpu.sh",
+        "run_optimal_setting_search.sh": "run_optimal_setting_search.sh",
+        "run_p2_crc_multilevel_ot.sh": "run_p2_crc_multilevel_ot.sh",
+        "run_p2_crc_multilevel_ot_exploratory_umap.sh": "run_p2_crc_multilevel_ot_exploratory_umap.sh",
+        "run_spatial_ot_input.sh": "run_spatial_ot_input.sh",
+    }
+    for wrapper_name, target_name in wrappers.items():
+        wrapper = (repo_root / wrapper_name).read_text()
+        assert f"scripts/{target_name}" in wrapper
+        assert 'exec bash "$SCRIPT_DIR/scripts/' in wrapper
+
+    run_sh = (script_dir / "run.sh").read_text()
+    install_sh = (script_dir / "install_env.sh").read_text()
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
-    helper_sh = (repo_root / "run_spatial_ot_input.sh").read_text()
-    pool_helper_sh = (repo_root / "pool_spatial_ot_input.sh").read_text()
-    prepare_helper_sh = (repo_root / "prepare_spatial_ot_input.sh").read_text()
-    prepare_all_helper_sh = (repo_root / "prepare_all_spatial_ot_input.sh").read_text()
-    prepared_gpu_sh = (repo_root / "run_prepared_cohort_gpu.sh").read_text()
-    deep_segmentation_sh = (repo_root / "run_deep_segmentation_cohort_gpu.sh").read_text()
-    p2_sh = (repo_root / "run_p2_crc_multilevel_ot.sh").read_text()
-    exploratory_sh = (repo_root / "run_p2_crc_multilevel_ot_exploratory_umap.sh").read_text()
+    helper_sh = (script_dir / "run_spatial_ot_input.sh").read_text()
+    pool_helper_sh = (script_dir / "pool_spatial_ot_input.sh").read_text()
+    prepare_helper_sh = (script_dir / "prepare_spatial_ot_input.sh").read_text()
+    prepare_all_helper_sh = (script_dir / "prepare_all_spatial_ot_input.sh").read_text()
+    prepared_gpu_sh = (script_dir / "run_prepared_cohort_gpu.sh").read_text()
+    deep_segmentation_sh = (script_dir / "run_deep_segmentation_cohort_gpu.sh").read_text()
+    p2_sh = (script_dir / "run_p2_crc_multilevel_ot.sh").read_text()
+    exploratory_sh = (script_dir / "run_p2_crc_multilevel_ot_exploratory_umap.sh").read_text()
     config_toml = (repo_root / "configs" / "multilevel_deep_example.toml").read_text()
 
     assert "../spatial_ot_input" in run_sh
@@ -81,6 +108,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'MAX_SUBREGIONS="${MAX_SUBREGIONS:-5000}"' in run_sh
     assert 'AUTO_N_CLUSTERS="${AUTO_N_CLUSTERS:-0}"' in run_sh
     assert 'CANDIDATE_N_CLUSTERS="${CANDIDATE_N_CLUSTERS:-15-25}"' in run_sh
+    assert 'SEED="${SEED:-1337}"' in run_sh
     assert 'MIN_SUBREGIONS_PER_CLUSTER="${MIN_SUBREGIONS_PER_CLUSTER:-50}"' in run_sh
     assert 'AUTO_K_MAX_SCORE_SUBREGIONS="${AUTO_K_MAX_SCORE_SUBREGIONS:-2500}"' in run_sh
     assert 'AUTO_K_GAP_REFERENCES="${AUTO_K_GAP_REFERENCES:-8}"' in run_sh
@@ -119,6 +147,11 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'H5AD_COMPRESSION="${H5AD_COMPRESSION:-lzf}"' in run_sh
     assert 'WRITE_SAMPLE_SPATIAL_MAPS="${WRITE_SAMPLE_SPATIAL_MAPS:-0}"' in run_sh
     assert 'PROGRESS_LOG="${PROGRESS_LOG:-1}"' in run_sh
+    assert 'WRITE_CONCERN_REPORT="${WRITE_CONCERN_REPORT:-1}"' in run_sh
+    assert 'STRICT_CONCERN_REPORT="${STRICT_CONCERN_REPORT:-0}"' in run_sh
+    assert 'CONCERN_COORDINATE_BASELINE_RUN_DIR="${CONCERN_COORDINATE_BASELINE_RUN_DIR:-}"' in run_sh
+    assert 'CONCERN_STABILITY_RUN_DIRS="${CONCERN_STABILITY_RUN_DIRS:-}"' in run_sh
+    assert 'CONCERN_LEAKAGE_ABLATION_RUN_DIRS="${CONCERN_LEAKAGE_ABLATION_RUN_DIRS:-}"' in run_sh
     assert 'OVERLAP_CONSISTENCY_WEIGHT="${OVERLAP_CONSISTENCY_WEIGHT:-0.05}"' in run_sh
     assert 'export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPU_THREADS}"' in run_sh
     assert 'export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CPU_THREADS}"' in run_sh
@@ -140,12 +173,18 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "prepare_spatial_ot_input.sh" in run_sh
     assert "plot-sample-niches" in run_sh
     assert "plot-sample-spot-latent" in run_sh
+    assert "validate-run-concerns" in run_sh
+    assert '--coordinate-baseline-run-dir "$CONCERN_COORDINATE_BASELINE_RUN_DIR"' in run_sh
+    assert '--stability-run-dir "$concern_dir"' in run_sh
+    assert '--leakage-ablation-run-dir "$concern_dir"' in run_sh
+    assert "CONCERN_FLAGS+=(--strict)" in run_sh
     assert "sample_niche_plots" in run_sh
     assert "sample_spot_latent_plots" in run_sh
     assert "COMPUTE_SPOT_LATENT" in run_sh
     assert "--auto-n-clusters" in run_sh
     assert "--candidate-n-clusters" in run_sh
     assert '--min-subregions-per-cluster "$MIN_SUBREGIONS_PER_CLUSTER"' in run_sh
+    assert '--seed "$SEED"' in run_sh
     assert '${INPUT_DIR}/${POOLED_INPUT_NAME}' in run_sh
     assert "pooled_cell_x" in run_sh
     assert "pooled_cell_y" in run_sh
@@ -215,14 +254,14 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'AUTO_N_CLUSTERS="${AUTO_N_CLUSTERS:-1}"' in prepared_gpu_sh
     assert 'CANDIDATE_N_CLUSTERS="${CANDIDATE_N_CLUSTERS:-15-25}"' in prepared_gpu_sh
     assert 'MIN_SUBREGIONS_PER_CLUSTER="${MIN_SUBREGIONS_PER_CLUSTER:-50}"' in prepared_gpu_sh
-    assert "exec bash run.sh" in prepared_gpu_sh
+    assert 'exec bash "$SCRIPT_DIR/run.sh"' in prepared_gpu_sh
     assert "/storage/" not in prepared_gpu_sh
     assert 'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-deep_segmentation}"' in deep_segmentation_sh
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in deep_segmentation_sh
     assert 'DEEP_SEGMENTATION_REFINEMENT_ITERS="${DEEP_SEGMENTATION_REFINEMENT_ITERS:-6}"' in deep_segmentation_sh
     assert "run_prepared_cohort_gpu.sh" in deep_segmentation_sh
     assert "/storage/" not in deep_segmentation_sh
-    optimal_search_sh = (repo_root / "run_optimal_setting_search.sh").read_text()
+    optimal_search_sh = (script_dir / "run_optimal_setting_search.sh").read_text()
     assert "../spatial_ot_input/spatial_ot_input_pooled.h5ad" in optimal_search_sh
     assert "../work/spatial_ot_runs/cohort_optimal_search" in optimal_search_sh
     assert "optimal-search" in optimal_search_sh
