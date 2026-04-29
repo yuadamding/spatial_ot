@@ -347,6 +347,22 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--deep-segmentation-feature-weight", type=float, default=None, help="Weight on learned-feature edge contrast during deep graph segmentation.")
     multilevel.add_argument("--deep-segmentation-spatial-weight", type=float, default=None, help="Weight on spatial edge length during deep graph segmentation.")
     multilevel.add_argument("--subregion-clustering-method", default=None, choices=["pooled_subregion_latent", "ot_dictionary"], help="How fitted subregions receive niche labels. pooled_subregion_latent clusters pooled raw-member feature-distribution subregion latent embeddings and does not use spatial coordinates in this label step; ot_dictionary keeps the historical OT-dictionary assignment.")
+    multilevel.add_argument(
+        "--subregion-latent-embedding-mode",
+        default=None,
+        choices=[
+            "mean_std",
+            "mean_std_shrunk",
+            "mean_std_skew_count",
+            "mean_std_quantile",
+            "codebook_histogram",
+            "mean_std_codebook",
+        ],
+        help="Raw member-cell distribution summary clustered by pooled_subregion_latent. The default shrinkage mode reduces low-cell-count variance noise without adding spatial information.",
+    )
+    multilevel.add_argument("--subregion-latent-shrinkage-tau", type=float, default=None, help="Pseudo-count strength for reliability shrinkage in subregion latent summaries.")
+    multilevel.add_argument("--subregion-latent-codebook-size", type=int, default=None, help="Hard cell-state codebook size for codebook subregion latent modes.")
+    multilevel.add_argument("--subregion-latent-codebook-sample-size", type=int, default=None, help="Maximum member cells sampled to fit the hard codebook.")
     multilevel.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     multilevel.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
     multilevel.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level OT atom-barycentric spot latent diagnostic charts.")
@@ -413,6 +429,22 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--deep-segmentation-feature-weight", type=float, default=None, help="Weight on learned-feature edge contrast during deep graph segmentation.")
     optimal_search.add_argument("--deep-segmentation-spatial-weight", type=float, default=None, help="Weight on spatial edge length during deep graph segmentation.")
     optimal_search.add_argument("--subregion-clustering-method", default=None, choices=["pooled_subregion_latent", "ot_dictionary"], help="How fitted subregions receive niche labels. pooled_subregion_latent clusters pooled raw-member feature-distribution subregion latent embeddings and does not use spatial coordinates in this label step; ot_dictionary keeps the historical OT-dictionary assignment.")
+    optimal_search.add_argument(
+        "--subregion-latent-embedding-mode",
+        default=None,
+        choices=[
+            "mean_std",
+            "mean_std_shrunk",
+            "mean_std_skew_count",
+            "mean_std_quantile",
+            "codebook_histogram",
+            "mean_std_codebook",
+        ],
+        help="Raw member-cell distribution summary clustered by pooled_subregion_latent.",
+    )
+    optimal_search.add_argument("--subregion-latent-shrinkage-tau", type=float, default=None, help="Pseudo-count strength for reliability shrinkage in subregion latent summaries.")
+    optimal_search.add_argument("--subregion-latent-codebook-size", type=int, default=None, help="Hard cell-state codebook size for codebook subregion latent modes.")
+    optimal_search.add_argument("--subregion-latent-codebook-sample-size", type=int, default=None, help="Maximum member cells sampled to fit the hard codebook.")
     optimal_search.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     optimal_search.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
     optimal_search.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level OT atom-barycentric spot latent diagnostic charts.")
@@ -494,6 +526,10 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_segmentation_feature_weight",
         "deep_segmentation_spatial_weight",
         "subregion_clustering_method",
+        "subregion_latent_embedding_mode",
+        "subregion_latent_shrinkage_tau",
+        "subregion_latent_codebook_size",
+        "subregion_latent_codebook_sample_size",
         "shape_diagnostics",
         "shape_leakage_permutations",
         "compute_spot_latent",

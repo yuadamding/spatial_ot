@@ -48,12 +48,12 @@ def test_no_generated_files_tracked_when_git_metadata_is_available() -> None:
         assert not any(path.endswith(suffix) for suffix in forbidden_suffixes)
 
 
-def test_package_version_matches_0_1_12_state() -> None:
+def test_package_version_matches_0_1_13_state() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
     package_init = (repo_root / "spatial_ot" / "__init__.py").read_text()
-    assert 'version = "0.1.12"' in pyproject_toml
-    assert '__version__ = "0.1.12"' in package_init
+    assert 'version = "0.1.13"' in pyproject_toml
+    assert '__version__ = "0.1.13"' in package_init
 
 
 def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
@@ -265,6 +265,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-data_driven}"' in optimal_search_sh
     assert 'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-pooled_subregion_latent}"' in optimal_search_sh
     assert 'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-pooled_subregion_latent}"' in run_sh
+    assert 'SUBREGION_LATENT_EMBEDDING_MODE="${SUBREGION_LATENT_EMBEDDING_MODE:-mean_std_shrunk}"' in run_sh
+    assert '--subregion-latent-embedding-mode "$SUBREGION_LATENT_EMBEDDING_MODE"' in run_sh
     assert 'SUBREGION_FEATURE_WEIGHT="${SUBREGION_FEATURE_WEIGHT:-0}"' in optimal_search_sh
     assert '--subregion-feature-weight "$SUBREGION_FEATURE_WEIGHT"' in optimal_search_sh
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in optimal_search_sh
@@ -281,6 +283,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "allow_convex_hull_fallback = false" in config_toml
     assert 'subregion_construction_method = "deep_segmentation"' in config_toml
     assert 'subregion_clustering_method = "pooled_subregion_latent"' in config_toml
+    assert 'subregion_latent_embedding_mode = "mean_std_shrunk"' in config_toml
     assert "auto_n_clusters = false" in config_toml
     assert "candidate_n_clusters = [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]" in config_toml
     assert "min_subregions_per_cluster = 50" in config_toml

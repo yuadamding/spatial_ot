@@ -9,6 +9,7 @@ from spatial_ot.multilevel.core import (
     _cell_cluster_feature_costs,
     _compute_assignment_costs_rk_gpu,
     _compute_assigned_artifacts_r_gpu,
+    _build_subregion_latent_embeddings_from_members,
     _ensure_minimum_cluster_size,
     _gpu_assignment_subregion_batch_size,
     _stabilize_mixed_candidate_assignment_costs,
@@ -25,6 +26,7 @@ from spatial_ot.multilevel.geometry import (
 from spatial_ot.multilevel.io import _cluster_count_dict
 from spatial_ot.multilevel.model_selection import (
     comprehensive_select_k_from_latent_embeddings,
+    prepare_latent_clustering_embedding,
     select_k_from_ot_landmark_costs,
 )
 from spatial_ot.multilevel.spot_latent import (
@@ -132,6 +134,24 @@ def test_comprehensive_k_selector_scores_pooled_latent_without_spatial_inputs() 
     assert all(row["passes_min_cluster_size"] for row in selection["scores"])
     assert all(row["cluster_size_scope"] == "all_subregions" for row in selection["scores"])
     assert any(row["bootstrap_ari_mean"] is not None for row in selection["scores"])
+
+
+def test_latent_clustering_embedding_reduces_high_dimensional_noise() -> None:
+    rng = np.random.default_rng(29)
+    latent = rng.normal(size=(40, 12)).astype(np.float32)
+    embedding, metadata = prepare_latent_clustering_embedding(
+        latent,
+        max_components=4,
+        sample_size=30,
+        random_state=29,
+    )
+
+    assert embedding.shape == (40, 4)
+    assert metadata["reduction"] == "sampled_pca_whiten"
+    assert metadata["embedding_dim_raw"] == 12
+    assert metadata["embedding_dim_used"] == 4
+    assert metadata["uses_spatial_coordinates"] is False
+    assert metadata["uses_ot_costs"] is False
 
 
 def test_fit_multilevel_ot_auto_k_refits_with_selected_cluster_count() -> None:
@@ -1289,6 +1309,7 @@ def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution()
         basic_niche_size_um=None,
         min_subregions_per_cluster=2,
         compute_spot_latent=False,
+        subregion_latent_embedding_mode="mean_std",
         seed=2027,
         compute_device="cpu",
     )
@@ -1309,6 +1330,64 @@ def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution()
     assert labels[0] == labels[2]
     assert labels[1] == labels[3]
     assert labels[0] != labels[1]
+
+
+def test_subregion_latent_embedding_modes_are_distributional_and_uncertainty_aware() -> None:
+    features = np.asarray(
+        [
+            [-2.0, 0.0],
+            [-1.0, 0.1],
+            [2.0, 0.2],
+            [4.0, 3.0],
+            [4.5, 2.8],
+            [9.0, 3.2],
+        ],
+        dtype=np.float32,
+    )
+    members = [
+        np.asarray([0, 1, 2], dtype=np.int32),
+        np.asarray([3, 4, 5], dtype=np.int32),
+    ]
+
+    mean_std = _build_subregion_latent_embeddings_from_members(features, members, mode="mean_std")
+    shrunk = _build_subregion_latent_embeddings_from_members(
+        features,
+        members,
+        mode="mean_std_shrunk",
+        shrinkage_tau=100.0,
+    )
+    skew_count = _build_subregion_latent_embeddings_from_members(
+        features,
+        members,
+        mode="mean_std_skew_count",
+        shrinkage_tau=25.0,
+    )
+    quantile = _build_subregion_latent_embeddings_from_members(features, members, mode="mean_std_quantile")
+    codebook = _build_subregion_latent_embeddings_from_members(
+        features,
+        members,
+        mode="codebook_histogram",
+        codebook_size=3,
+        codebook_sample_size=6,
+        random_state=11,
+    )
+    combined = _build_subregion_latent_embeddings_from_members(
+        features,
+        members,
+        mode="mean_std_codebook",
+        codebook_size=3,
+        codebook_sample_size=6,
+        random_state=11,
+    )
+
+    assert mean_std.shape == (2, 4)
+    assert shrunk.shape == mean_std.shape
+    assert not np.allclose(shrunk, mean_std)
+    assert skew_count.shape == (2, 8)
+    assert quantile.shape == (2, 14)
+    assert codebook.shape == (2, 3)
+    assert np.allclose(codebook.sum(axis=1), 1.0)
+    assert combined.shape == (2, 7)
 
 
 def test_generated_subregions_use_data_driven_geometry_without_hull_fallback() -> None:

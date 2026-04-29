@@ -61,6 +61,10 @@ class MultilevelOTConfig:
     deep_segmentation_feature_weight: float = 1.0
     deep_segmentation_spatial_weight: float = 0.05
     subregion_clustering_method: str = "pooled_subregion_latent"
+    subregion_latent_embedding_mode: str = "mean_std_shrunk"
+    subregion_latent_shrinkage_tau: float = 25.0
+    subregion_latent_codebook_size: int = 32
+    subregion_latent_codebook_sample_size: int = 50000
     shape_diagnostics: bool = True
     shape_leakage_permutations: int = 64
     compute_spot_latent: bool = True
@@ -235,6 +239,28 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
             "ot.subregion_clustering_method must be one of "
             f"{sorted(valid_clustering_methods)}, got '{config.ot.subregion_clustering_method}'"
         )
+    valid_latent_modes = {
+        "mean_std",
+        "mean_std_shrunk",
+        "mean_std_skew_count",
+        "mean_std_quantile",
+        "codebook_histogram",
+        "mean_std_codebook",
+    }
+    config.ot.subregion_latent_embedding_mode = (
+        str(config.ot.subregion_latent_embedding_mode).strip().lower().replace("-", "_")
+    )
+    if config.ot.subregion_latent_embedding_mode not in valid_latent_modes:
+        raise ValueError(
+            "ot.subregion_latent_embedding_mode must be one of "
+            f"{sorted(valid_latent_modes)}, got '{config.ot.subregion_latent_embedding_mode}'"
+        )
+    if config.ot.subregion_latent_shrinkage_tau < 0:
+        raise ValueError("ot.subregion_latent_shrinkage_tau must be >= 0")
+    if config.ot.subregion_latent_codebook_size < 2:
+        raise ValueError("ot.subregion_latent_codebook_size must be at least 2")
+    if config.ot.subregion_latent_codebook_sample_size < config.ot.subregion_latent_codebook_size:
+        raise ValueError("ot.subregion_latent_codebook_sample_size must be >= ot.subregion_latent_codebook_size")
     if config.ot.geometry_eps <= 0 or config.ot.ot_eps <= 0:
         raise ValueError("ot.geometry_eps and ot.ot_eps must be > 0")
     if config.ot.rho <= 0:

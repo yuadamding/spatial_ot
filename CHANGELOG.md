@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.13
 
 - Change the primary subregion clustering step to `pooled_subregion_latent`: each fitted subregion now gets a raw member-cell feature-distribution latent embedding, all cohort subregion embeddings are pooled, and KMeans/model selection clusters that pooled matrix without using spatial coordinates, subregion centers, overlap edges, compressed OT supports, or OT candidate costs.
+- Upgrade the pooled subregion latent from a fixed mean/std-only summary to configurable distributional modes: `mean_std_shrunk` default reliability shrinkage, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`.
 - Keep the historical OT-dictionary assignment available as `subregion_clustering_method="ot_dictionary"` while using fixed-label OT atoms/projections as diagnostics for pooled-latent labels.
 - Save raw-member feature-distribution subregion latent embeddings and clustering-method metadata in summaries, H5AD metadata, subregion tables, and candidate diagnostic NPZ outputs.
 - Make spot-latent cluster-anchor OT fallbacks explicit: occurrence NPZ and `summary.json` now record requested/effective anchor-distance methods, fallback matrices, fallback fractions, and solver status codes.

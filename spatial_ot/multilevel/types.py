@@ -94,6 +94,8 @@ class MultilevelOTResult:
     subregion_atom_weights: np.ndarray
     subregion_measure_summaries: np.ndarray
     subregion_latent_embeddings: np.ndarray
+    subregion_latent_embedding_mode: str
+    subregion_latent_embedding_metadata: dict[str, object]
     subregion_clustering_method: str
     subregion_clustering_uses_spatial: bool
     subregion_assigned_effective_eps: np.ndarray

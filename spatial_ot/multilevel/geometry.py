@@ -188,6 +188,42 @@ def _leakage_rf_estimators() -> int:
     return max(20, _env_int("SPATIAL_OT_LEAKAGE_RF_ESTIMATORS", 120))
 
 
+def _leakage_max_subregions() -> int:
+    return max(0, _env_int("SPATIAL_OT_LEAKAGE_MAX_SUBREGIONS", 20000))
+
+
+def _leakage_sample_indices(labels: np.ndarray, *, seed: int) -> np.ndarray:
+    y = np.asarray(labels, dtype=np.int32)
+    n = int(y.shape[0])
+    cap = _leakage_max_subregions()
+    if cap <= 0 or n <= cap:
+        return np.arange(n, dtype=np.int64)
+    rng = np.random.default_rng(int(seed))
+    unique = np.unique(y)
+    per_label = max(2, int(cap) // max(int(unique.size), 1))
+    selected_parts: list[np.ndarray] = []
+    selected_mask = np.zeros(n, dtype=bool)
+    for label in unique:
+        idx = np.flatnonzero(y == int(label))
+        keep_n = min(int(idx.size), int(per_label))
+        if keep_n <= 0:
+            continue
+        keep = rng.choice(idx, size=keep_n, replace=False) if idx.size > keep_n else idx
+        keep = np.asarray(keep, dtype=np.int64)
+        selected_parts.append(keep)
+        selected_mask[keep] = True
+    selected = np.concatenate(selected_parts) if selected_parts else np.empty(0, dtype=np.int64)
+    if selected.size < cap:
+        rest = np.flatnonzero(~selected_mask)
+        if rest.size:
+            extra_n = min(int(rest.size), int(cap) - int(selected.size))
+            extra = rng.choice(rest, size=extra_n, replace=False).astype(np.int64)
+            selected = np.concatenate([selected, extra])
+    if selected.size > cap:
+        selected = rng.choice(selected, size=int(cap), replace=False).astype(np.int64)
+    return np.sort(selected.astype(np.int64))
+
+
 def _prepare_partition_features(
     coords_um: np.ndarray,
     partition_features: np.ndarray | None,
@@ -1486,6 +1522,10 @@ def _shape_leakage_balanced_accuracy(shape_df: pd.DataFrame, labels: np.ndarray,
     if shape_df.empty:
         return None
     y = np.asarray(labels, dtype=np.int32)
+    sample_idx = _leakage_sample_indices(y, seed=seed)
+    if sample_idx.size != y.shape[0]:
+        y = y[sample_idx]
+        shape_df = shape_df.iloc[sample_idx]
     counts = np.bincount(y)
     counts = counts[counts > 0]
     if counts.size < 2 or counts.min() < 2:
@@ -1517,6 +1557,14 @@ def _shape_leakage_spatial_block_accuracy(
     centers = np.asarray(centers_um, dtype=np.float32)
     if centers.shape[0] != y.shape[0]:
         return None
+    sample_idx = _leakage_sample_indices(y, seed=seed)
+    if sample_idx.size != y.shape[0]:
+        y = y[sample_idx]
+        centers = centers[sample_idx]
+        shape_df = shape_df.iloc[sample_idx]
+        unique_labels = np.unique(y)
+        if unique_labels.size < 2:
+            return None
     block_count = min(int(n_blocks), centers.shape[0])
     if block_count < 2:
         return None
@@ -1563,6 +1611,7 @@ def _shape_leakage_permutation_baseline(
             "perm_mean": float("nan"),
             "perm_p95": float("nan"),
             "excess": float("nan"),
+            "max_subregions": float(_leakage_max_subregions()),
         }
     rng = np.random.default_rng(seed)
     perm_scores = []
@@ -1571,13 +1620,20 @@ def _shape_leakage_permutation_baseline(
         if score is not None:
             perm_scores.append(score)
     if not perm_scores:
-        return {"observed": float(observed), "perm_mean": float("nan"), "perm_p95": float("nan"), "excess": float("nan")}
+        return {
+            "observed": float(observed),
+            "perm_mean": float("nan"),
+            "perm_p95": float("nan"),
+            "excess": float("nan"),
+            "max_subregions": float(_leakage_max_subregions()),
+        }
     perm = np.asarray(perm_scores, dtype=np.float64)
     return {
         "observed": float(observed),
         "perm_mean": float(np.mean(perm)),
         "perm_p95": float(np.percentile(perm, 95)),
         "excess": float(observed - np.mean(perm)),
+        "max_subregions": float(_leakage_max_subregions()),
     }
 
 

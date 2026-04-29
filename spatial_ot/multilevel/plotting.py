@@ -93,6 +93,54 @@ def _resolve_spot_latent_npz(
     return None
 
 
+def _subregion_table_latent_preview(
+    *,
+    run_dir: Path,
+    obs: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str] | None:
+    """Build a cell-level latent preview from subregion table coordinates.
+
+    Large area-capped cohort runs intentionally skip occurrence-level OT atom
+    charts. The subregion table still carries a two-dimensional diagnostic
+    embedding (`embed1`, `embed2`) for the modeled units, so plotting can color
+    the whole sample by inherited subregion latent coordinates instead of
+    returning no latent map.
+    """
+
+    subregion_path = run_dir / "subregions_multilevel_ot.parquet"
+    if not subregion_path.exists() or "mlot_subregion_id" not in obs.columns:
+        return None
+    try:
+        table = pd.read_parquet(
+            subregion_path,
+            columns=["subregion_id", "embed1", "embed2", "cluster_int"],
+        )
+    except Exception:
+        return None
+    required = {"subregion_id", "embed1", "embed2", "cluster_int"}
+    if not required.issubset(table.columns) or table.empty:
+        return None
+    max_id = int(max(int(table["subregion_id"].max()), int(np.max(np.asarray(obs["mlot_subregion_id"], dtype=np.int64)))))
+    coords_by_subregion = np.full((max_id + 1, 2), np.nan, dtype=np.float32)
+    labels_by_subregion = np.full(max_id + 1, -1, dtype=np.int32)
+    ids = np.asarray(table["subregion_id"], dtype=np.int64)
+    valid_table = (ids >= 0) & (ids <= max_id)
+    coords_by_subregion[ids[valid_table], 0] = np.asarray(table.loc[valid_table, "embed1"], dtype=np.float32)
+    coords_by_subregion[ids[valid_table], 1] = np.asarray(table.loc[valid_table, "embed2"], dtype=np.float32)
+    labels_by_subregion[ids[valid_table]] = np.asarray(table.loc[valid_table, "cluster_int"], dtype=np.int32)
+    cell_subregion_ids = np.asarray(obs["mlot_subregion_id"], dtype=np.int64)
+    valid_cells = (cell_subregion_ids >= 0) & (cell_subregion_ids <= max_id)
+    valid_cells &= np.all(np.isfinite(coords_by_subregion[cell_subregion_ids.clip(0, max_id)]), axis=1)
+    cell_indices = np.flatnonzero(valid_cells).astype(np.int64)
+    if cell_indices.size == 0:
+        return None
+    latent = coords_by_subregion[cell_subregion_ids[cell_indices]].astype(np.float32)
+    cluster_ids = labels_by_subregion[cell_subregion_ids[cell_indices]].astype(np.int32)
+    weights = np.ones(cell_indices.size, dtype=np.float32)
+    subregion_ids = cell_subregion_ids[cell_indices].astype(np.int32)
+    return cell_indices, latent, cluster_ids, weights, subregion_ids, "subregion_table_embed_preview"
+
+
 def _subregion_memberships_from_obs(obs: pd.DataFrame) -> tuple[dict[int, np.ndarray], str | None]:
     for key in ("mlot_subregion_id", "mlot_subregion_int"):
         if key not in obs.columns:
@@ -1027,31 +1075,56 @@ def plot_sample_spot_latent_maps(
                 subregion_id_source = "occurrence_npz[subregion_ids]"
             else:
                 occurrence_subregion_ids = np.full(latent.shape[0], -1, dtype=np.int32)
+        if latent.shape[0] == 0:
+            preview = _subregion_table_latent_preview(run_dir=cells_h5ad.parent, obs=obs)
+            if preview is not None:
+                (
+                    occurrence_cell_indices,
+                    latent,
+                    cluster_ids,
+                    occurrence_weights,
+                    occurrence_subregion_ids,
+                    latent_source,
+                ) = preview
+                subregion_id_source = "subregions_multilevel_ot.parquet"
         if occurrence_cell_indices.ndim != 1 or occurrence_cell_indices.shape[0] != latent.shape[0]:
             raise ValueError(f"Spot latent NPZ '{resolved_spot_latent_npz}' has inconsistent cell_indices and latent_coords.")
     else:
         latent_source = "cell_preview_obsm"
         if fallback_latent is None:
-            raise KeyError(
-                f"Expected either spot latent NPZ '{resolved_spot_latent_npz}' or obsm key '{latent_obsm_key}' in {cells_h5ad}."
-            )
-        latent = fallback_latent
-        if latent_cluster_obs_key in obs.columns:
-            cluster_ids = np.asarray(obs[latent_cluster_obs_key], dtype=np.int32)
-        elif "mlot_cluster_int" in obs.columns:
-            cluster_ids = np.asarray(obs["mlot_cluster_int"], dtype=np.int32)
+            preview = _subregion_table_latent_preview(run_dir=cells_h5ad.parent, obs=obs)
+            if preview is None:
+                raise KeyError(
+                    f"Expected either spot latent NPZ '{resolved_spot_latent_npz}', obsm key '{latent_obsm_key}', "
+                    f"or subregion table preview coordinates under {cells_h5ad.parent}."
+                )
+            (
+                occurrence_cell_indices,
+                latent,
+                cluster_ids,
+                occurrence_weights,
+                occurrence_subregion_ids,
+                latent_source,
+            ) = preview
+            subregion_id_source = "subregions_multilevel_ot.parquet"
         else:
-            cluster_ids = np.zeros(obs.shape[0], dtype=np.int32)
-        occurrence_cell_indices = np.arange(obs.shape[0], dtype=np.int64)
-        occurrence_weights = np.ones(latent.shape[0], dtype=np.float32)
-        if "mlot_subregion_id" in obs.columns:
-            occurrence_subregion_ids = np.asarray(obs["mlot_subregion_id"], dtype=np.int32)
-            subregion_id_source = "obs[mlot_subregion_id]"
-        elif "mlot_subregion_int" in obs.columns:
-            occurrence_subregion_ids = np.asarray(obs["mlot_subregion_int"], dtype=np.int32)
-            subregion_id_source = "obs[mlot_subregion_int]"
-        else:
-            occurrence_subregion_ids = np.full(latent.shape[0], -1, dtype=np.int32)
+            latent = fallback_latent
+            if latent_cluster_obs_key in obs.columns:
+                cluster_ids = np.asarray(obs[latent_cluster_obs_key], dtype=np.int32)
+            elif "mlot_cluster_int" in obs.columns:
+                cluster_ids = np.asarray(obs["mlot_cluster_int"], dtype=np.int32)
+            else:
+                cluster_ids = np.zeros(obs.shape[0], dtype=np.int32)
+            occurrence_cell_indices = np.arange(obs.shape[0], dtype=np.int64)
+            occurrence_weights = np.ones(latent.shape[0], dtype=np.float32)
+            if "mlot_subregion_id" in obs.columns:
+                occurrence_subregion_ids = np.asarray(obs["mlot_subregion_id"], dtype=np.int32)
+                subregion_id_source = "obs[mlot_subregion_id]"
+            elif "mlot_subregion_int" in obs.columns:
+                occurrence_subregion_ids = np.asarray(obs["mlot_subregion_int"], dtype=np.int32)
+                subregion_id_source = "obs[mlot_subregion_int]"
+            else:
+                occurrence_subregion_ids = np.full(latent.shape[0], -1, dtype=np.int32)
 
     latent_mode_metadata = spot_latent_mode_metadata(spot_latent_mode)
     if not latent_projection_mode:

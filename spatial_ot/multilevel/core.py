@@ -41,11 +41,11 @@ from .geometry import (
 )
 from .gpu_ot import sinkhorn_semirelaxed_unbalanced_log_torch
 from .model_selection import (
+    comprehensive_select_k_from_latent_embeddings,
     effective_min_cluster_size,
     fit_kmeans_on_latent_embeddings,
     repair_labels_to_minimum_size,
     sanitize_candidate_n_clusters,
-    select_k_from_latent_embeddings,
     select_k_from_ot_landmark_costs,
 )
 from .numerics import pairwise_sqdist_array as _pairwise_sqdist_array
@@ -394,7 +394,47 @@ def _measure_summary(measure: SubregionMeasure) -> np.ndarray:
     return np.hstack([mean, np.sqrt(np.maximum(var, 0.0))]).astype(np.float32)
 
 
-def _feature_distribution_latent_embedding(values: np.ndarray, weights: np.ndarray | None = None) -> np.ndarray:
+_SUBREGION_LATENT_EMBEDDING_MODES = {
+    "mean_std",
+    "mean_std_shrunk",
+    "mean_std_skew_count",
+    "mean_std_quantile",
+    "codebook_histogram",
+    "mean_std_codebook",
+}
+
+_SUBREGION_LATENT_HETEROGENEITY_SCALE = 0.5
+
+
+def _normalize_subregion_latent_embedding_mode(mode: str | None) -> str:
+    normalized = str(mode or "mean_std_shrunk").strip().lower().replace("-", "_")
+    aliases = {
+        "legacy": "mean_std",
+        "mean_std_legacy": "mean_std",
+        "shrunk": "mean_std_shrunk",
+        "moments": "mean_std_skew_count",
+        "quantile": "mean_std_quantile",
+        "quantiles": "mean_std_quantile",
+        "codebook": "codebook_histogram",
+        "histogram": "codebook_histogram",
+        "mean_std_histogram": "mean_std_codebook",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in _SUBREGION_LATENT_EMBEDDING_MODES:
+        raise ValueError(
+            "subregion_latent_embedding_mode must be one of "
+            f"{sorted(_SUBREGION_LATENT_EMBEDDING_MODES)}, got '{mode}'"
+        )
+    return normalized
+
+
+def _feature_distribution_latent_embedding(
+    values: np.ndarray,
+    weights: np.ndarray | None = None,
+    *,
+    mode: str | None = "mean_std_shrunk",
+    shrinkage_tau: float = 25.0,
+) -> np.ndarray:
     y = np.asarray(values, dtype=np.float64)
     if y.ndim != 2:
         raise ValueError("feature values must be a 2D matrix.")
@@ -408,27 +448,150 @@ def _feature_distribution_latent_embedding(values: np.ndarray, weights: np.ndarr
             raise ValueError("feature weights must have one value per feature row.")
     mean = np.average(y, axis=0, weights=weights_arr)
     centered = y - mean
-    std = np.sqrt(np.maximum(np.average(centered * centered, axis=0, weights=weights_arr), 0.0))
-    return np.hstack([mean, std]).astype(np.float32)
+    var = np.maximum(np.average(centered * centered, axis=0, weights=weights_arr), 0.0)
+    std = np.sqrt(var)
+    normalized_mode = _normalize_subregion_latent_embedding_mode(mode)
+    if normalized_mode == "mean_std":
+        return np.hstack([mean, std]).astype(np.float32)
+    if normalized_mode == "mean_std_shrunk":
+        tau = max(float(shrinkage_tau), 0.0)
+        if tau <= 0.0:
+            return np.hstack([mean, std]).astype(np.float32)
+        global_mean = y.mean(axis=0, dtype=np.float64)
+        global_var = np.maximum(y.var(axis=0, dtype=np.float64), 0.0)
+        alpha = float(y.shape[0]) / (float(y.shape[0]) + tau)
+        shrunk_mean = alpha * mean + (1.0 - alpha) * global_mean
+        mixed_var = (
+            alpha * (var + (mean - shrunk_mean) ** 2)
+            + (1.0 - alpha) * (global_var + (global_mean - shrunk_mean) ** 2)
+        )
+        return np.hstack(
+            [shrunk_mean, _SUBREGION_LATENT_HETEROGENEITY_SCALE * np.sqrt(np.maximum(mixed_var, 0.0))]
+        ).astype(np.float32)
+    if normalized_mode == "mean_std_skew_count":
+        skew = np.average(centered * centered * centered, axis=0, weights=weights_arr) / np.maximum(std, 1e-8) ** 3
+        reliability = float(y.shape[0]) / (float(y.shape[0]) + max(float(shrinkage_tau), 1e-8))
+        return np.hstack([mean, std, skew, [np.log1p(float(y.shape[0])), reliability]]).astype(np.float32)
+    if normalized_mode == "mean_std_quantile":
+        quantiles = np.quantile(y, [0.10, 0.25, 0.50, 0.75, 0.90], axis=0)
+        return np.hstack([mean, std, quantiles.reshape(-1)]).astype(np.float32)
+    raise ValueError(f"Mode '{normalized_mode}' is not supported for a single compressed measure embedding.")
 
 
 def _measure_feature_latent_embedding(measure: SubregionMeasure) -> np.ndarray:
-    return _feature_distribution_latent_embedding(measure.features, measure.weights)
+    return _feature_distribution_latent_embedding(measure.features, measure.weights, mode="mean_std")
 
 
-def _member_feature_latent_embedding(features: np.ndarray, members: np.ndarray) -> np.ndarray:
+def _member_feature_latent_embedding(
+    features: np.ndarray,
+    members: np.ndarray,
+    *,
+    mode: str | None = "mean_std_shrunk",
+    shrinkage_tau: float = 25.0,
+) -> np.ndarray:
     member_idx = np.asarray(members, dtype=np.int64)
     if member_idx.ndim != 1 or member_idx.size == 0:
         raise ValueError("subregion members must be a non-empty 1D vector.")
-    return _feature_distribution_latent_embedding(np.asarray(features, dtype=np.float32)[member_idx])
+    return _feature_distribution_latent_embedding(
+        np.asarray(features, dtype=np.float32)[member_idx],
+        mode=mode,
+        shrinkage_tau=shrinkage_tau,
+    )
+
+
+def _hard_codebook_histogram_embeddings(
+    features: np.ndarray,
+    region_ids: np.ndarray,
+    *,
+    n_regions: int,
+    codebook_size: int,
+    codebook_sample_size: int,
+    random_state: int,
+) -> np.ndarray:
+    x = np.asarray(features, dtype=np.float32)
+    region_arr = np.asarray(region_ids, dtype=np.int64)
+    if x.ndim != 2:
+        raise ValueError("features must be a 2D matrix.")
+    if region_arr.shape[0] != x.shape[0]:
+        raise ValueError("region_ids must have one entry per feature row.")
+    n_codes = min(max(int(codebook_size), 2), max(int(x.shape[0]), 1))
+    if int(x.shape[0]) <= n_codes:
+        codes = np.arange(int(x.shape[0]), dtype=np.int32)
+        n_codes = int(x.shape[0])
+    else:
+        rng = np.random.default_rng(int(random_state))
+        sample_size = min(max(int(codebook_sample_size), n_codes), int(x.shape[0]))
+        sample_idx = np.sort(rng.choice(int(x.shape[0]), size=sample_size, replace=False).astype(np.int64))
+        model = MiniBatchKMeans(
+            n_clusters=int(n_codes),
+            n_init=3,
+            batch_size=min(max(int(n_codes) * 256, 2048), max(int(sample_size), 2048)),
+            random_state=int(random_state),
+            max_iter=40,
+            max_no_improvement=5,
+            reassignment_ratio=0.0,
+        )
+        model.fit(x[sample_idx])
+        codes = model.predict(x).astype(np.int32)
+    hist = np.zeros((int(n_regions), int(n_codes)), dtype=np.float32)
+    for code in range(int(n_codes)):
+        hist[:, code] = np.bincount(region_arr[codes == int(code)], minlength=int(n_regions)).astype(np.float32)
+    denom = np.maximum(np.bincount(region_arr, minlength=int(n_regions)).astype(np.float32)[:, None], 1.0)
+    return (hist / denom).astype(np.float32)
+
+
+def _subregion_latent_embedding_metadata(
+    *,
+    mode: str | None,
+    shrinkage_tau: float,
+    codebook_size: int,
+    codebook_sample_size: int,
+    feature_dim: int,
+    embedding_dim: int,
+) -> dict[str, object]:
+    normalized = _normalize_subregion_latent_embedding_mode(mode)
+    blocks_by_mode = {
+        "mean_std": ["feature_mean", "feature_std"],
+        "mean_std_shrunk": ["shrunk_feature_mean", "shrunk_feature_std"],
+        "mean_std_skew_count": ["feature_mean", "feature_std", "feature_skew", "log1p_cell_count", "reliability_weight"],
+        "mean_std_quantile": ["feature_mean", "feature_std", "feature_quantiles_q10_q25_q50_q75_q90"],
+        "codebook_histogram": ["hard_cell_state_codebook_histogram"],
+        "mean_std_codebook": ["shrunk_feature_mean", "shrunk_feature_std", "hard_cell_state_codebook_histogram"],
+    }
+    return {
+        "mode": normalized,
+        "feature_dim": int(feature_dim),
+        "embedding_dim": int(embedding_dim),
+        "shrinkage_tau": float(shrinkage_tau),
+        "codebook_size": int(codebook_size),
+        "codebook_sample_size": int(codebook_sample_size),
+        "blocks": blocks_by_mode[normalized],
+        "uses_spatial_coordinates": False,
+        "uses_compressed_ot_supports": False,
+        "description": (
+            "Raw member-cell feature-distribution summary used for pooled subregion clustering. "
+            "This embedding is built before KMeans/model selection and intentionally excludes "
+            "subregion centers, canonical coordinates, overlap edges, and OT candidate costs."
+        ),
+        "heterogeneity_block_scale": float(_SUBREGION_LATENT_HETEROGENEITY_SCALE)
+        if normalized in {"mean_std_shrunk", "mean_std_codebook"}
+        else 1.0,
+    }
 
 
 def _build_subregion_latent_embeddings_from_members(
     features: np.ndarray,
     subregion_members: list[np.ndarray],
+    *,
+    mode: str | None = "mean_std_shrunk",
+    shrinkage_tau: float = 25.0,
+    codebook_size: int = 32,
+    codebook_sample_size: int = 50000,
+    random_state: int = 1337,
 ) -> np.ndarray:
     if not subregion_members:
         return np.zeros((0, 0), dtype=np.float32)
+    normalized_mode = _normalize_subregion_latent_embedding_mode(mode)
     x = np.asarray(features, dtype=np.float32)
     n_regions = int(len(subregion_members))
     if x.ndim != 2:
@@ -441,7 +604,17 @@ def _build_subregion_latent_embeddings_from_members(
         labels[member_idx] = int(rid)
     valid = labels >= 0
     if not np.any(valid):
-        return np.zeros((n_regions, int(x.shape[1]) * 2), dtype=np.float32)
+        if normalized_mode == "mean_std_skew_count":
+            dim = int(x.shape[1]) * 3 + 2
+        elif normalized_mode == "mean_std_quantile":
+            dim = int(x.shape[1]) * 7
+        elif normalized_mode == "codebook_histogram":
+            dim = max(int(codebook_size), 2)
+        elif normalized_mode == "mean_std_codebook":
+            dim = int(x.shape[1]) * 2 + max(int(codebook_size), 2)
+        else:
+            dim = int(x.shape[1]) * 2
+        return np.zeros((n_regions, dim), dtype=np.float32)
     region_ids = labels[valid].astype(np.int64, copy=False)
     counts = np.bincount(region_ids, minlength=n_regions).astype(np.float64)
     sums = np.zeros((n_regions, int(x.shape[1])), dtype=np.float64)
@@ -454,7 +627,69 @@ def _build_subregion_latent_embeddings_from_members(
     denom = np.maximum(counts[:, None], 1.0)
     mean = sums / denom
     var = np.maximum(sums_sq / denom - mean * mean, 0.0)
-    latent = np.hstack([mean, np.sqrt(var)]).astype(np.float32)
+    std = np.sqrt(var)
+    if normalized_mode == "mean_std":
+        latent = np.hstack([mean, std]).astype(np.float32)
+    elif normalized_mode in {"mean_std_shrunk", "mean_std_codebook"}:
+        tau = max(float(shrinkage_tau), 0.0)
+        if tau > 0.0:
+            global_mean = np.mean(values, axis=0, dtype=np.float64)
+            global_var = np.maximum(np.var(values, axis=0, dtype=np.float64), 0.0)
+            alpha = (counts / np.maximum(counts + tau, 1e-8))[:, None]
+            shrunk_mean = alpha * mean + (1.0 - alpha) * global_mean[None, :]
+            mixed_var = (
+                alpha * (var + (mean - shrunk_mean) ** 2)
+                + (1.0 - alpha) * (global_var[None, :] + (global_mean[None, :] - shrunk_mean) ** 2)
+            )
+            base = np.hstack(
+                [shrunk_mean, _SUBREGION_LATENT_HETEROGENEITY_SCALE * np.sqrt(np.maximum(mixed_var, 0.0))]
+            )
+        else:
+            base = np.hstack([mean, std])
+        if normalized_mode == "mean_std_codebook":
+            hist = _hard_codebook_histogram_embeddings(
+                x[valid],
+                region_ids,
+                n_regions=n_regions,
+                codebook_size=int(codebook_size),
+                codebook_sample_size=int(codebook_sample_size),
+                random_state=int(random_state),
+            )
+            latent = np.hstack([base, hist]).astype(np.float32)
+        else:
+            latent = base.astype(np.float32)
+    elif normalized_mode == "mean_std_skew_count":
+        sums_cu = np.zeros_like(sums)
+        for dim in range(int(x.shape[1])):
+            col = values[:, dim]
+            sums_cu[:, dim] = np.bincount(region_ids, weights=col * col * col, minlength=n_regions)
+        raw_third = sums_cu / denom
+        central_third = raw_third - 3.0 * mean * (sums_sq / denom) + 2.0 * mean * mean * mean
+        skew = central_third / np.maximum(std, 1e-8) ** 3
+        reliability = (counts / np.maximum(counts + max(float(shrinkage_tau), 1e-8), 1e-8))[:, None]
+        count_features = np.hstack([np.log1p(counts)[:, None], reliability])
+        latent = np.hstack([mean, std, skew, count_features]).astype(np.float32)
+    elif normalized_mode == "mean_std_quantile":
+        order = np.argsort(region_ids, kind="mergesort")
+        sorted_region = region_ids[order]
+        sorted_values = values[order]
+        breaks = np.r_[0, np.flatnonzero(np.diff(sorted_region)) + 1, sorted_region.shape[0]]
+        quantiles = np.zeros((n_regions, int(x.shape[1]) * 5), dtype=np.float32)
+        for left, right in zip(breaks[:-1], breaks[1:], strict=False):
+            rid = int(sorted_region[left])
+            quantiles[rid] = np.quantile(sorted_values[left:right], [0.10, 0.25, 0.50, 0.75, 0.90], axis=0).reshape(-1).astype(np.float32)
+        latent = np.hstack([mean.astype(np.float32), std.astype(np.float32), quantiles]).astype(np.float32)
+    elif normalized_mode == "codebook_histogram":
+        latent = _hard_codebook_histogram_embeddings(
+            x[valid],
+            region_ids,
+            n_regions=n_regions,
+            codebook_size=int(codebook_size),
+            codebook_sample_size=int(codebook_sample_size),
+            random_state=int(random_state),
+        )
+    else:
+        raise AssertionError(f"Unhandled subregion latent embedding mode: {normalized_mode}")
     latent[counts <= 0] = 0.0
     return latent
 
@@ -2626,6 +2861,10 @@ def _fit_pooled_latent_only_result(
     auto_k_gap_references: int,
     min_subregions_per_cluster: int,
     requested_min_subregions_per_cluster: int,
+    subregion_latent_embedding_mode: str,
+    subregion_latent_shrinkage_tau: float,
+    subregion_latent_codebook_size: int,
+    subregion_latent_codebook_sample_size: int,
     ot_eps: float,
     seed: int,
     basic_niche_size_um: float | None,
@@ -2637,7 +2876,24 @@ def _fit_pooled_latent_only_result(
     )
     n_subregions = int(len(subregion_members))
     feature_dim = int(np.asarray(features).shape[1])
-    subregion_latent_embeddings = _build_subregion_latent_embeddings_from_members(features, subregion_members)
+    subregion_latent_embeddings = _build_subregion_latent_embeddings_from_members(
+        features,
+        subregion_members,
+        mode=subregion_latent_embedding_mode,
+        shrinkage_tau=float(subregion_latent_shrinkage_tau),
+        codebook_size=int(subregion_latent_codebook_size),
+        codebook_sample_size=int(subregion_latent_codebook_sample_size),
+        random_state=int(seed),
+    )
+    subregion_latent_embedding_mode = _normalize_subregion_latent_embedding_mode(subregion_latent_embedding_mode)
+    subregion_latent_embedding_metadata = _subregion_latent_embedding_metadata(
+        mode=subregion_latent_embedding_mode,
+        shrinkage_tau=float(subregion_latent_shrinkage_tau),
+        codebook_size=int(subregion_latent_codebook_size),
+        codebook_sample_size=int(subregion_latent_codebook_sample_size),
+        feature_dim=feature_dim,
+        embedding_dim=int(subregion_latent_embeddings.shape[1]),
+    )
     auto_k_selection: dict[str, object] | None = None
     selected_n_clusters = int(n_clusters)
     if bool(auto_n_clusters):
@@ -2645,12 +2901,17 @@ def _fit_pooled_latent_only_result(
             "automatic K selection enabled on pooled subregion latent embeddings; candidate K="
             + ",".join(str(k) for k in candidate_ks)
         )
-        auto_k_selection = select_k_from_latent_embeddings(
+        stability_seed_count = max(3, min(8, _env_int("SPATIAL_OT_AUTO_K_STABILITY_SEEDS", 5)))
+        auto_k_selection = comprehensive_select_k_from_latent_embeddings(
             subregion_latent_embeddings,
             candidate_n_clusters=candidate_ks,
             fallback_n_clusters=int(n_clusters),
-            max_score_subregions=int(auto_k_max_score_subregions),
+            seeds=tuple(int(seed) + offset for offset in range(stability_seed_count)),
+            n_init=max(1, int(n_init)),
+            max_silhouette_subregions=int(auto_k_max_score_subregions),
             gap_references=int(auto_k_gap_references),
+            bootstrap_repeats=max(0, _env_int("SPATIAL_OT_AUTO_K_BOOTSTRAP_REPEATS", 3)),
+            bootstrap_fraction=float(_env_float("SPATIAL_OT_AUTO_K_BOOTSTRAP_FRACTION", 0.8)),
             min_cluster_size=int(min_subregions_per_cluster),
             random_state=int(seed),
         )
@@ -2771,6 +3032,8 @@ def _fit_pooled_latent_only_result(
         subregion_atom_weights=atom_weights.astype(np.float32),
         subregion_measure_summaries=measure_summaries.astype(np.float32),
         subregion_latent_embeddings=subregion_latent_embeddings.astype(np.float32),
+        subregion_latent_embedding_mode=subregion_latent_embedding_mode,
+        subregion_latent_embedding_metadata=subregion_latent_embedding_metadata,
         subregion_clustering_method="pooled_subregion_latent",
         subregion_clustering_uses_spatial=False,
         subregion_assigned_effective_eps=np.full(n_subregions, float(ot_eps), dtype=np.float32),
@@ -2924,6 +3187,10 @@ def fit_multilevel_ot(
     deep_segmentation_spatial_weight: float = 0.05,
     compute_spot_latent: bool = True,
     subregion_clustering_method: str = "pooled_subregion_latent",
+    subregion_latent_embedding_mode: str = "mean_std_shrunk",
+    subregion_latent_shrinkage_tau: float = 25.0,
+    subregion_latent_codebook_size: int = 32,
+    subregion_latent_codebook_sample_size: int = 50000,
     auto_n_clusters: bool = False,
     candidate_n_clusters: tuple[int, ...] | list[int] | str | None = None,
     auto_k_max_score_subregions: int = 2500,
@@ -2979,6 +3246,10 @@ def fit_multilevel_ot(
     if construction_method not in {"data_driven", "deep_segmentation"}:
         raise ValueError("subregion_construction_method must be 'data_driven' or 'deep_segmentation'.")
     clustering_method = str(subregion_clustering_method).strip().lower()
+    subregion_latent_embedding_mode = _normalize_subregion_latent_embedding_mode(subregion_latent_embedding_mode)
+    subregion_latent_shrinkage_tau = max(float(subregion_latent_shrinkage_tau), 0.0)
+    subregion_latent_codebook_size = max(int(subregion_latent_codebook_size), 2)
+    subregion_latent_codebook_sample_size = max(int(subregion_latent_codebook_sample_size), subregion_latent_codebook_size)
     if clustering_method not in {"pooled_subregion_latent", "ot_dictionary"}:
         raise ValueError("subregion_clustering_method must be 'pooled_subregion_latent' or 'ot_dictionary'.")
     subregion_feature_weight = max(0.0, float(subregion_feature_weight))
@@ -3176,6 +3447,10 @@ def fit_multilevel_ot(
             auto_k_gap_references=auto_k_gap_references,
             min_subregions_per_cluster=effective_min_for_requested_k,
             requested_min_subregions_per_cluster=requested_min_subregions_per_cluster,
+            subregion_latent_embedding_mode=subregion_latent_embedding_mode,
+            subregion_latent_shrinkage_tau=subregion_latent_shrinkage_tau,
+            subregion_latent_codebook_size=subregion_latent_codebook_size,
+            subregion_latent_codebook_sample_size=subregion_latent_codebook_sample_size,
             ot_eps=ot_eps,
             seed=seed,
             basic_niche_size_um=basic_niche_size_um,
@@ -3209,7 +3484,23 @@ def fit_multilevel_ot(
     _progress("estimating overlap graph and cost scales")
     optimization_measures = _make_optimization_measures(measures)
     summaries = np.vstack([_measure_summary(m) for m in optimization_measures])
-    subregion_latent_embeddings = _build_subregion_latent_embeddings_from_members(features, subregion_members)
+    subregion_latent_embeddings = _build_subregion_latent_embeddings_from_members(
+        features,
+        subregion_members,
+        mode=subregion_latent_embedding_mode,
+        shrinkage_tau=subregion_latent_shrinkage_tau,
+        codebook_size=subregion_latent_codebook_size,
+        codebook_sample_size=subregion_latent_codebook_sample_size,
+        random_state=int(seed),
+    )
+    subregion_latent_embedding_metadata = _subregion_latent_embedding_metadata(
+        mode=subregion_latent_embedding_mode,
+        shrinkage_tau=subregion_latent_shrinkage_tau,
+        codebook_size=subregion_latent_codebook_size,
+        codebook_sample_size=subregion_latent_codebook_sample_size,
+        feature_dim=int(features.shape[1]),
+        embedding_dim=int(subregion_latent_embeddings.shape[1]),
+    )
     overlap_edge_i, overlap_edge_j, overlap_edge_weight = _build_overlap_consistency_graph(
         measures=measures,
         summaries=summaries,
@@ -3225,12 +3516,17 @@ def fit_multilevel_ot(
     if bool(auto_n_clusters):
         _progress("automatic K selection enabled; candidate K=" + ",".join(str(k) for k in candidate_ks))
         if clustering_method == "pooled_subregion_latent":
-            auto_k_selection = select_k_from_latent_embeddings(
+            stability_seed_count = max(3, min(8, _env_int("SPATIAL_OT_AUTO_K_STABILITY_SEEDS", 5)))
+            auto_k_selection = comprehensive_select_k_from_latent_embeddings(
                 subregion_latent_embeddings,
                 candidate_n_clusters=candidate_ks,
                 fallback_n_clusters=requested_n_clusters,
-                max_score_subregions=int(auto_k_max_score_subregions),
+                seeds=tuple(int(seed) + offset for offset in range(stability_seed_count)),
+                n_init=max(1, int(auto_k_pilot_n_init)),
+                max_silhouette_subregions=int(auto_k_max_score_subregions),
                 gap_references=int(auto_k_gap_references),
+                bootstrap_repeats=max(0, _env_int("SPATIAL_OT_AUTO_K_BOOTSTRAP_REPEATS", 3)),
+                bootstrap_fraction=float(_env_float("SPATIAL_OT_AUTO_K_BOOTSTRAP_FRACTION", 0.8)),
                 min_cluster_size=int(min_subregions_per_cluster),
                 random_state=int(seed),
             )
@@ -3596,6 +3892,8 @@ def fit_multilevel_ot(
         subregion_atom_weights=thetas_assigned.astype(np.float32),
         subregion_measure_summaries=summaries.astype(np.float32),
         subregion_latent_embeddings=subregion_latent_embeddings.astype(np.float32),
+        subregion_latent_embedding_mode=subregion_latent_embedding_mode,
+        subregion_latent_embedding_metadata=subregion_latent_embedding_metadata,
         subregion_clustering_method=str(clustering_method),
         subregion_clustering_uses_spatial=bool(clustering_method != "pooled_subregion_latent"),
         subregion_assigned_effective_eps=assigned_effective_eps_best.astype(np.float32),

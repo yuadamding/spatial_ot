@@ -4,7 +4,7 @@
 
 The active path realizes:
 
-- geometry-only OT normalization of each subregion into a shared reference domain
+- geometry-only OT normalization of each subregion into a shared reference domain for fixed-label atom/projection diagnostics
 - an optional learned deep feature adapter with fit/transform/save/load behavior
 - raw member-cell feature-distribution latent embeddings for each fitted subregion, pooled across the cohort for niche clustering
 - cluster-specific shared heterogeneity atoms with subregion-specific mixture weights for downstream diagnostics
@@ -52,6 +52,8 @@ Operational helpers live under `scripts/`; root-level shell wrappers were remove
 
 Prefer PCA, standardized marker expression, or another calibrated latent space. UMAP is exploratory only — its Euclidean geometry is not metric-preserving.
 
+The default subregion latent is `mean_std_shrunk`: per-feature distribution moments shrunk toward the cohort prior according to subregion cell count, which reduces variance noise for small subregions while preserving the guarantee that the primary clustering step does not use spatial coordinates. Alternative modes include `mean_std`, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`.
+
 ### Three-layer method
 
 The active method should be interpreted as three linked layers:
@@ -63,7 +65,7 @@ The active method should be interpreted as three linked layers:
 Supported modes:
 
 - **coordinate-only data-driven subregion discovery** (default): mutually exclusive spatial subregions learned from observed coordinates, with sparse connected pieces merged to satisfy `min_cells`; the fitted boundary/shape geometry is taken from the observed member-cell point cloud rather than a hand-coded template
-- **feature-aware data-driven subregion discovery**: set `--subregion-feature-weight > 0` to let the OT feature view influence generated boundaries; this is useful for sensitivity analysis but should be compared against the coordinate-only baseline because the same feature signal may later enter OT clustering
+- **feature-aware data-driven subregion discovery**: set `--subregion-feature-weight > 0` to let the feature view influence generated boundaries; this is useful for sensitivity analysis but should be compared against the coordinate-only baseline because the same feature signal may later enter pooled latent clustering and OT diagnostics
 - **deep graph segmentation**: set `--subregion-construction-method deep_segmentation` and provide a learned feature view, typically `--deep-feature-method autoencoder --deep-output-embedding context`; many coordinate seeds give full tissue coverage, then a spatial kNN boundary-refinement pass moves boundaries using learned embedding affinity before minimum-size merging
 - **explicit-region clustering**: pass `--region-obs-key` and ideally explicit geometry objects so boundary shape can be treated as nuisance
 
@@ -78,15 +80,16 @@ For CLI explicit-region runs, pass `--region-geometry-json` with a JSON object c
 ```bash
 cd spatial_ot
 ../.venv/bin/python -m spatial_ot multilevel-ot \
-  --input-h5ad ../spatial_ot_input/p2_crc_cells_marker_genes_umap3d.h5ad \
-  --output-dir ../outputs/spatial_ot/p2_crc_multilevel_ot \
-  --feature-obsm-key X \
-  --spatial-x-key cell_x --spatial-y-key cell_y \
+  --input-h5ad ../spatial_ot_input/spatial_ot_input_pooled.h5ad \
+  --output-dir ../outputs/spatial_ot/cohort_multilevel_ot \
+  --feature-obsm-key X_spatial_ot_x_svd_512 \
+  --spatial-x-key pooled_cell_x --spatial-y-key pooled_cell_y \
   --spatial-scale 0.2737012522439323 \
   --compute-device cuda \
-  --n-clusters 8 --atoms-per-cluster 8 \
+  --n-clusters 15 --atoms-per-cluster 8 \
   --radius-um 100 --stride-um 100 --basic-niche-size-um 50 \
-  --min-cells 20 --max-subregions 2000 \
+  --min-cells 20 --max-subregions 5000 \
+  --subregion-latent-embedding-mode mean_std_shrunk \
   --lambda-x 0.5 --lambda-y 1.0 \
   --geometry-eps 0.03 --ot-eps 0.03 --rho 0.5 \
   --geometry-samples 192 --compressed-support-size 96 \
@@ -107,7 +110,7 @@ cd spatial_ot
   --auto-n-clusters --candidate-n-clusters 15-25
 ```
 
-The selector runs one pilot OT fit at the largest candidate `K`, builds a scalable OT-landmark distance between subregions from the pilot fused transport-cost profiles, then scores candidate `K` values with Silhouette on that precomputed distance plus Gap / Calinski-Harabasz / Davies-Bouldin on a classical MDS embedding. The final `K` is chosen by majority vote and the model is refit at that selected `K`. This avoids all-pairs subregion OT and avoids running a full final fit for every candidate `K`, but it should be treated as exploratory model selection until stability and ablation checks are run around the selected `K`.
+Under the default `pooled_subregion_latent` label path, the selector scores candidate `K` values directly on the pooled raw-member subregion latent embeddings using Silhouette, Gap, Calinski-Harabasz, Davies-Bouldin, seed stability, bootstrap stability, and forced-repair penalties. The historical OT-landmark selector is retained for `--subregion-clustering-method ot_dictionary`. Auto-K should still be treated as exploratory until full fixed-K stability, leakage, and boundary-mode checks are run around the selected `K`.
 
 The cluster-size constraint is defined on fitted subregions, not on cells or spots. Set `MIN_SUBREGIONS_PER_CLUSTER=50` or pass `--min-subregions-per-cluster 50` to require each subregion cluster to contain at least that many subregions when feasible; projected cell and spot labels remain downstream summaries.
 

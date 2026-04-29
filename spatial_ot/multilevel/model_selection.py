@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from itertools import combinations
+import os
 
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering, KMeans, MiniBatchKMeans
@@ -167,8 +168,92 @@ def standardize_latent_embeddings(embeddings: np.ndarray) -> np.ndarray:
     else:
         center = np.median(x, axis=0, keepdims=True)
         scale = np.std(x - center, axis=0, keepdims=True)
-    z = (x - center) / np.maximum(scale, 1e-8)
+    positive_scale = scale[np.isfinite(scale) & (scale > 0)]
+    scale_floor = 1e-8
+    if positive_scale.size:
+        scale_floor = max(scale_floor, 0.25 * float(np.median(positive_scale)))
+    z = (x - center) / np.maximum(scale, scale_floor)
+    z = np.clip(z, -10.0, 10.0)
     return z.astype(np.float32)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
+def prepare_latent_clustering_embedding(
+    latent_embeddings: np.ndarray,
+    *,
+    max_components: int | None = None,
+    sample_size: int | None = None,
+    random_state: int = 1337,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Return the denoised Euclidean embedding used by pooled-latent clustering.
+
+    The primary label step must remain feature-only, but high-dimensional
+    moment/codebook summaries can be noisy. This preprocessing robustly scales
+    the raw subregion summaries, then fits PCA axes on a deterministic row
+    sample when the dimension is high. The full cohort is projected onto those
+    axes and re-standardized before KMeans/model selection.
+    """
+
+    z = standardize_latent_embeddings(latent_embeddings)
+    n_items, raw_dim = int(z.shape[0]), int(z.shape[1])
+    target = _env_int("SPATIAL_OT_SUBREGION_LATENT_PCA_COMPONENTS", 64) if max_components is None else int(max_components)
+    target = max(int(target), 0)
+    max_sample = _env_int("SPATIAL_OT_SUBREGION_LATENT_PCA_SAMPLE_SIZE", 50000) if sample_size is None else int(sample_size)
+    max_sample = max(int(max_sample), 1)
+    metadata: dict[str, object] = {
+        "standardization": "median_center_std_scale",
+        "reduction": "none",
+        "embedding_dim_raw": raw_dim,
+        "embedding_dim_used": raw_dim,
+        "pca_components_requested": target,
+        "pca_sample_size_requested": max_sample,
+        "pca_sample_size_used": 0,
+        "pca_variance_explained_estimate": None,
+        "uses_spatial_coordinates": False,
+        "uses_ot_costs": False,
+    }
+    if target <= 0 or raw_dim <= target or n_items <= max(target + 1, 3):
+        return z.astype(np.float32), metadata
+
+    rng = np.random.default_rng(int(random_state))
+    fit_n = min(max_sample, n_items)
+    if fit_n < n_items:
+        fit_idx = np.sort(rng.choice(n_items, size=fit_n, replace=False).astype(np.int64))
+        sample = z[fit_idx]
+    else:
+        sample = z
+    center = sample.mean(axis=0, keepdims=True, dtype=np.float64)
+    sample_centered = sample.astype(np.float64, copy=False) - center
+    n_components = max(1, min(int(target), int(sample_centered.shape[0]) - 1, raw_dim))
+    _, singular_values, vt = randomized_svd(
+        sample_centered,
+        n_components=n_components,
+        random_state=int(random_state),
+    )
+    projected = (z.astype(np.float64, copy=False) - center) @ vt.T
+    scale = projected.std(axis=0, keepdims=True)
+    projected = projected / np.maximum(scale, 1e-8)
+    total_variance = float(np.sum(np.var(sample_centered, axis=0)))
+    explained = float(np.sum(singular_values * singular_values) / max(float(sample_centered.shape[0] - 1), 1.0))
+    explained_fraction = explained / max(total_variance, 1e-12)
+    metadata.update(
+        {
+            "reduction": "sampled_pca_whiten",
+            "embedding_dim_used": int(projected.shape[1]),
+            "pca_sample_size_used": int(sample.shape[0]),
+            "pca_variance_explained_estimate": float(min(max(explained_fraction, 0.0), 1.0)),
+        }
+    )
+    return projected.astype(np.float32), metadata
 
 
 def _sample_rows(n_rows: int, max_rows: int, rng: np.random.Generator) -> np.ndarray:
@@ -310,7 +395,10 @@ def fit_kmeans_on_latent_embeddings(
     min_cluster_size: int = 1,
     random_state: int = 1337,
 ) -> dict[str, object]:
-    embedding = standardize_latent_embeddings(latent_embeddings)
+    embedding, preprocessing = prepare_latent_clustering_embedding(
+        latent_embeddings,
+        random_state=int(random_state),
+    )
     result = _fit_kmeans_on_standardized_embedding(
         embedding,
         n_clusters=int(n_clusters),
@@ -319,6 +407,7 @@ def fit_kmeans_on_latent_embeddings(
         random_state=int(random_state),
     )
     result["standardized_embeddings"] = embedding.astype(np.float32)
+    result["latent_preprocessing"] = preprocessing
     return result
 
 
@@ -408,7 +497,10 @@ def comprehensive_select_k_from_latent_embeddings(
     latent space used for subregion clustering.
     """
 
-    embedding = standardize_latent_embeddings(latent_embeddings)
+    embedding, preprocessing = prepare_latent_clustering_embedding(
+        latent_embeddings,
+        random_state=int(random_state),
+    )
     n_subregions = int(embedding.shape[0])
     candidates = sanitize_candidate_n_clusters(
         candidate_n_clusters,
@@ -485,15 +577,15 @@ def comprehensive_select_k_from_latent_embeddings(
                 score_labels = best_labels[score_idx]
             if 1 < np.unique(score_labels).size < score_labels.shape[0]:
                 silhouette = float(silhouette_score(score_embedding, score_labels, metric="euclidean"))
-            ch = float(calinski_harabasz_score(embedding, best_labels))
-            db = float(davies_bouldin_score(embedding, best_labels))
-            gap, gap_se = _gap_statistic(
-                embedding,
-                best_labels,
-                n_clusters=int(k),
-                n_references=int(gap_references),
-                random_state=int(random_state) + 13007 * int(k),
-            )
+                ch = float(calinski_harabasz_score(score_embedding, score_labels))
+                db = float(davies_bouldin_score(score_embedding, score_labels))
+                gap, gap_se = _gap_statistic(
+                    score_embedding,
+                    score_labels,
+                    n_clusters=int(k),
+                    n_references=int(gap_references),
+                    random_state=int(random_state) + 13007 * int(k),
+                )
         seed_ari_mean, seed_nmi_mean, seed_pair_count = _pairwise_label_stability(seed_labels)
 
         bootstrap_ari_values: list[float] = []
@@ -625,6 +717,9 @@ def comprehensive_select_k_from_latent_embeddings(
         "uses_spatial": False,
         "n_total_subregions": n_subregions,
         "embedding_dim": int(embedding.shape[1]),
+        "embedding_dim_raw": int(preprocessing["embedding_dim_raw"]),
+        "embedding_dim_used": int(preprocessing["embedding_dim_used"]),
+        "latent_preprocessing": preprocessing,
         "seeds": [int(seed) for seed in parsed_seeds],
         "n_init": int(n_init),
         "gap_references": int(gap_references),
@@ -632,6 +727,8 @@ def comprehensive_select_k_from_latent_embeddings(
         "bootstrap_fraction": float(bootstrap_fraction),
         "max_silhouette_subregions": int(max_silhouette_subregions),
         "n_silhouette_subregions": int(score_embedding.shape[0]),
+        "metric_score_subregions": int(score_embedding.shape[0]),
+        "metric_scope": "sampled_subregions_for_silhouette_ch_db_gap; full_subregions_for_seed_and_bootstrap_stability",
         "min_cluster_size": int(min_cluster_size),
         "min_cluster_size_scope": "all_subregions",
     }
@@ -894,7 +991,10 @@ def select_k_from_latent_embeddings(
     min_cluster_size: int = 1,
     random_state: int = 1337,
 ) -> dict[str, object]:
-    embedding = standardize_latent_embeddings(latent_embeddings)
+    embedding, preprocessing = prepare_latent_clustering_embedding(
+        latent_embeddings,
+        random_state=int(random_state),
+    )
     rng = np.random.default_rng(random_state)
     score_idx = _sample_rows(embedding.shape[0], int(max_score_subregions), rng)
     score_embedding = embedding[score_idx]
@@ -1008,4 +1108,7 @@ def select_k_from_latent_embeddings(
         "n_total_subregions": int(embedding.shape[0]),
         "n_scored_subregions": int(score_embedding.shape[0]),
         "score_subregion_sampled": bool(score_embedding.shape[0] != embedding.shape[0]),
+        "embedding_dim_raw": int(preprocessing["embedding_dim_raw"]),
+        "embedding_dim_used": int(preprocessing["embedding_dim_used"]),
+        "latent_preprocessing": preprocessing,
     }
