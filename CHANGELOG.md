@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Change the primary subregion clustering step to `pooled_subregion_latent`: each fitted subregion now gets a raw member-cell feature-distribution latent embedding, all cohort subregion embeddings are pooled, and KMeans/model selection clusters that pooled matrix without using spatial coordinates, subregion centers, overlap edges, compressed OT supports, or OT candidate costs.
+- Keep the historical OT-dictionary assignment available as `subregion_clustering_method="ot_dictionary"` while using fixed-label OT atoms/projections as diagnostics for pooled-latent labels.
+- Save raw-member feature-distribution subregion latent embeddings and clustering-method metadata in summaries, H5AD metadata, subregion tables, and candidate diagnostic NPZ outputs.
+- Make spot-latent cluster-anchor OT fallbacks explicit: occurrence NPZ and `summary.json` now record requested/effective anchor-distance methods, fallback matrices, fallback fractions, and solver status codes.
+- Promote latent MDS quality into visible QC fields, including anchor stress status, atom high-stress cluster counts, and explicit stress/eigenvalue thresholds used by the concern report.
+- Store alternate atom-posterior entropy diagnostics for fixed-temperature and cost-gap-temperature baselines alongside the default entropy-calibrated posterior.
+- Block within-niche latent-heterogeneity claims when anchor OT falls back, MDS geometry is unreliable, posterior entropy is uncalibrated, or temperature calibration suggests inconsistent atom-cost scaling.
+- Calibrate the packaged 10 GB deep-segmentation cohort profile to `DEEP_BATCH_SIZE=81920`, matching the successful pooled run that peaked at roughly 8.9 GiB reserved VRAM without OOM.
+
 ## 0.1.12
 
 - Compact the package around the active multilevel OT workflow by removing the old teacher-student scaffold, root-level compatibility facades, legacy TOML/program-prior examples, and redundant shell aliases.

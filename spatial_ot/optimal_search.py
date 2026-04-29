@@ -432,6 +432,8 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
         str(config.ot.deep_segmentation_feature_weight),
         "--deep-segmentation-spatial-weight",
         str(config.ot.deep_segmentation_spatial_weight),
+        "--subregion-clustering-method",
+        str(config.ot.subregion_clustering_method),
         "--shape-leakage-permutations",
         str(config.ot.shape_leakage_permutations),
         "--candidate-n-clusters",

@@ -1177,7 +1177,7 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert summary["shape_diagnostics_enabled"] is False
     assert summary["shape_leakage_balanced_accuracy"] is None
     assert "subregion" in summary["method_layers"]["layer_1_subregion_formation"]
-    assert "heterogeneous measures" in summary["method_layers"]["layer_2_subregion_heterogeneity_clustering"]
+    assert "pooled matrix" in summary["method_layers"]["layer_2_subregion_heterogeneity_clustering"]
     assert "downstream projections" in summary["method_layers"]["layer_3_projection_and_visualization"]
     assert summary["capabilities"]["spot_level_latent_charts_implemented"] is True
     assert summary["method_stack"]["spot_level_latent_projection"] == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
@@ -1195,6 +1195,10 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert spot_latent["normalized_posterior_entropy"].shape[0] == spot_latent["latent_coords"].shape[0]
     assert spot_latent["atom_argmax"].shape[0] == spot_latent["latent_coords"].shape[0]
     assert spot_latent["temperature_used"].shape[0] == spot_latent["latent_coords"].shape[0]
+    assert spot_latent["temperature_cost_gap"].shape[0] == spot_latent["latent_coords"].shape[0]
+    assert spot_latent["temperature_fixed"].shape[0] == spot_latent["latent_coords"].shape[0]
+    assert spot_latent["posterior_entropy_cost_gap"].shape[0] == spot_latent["latent_coords"].shape[0]
+    assert spot_latent["posterior_entropy_fixed"].shape[0] == spot_latent["latent_coords"].shape[0]
     assert summary["spot_level_latent"]["coordinate_scope"] == "cluster_atom_measure_mds_anchors_plus_atom_posterior_barycentric_within_cluster_residual"
     assert summary["spot_level_latent"]["chart_learning_mode"] == "model_grounded_atom_distance_mds_without_fisher_labels"
     assert summary["spot_level_latent"]["validation_role"] == "diagnostic_visualization_not_independent_evidence"
@@ -1205,7 +1209,17 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert summary["spot_level_latent"]["uses_forced_cluster_local_radius"] is False
     assert summary["spot_level_latent"]["temperature_mode"] == "auto_entropy"
     assert summary["spot_level_latent"]["cluster_anchor_distance_method"] == "balanced_ot"
+    assert summary["spot_level_latent"]["cluster_anchor_distance_requested_method"] == "balanced_ot"
+    assert summary["spot_level_latent"]["cluster_anchor_distance_effective_method"] == "balanced_ot"
+    assert summary["spot_level_latent"]["cluster_anchor_ot_fallback_fraction"] == 0.0
+    assert summary["spot_level_latent"]["cluster_anchor_mds_status"] in {
+        "interpretable",
+        "diagnostic_only",
+        "not_geometrically_interpretable",
+    }
     assert "cluster_anchor_mds_stress" in summary["spot_level_latent"]
+    assert "temperature_cost_gap_summary" in summary["spot_level_latent"]
+    assert "normalized_posterior_entropy_fixed_summary" in summary["spot_level_latent"]
     assert summary["spot_level_latent"]["posterior_entropy_summary"]["count"] == spot_latent["latent_coords"].shape[0]
     saved = ad.read_h5ad(summary["outputs"]["h5ad"])
     assert "mlot_spot_latent_coords" in saved.obsm
@@ -1215,6 +1229,9 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert "mlot_spot_latent_cluster_int" in saved.obs
     assert "mlot_spot_latent_posterior_entropy" in saved.obs
     assert saved.uns["multilevel_ot"]["method_layers"] == summary["method_layers"]
+    assert saved.uns["multilevel_ot"]["subregion_clustering_method"] == summary["subregion_clustering_method"]
+    assert saved.uns["multilevel_ot"]["subregion_clustering_uses_spatial"] == summary["subregion_clustering_uses_spatial"]
+    assert saved.uns["multilevel_ot"]["subregion_clustering_feature_space"] == summary["subregion_clustering_feature_space"]
     assert saved.uns["multilevel_ot"]["spot_level_latent_mode"] == "atom_barycentric_mds"
     assert (
         saved.uns["multilevel_ot"]["spot_level_latent_projection_mode"]
@@ -1231,7 +1248,12 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert spot_latent["validation_role"].item() == "diagnostic_visualization_not_independent_evidence"
     assert spot_latent["temperature_mode"].item() == "auto_entropy"
     assert spot_latent["cluster_anchor_distance_method"].item() == "balanced_ot"
+    assert spot_latent["cluster_anchor_distance_requested_method"].item() == "balanced_ot"
+    assert spot_latent["cluster_anchor_distance_effective_method"].item() == "balanced_ot"
     assert spot_latent["cluster_anchor_distance"].shape == (2, 2)
+    assert spot_latent["cluster_anchor_ot_fallback_matrix"].shape == (2, 2)
+    assert spot_latent["cluster_anchor_solver_status_matrix"].shape == (2, 2)
+    assert float(spot_latent["cluster_anchor_ot_fallback_fraction"].item()) == 0.0
     assert spot_latent["atom_mds_stress"].shape == (2,)
     assert "cell_spot_latent_unweighted_coords" in spot_latent.files
     assert "cell_spot_latent_confidence_weighted_coords" in spot_latent.files

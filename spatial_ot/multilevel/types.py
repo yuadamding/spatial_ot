@@ -93,6 +93,9 @@ class MultilevelOTResult:
     subregion_cluster_overlap_penalties: np.ndarray
     subregion_atom_weights: np.ndarray
     subregion_measure_summaries: np.ndarray
+    subregion_latent_embeddings: np.ndarray
+    subregion_clustering_method: str
+    subregion_clustering_uses_spatial: bool
     subregion_assigned_effective_eps: np.ndarray
     subregion_assigned_used_ot_fallback: np.ndarray
     subregion_candidate_effective_eps_matrix: np.ndarray
@@ -127,9 +130,18 @@ class MultilevelOTResult:
     spot_latent_normalized_posterior_entropy: np.ndarray
     spot_latent_atom_argmax: np.ndarray
     spot_latent_temperature_used: np.ndarray
+    spot_latent_temperature_cost_gap: np.ndarray
+    spot_latent_temperature_fixed: np.ndarray
     spot_latent_weights: np.ndarray
     spot_latent_atom_posteriors: np.ndarray
+    spot_latent_posterior_entropy_cost_gap: np.ndarray
+    spot_latent_normalized_posterior_entropy_cost_gap: np.ndarray
+    spot_latent_posterior_entropy_fixed: np.ndarray
+    spot_latent_normalized_posterior_entropy_fixed: np.ndarray
     spot_latent_cluster_anchor_distance: np.ndarray
+    spot_latent_cluster_anchor_ot_fallback_matrix: np.ndarray
+    spot_latent_cluster_anchor_solver_status_matrix: np.ndarray
+    spot_latent_cluster_anchor_ot_fallback_fraction: float
     spot_latent_atom_mds_stress: np.ndarray
     spot_latent_atom_mds_positive_eigenvalue_mass_2d: np.ndarray
     spot_latent_atom_mds_negative_eigenvalue_mass_fraction: np.ndarray
@@ -147,6 +159,8 @@ class MultilevelOTResult:
     spot_latent_assignment_temperature: float
     spot_latent_temperature_mode: str
     spot_latent_cluster_anchor_distance_method: str
+    spot_latent_cluster_anchor_distance_requested_method: str
+    spot_latent_cluster_anchor_distance_effective_method: str
     spot_latent_cluster_mds_stress: float
     spot_latent_cluster_mds_positive_eigenvalue_mass_2d: float
     spot_latent_cluster_mds_negative_eigenvalue_mass_fraction: float

@@ -14,7 +14,7 @@ from spatial_ot.multilevel.core import (
     _stabilize_mixed_candidate_assignment_costs,
 )
 from spatial_ot.multilevel.embedding import compute_subregion_embedding, subregion_graph_metrics
-from spatial_ot.multilevel.diagnostics import cell_subregion_coverage
+from spatial_ot.multilevel.diagnostics import build_qc_warnings, cell_subregion_coverage
 from spatial_ot.multilevel.geometry import (
     _region_geometries_from_observed_points,
     _validate_mutually_exclusive_memberships,
@@ -23,7 +23,10 @@ from spatial_ot.multilevel.geometry import (
     build_partition_subregions_from_grid_tiles,
 )
 from spatial_ot.multilevel.io import _cluster_count_dict
-from spatial_ot.multilevel.model_selection import select_k_from_ot_landmark_costs
+from spatial_ot.multilevel.model_selection import (
+    comprehensive_select_k_from_latent_embeddings,
+    select_k_from_ot_landmark_costs,
+)
 from spatial_ot.multilevel.spot_latent import (
     _cluster_atom_measure_sqdist,
     _global_discriminative_latent_chart,
@@ -95,6 +98,40 @@ def test_auto_k_selector_uses_ot_landmark_scores() -> None:
     assert selection["distance_source"] == "pilot_ot_landmark_transport_cost_profiles"
     assert all(row["passes_min_cluster_size"] for row in selection["scores"])
     assert all(row["cluster_size_min"] >= row["effective_min_cluster_size"] for row in selection["scores"])
+
+
+def test_comprehensive_k_selector_scores_pooled_latent_without_spatial_inputs() -> None:
+    rng = np.random.default_rng(19)
+    latent = np.vstack(
+        [
+            rng.normal(loc=-4.0, scale=0.18, size=(24, 6)),
+            rng.normal(loc=0.0, scale=0.18, size=(24, 6)),
+            rng.normal(loc=4.0, scale=0.18, size=(24, 6)),
+        ]
+    ).astype(np.float32)
+
+    selection = comprehensive_select_k_from_latent_embeddings(
+        latent,
+        candidate_n_clusters=(2, 3, 4),
+        fallback_n_clusters=3,
+        seeds=(19, 20, 21),
+        n_init=3,
+        min_cluster_size=8,
+        gap_references=2,
+        bootstrap_repeats=2,
+        bootstrap_fraction=0.75,
+        max_silhouette_subregions=0,
+        random_state=19,
+    )
+
+    assert selection["uses_spatial"] is False
+    assert selection["distance_source"] == "pooled_raw_member_feature_distribution_subregion_latent_embeddings"
+    assert selection["selected_k"] == 3
+    assert selection["criterion_votes"]
+    assert len(selection["scores"]) == 3
+    assert all(row["passes_min_cluster_size"] for row in selection["scores"])
+    assert all(row["cluster_size_scope"] == "all_subregions" for row in selection["scores"])
+    assert any(row["bootstrap_ari_mean"] is not None for row in selection["scores"])
 
 
 def test_fit_multilevel_ot_auto_k_refits_with_selected_cluster_count() -> None:
@@ -206,6 +243,44 @@ def test_spot_latent_cluster_anchor_distance_uses_balanced_ot_matching() -> None
 
     assert balanced[0, 1] < 1e-6
     assert expected[0, 1] > 40.0
+
+
+def test_spot_latent_anchor_distance_reports_balanced_ot_fallback(monkeypatch) -> None:
+    atom_coords = np.asarray(
+        [
+            [[0.0, 0.0], [1.0, 0.0]],
+            [[2.0, 0.0], [3.0, 0.0]],
+        ],
+        dtype=np.float32,
+    )
+    atom_features = np.zeros((2, 2, 1), dtype=np.float32)
+    weights = np.full((2, 2), 0.5, dtype=np.float32)
+
+    def _raise_emd2(*args, **kwargs):
+        raise RuntimeError("forced OT failure")
+
+    import spatial_ot.multilevel.spot_latent as spot_latent
+
+    monkeypatch.setattr(spot_latent.ot, "emd2", _raise_emd2)
+
+    distances, diagnostics = _cluster_atom_measure_sqdist(
+        atom_coords,
+        atom_features,
+        weights,
+        lambda_x=1.0,
+        lambda_y=0.0,
+        cost_scale_x=1.0,
+        cost_scale_y=1.0,
+        distance_mode="balanced_ot",
+        return_diagnostics=True,
+    )
+
+    assert distances.shape == (2, 2)
+    assert diagnostics["requested_method"] == "balanced_ot"
+    assert diagnostics["effective_method"] == "balanced_ot_with_expected_cross_cost_fallback"
+    assert diagnostics["fallback_fraction"] == 1.0
+    assert diagnostics["fallback_matrix"][0, 1]
+    assert diagnostics["solver_status_matrix"][0, 1] == 3
 
 
 def test_spot_latent_auto_entropy_temperature_hits_target_range() -> None:
@@ -642,6 +717,58 @@ def test_composite_subregions_are_unions_of_basic_niches() -> None:
     assert np.all(counts == 1)
 
 
+def test_composite_subregions_respect_max_area_constraint() -> None:
+    xs, ys = np.meshgrid(np.arange(0.0, 120.0, 5.0), np.arange(0.0, 120.0, 5.0))
+    coords = np.column_stack([xs.reshape(-1), ys.reshape(-1)]).astype(np.float32)
+    max_area = 500.0
+
+    _centers, members, _basic_centers, _basic_members, _basic_ids = (
+        build_composite_subregions_from_basic_niches(
+            coords_um=coords,
+            radius_um=120.0,
+            stride_um=120.0,
+            min_cells=10,
+            max_subregions=128,
+            basic_niche_size_um=120.0,
+            max_area_um2=max_area,
+        )
+    )
+
+    shape_df = _shape_descriptor_frame(members, coords)
+    assert float(shape_df["shape_area"].max()) <= max_area * (1.0 + 1e-6)
+    assert all(member.size >= 10 for member in members)
+    counts = _cell_membership_counts(coords.shape[0], members)
+    assert np.all(counts == 1)
+
+
+def test_qc_warns_when_area_cap_breaks_min_cell_constraint() -> None:
+    warnings = build_qc_warnings(
+        feature_embedding_warning=None,
+        fallback_fraction=0.0,
+        assigned_ot_fallback_fraction=0.0,
+        assigned_effective_eps_values=[],
+        requested_ot_eps=0.03,
+        coverage_fraction=1.0,
+        mean_assignment_margin=0.5,
+        assigned_transport_cost_decomposition={"geometry_transport_fraction": 0.0},
+        cost_reliability={},
+        transform_diagnostics={},
+        forced_label_fraction=0.0,
+        deep_summary={},
+        realized_subregion_statistics={
+            "minimum_cell_constraint": 25,
+            "minimum_cell_constraint_satisfied": False,
+            "maximum_area_constraint_um2": 500.0,
+            "n_cells": {"min": 1.0},
+        },
+    )
+
+    min_cell_warnings = [item for item in warnings if item["code"] == "minimum_cell_constraint_not_satisfied"]
+    assert len(min_cell_warnings) == 1
+    assert min_cell_warnings[0]["severity"] == "warning"
+    assert "maximum area cap takes precedence" in min_cell_warnings[0]["message"]
+
+
 def test_basic_niche_subregions_still_respect_min_cells() -> None:
     dense_xs, dense_ys = np.meshgrid(np.arange(0.0, 120.0, 20.0), np.arange(0.0, 120.0, 20.0))
     sparse = np.array([[260.0, 0.0], [280.0, 0.0]], dtype=np.float32)
@@ -931,6 +1058,7 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
         max_iter=8,
         tol=1e-4,
         basic_niche_size_um=None,
+        subregion_clustering_method="ot_dictionary",
         min_subregions_per_cluster=2,
         seed=1337,
         compute_device="cpu",
@@ -986,6 +1114,8 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     assert result.spot_latent_normalized_posterior_entropy.shape == (expected_spot_occurrences,)
     assert result.spot_latent_atom_argmax.shape == (expected_spot_occurrences,)
     assert result.spot_latent_temperature_used.shape == (expected_spot_occurrences,)
+    assert result.spot_latent_temperature_cost_gap.shape == (expected_spot_occurrences,)
+    assert result.spot_latent_temperature_fixed.shape == (expected_spot_occurrences,)
     assert np.all(result.spot_latent_posterior_entropy >= -1e-6)
     assert np.all(result.spot_latent_temperature_used > 0.0)
     assert result.spot_latent_mode == "atom_barycentric_mds"
@@ -993,7 +1123,12 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     assert result.spot_latent_projection_mode == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
     assert result.spot_latent_temperature_mode == "auto_entropy"
     assert result.spot_latent_cluster_anchor_distance_method == "balanced_ot"
+    assert result.spot_latent_cluster_anchor_distance_requested_method == "balanced_ot"
+    assert result.spot_latent_cluster_anchor_distance_effective_method == "balanced_ot"
     assert result.spot_latent_cluster_anchor_distance.shape == (2, 2)
+    assert result.spot_latent_cluster_anchor_ot_fallback_matrix.shape == (2, 2)
+    assert result.spot_latent_cluster_anchor_solver_status_matrix.shape == (2, 2)
+    assert result.spot_latent_cluster_anchor_ot_fallback_fraction == 0.0
     assert result.spot_latent_atom_mds_stress.shape == (2,)
     assert np.isfinite(result.spot_latent_cluster_mds_stress)
     assert np.all(np.isfinite(result.spot_latent_atom_mds_stress))
@@ -1041,6 +1176,139 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     )
     assert np.all(reconstructed_transport_cost <= assigned_transport_cost + 1e-4)
     assert np.all(assigned_transport_cost <= assigned_cost + 1e-4)
+
+
+def test_default_subregion_clustering_pools_feature_latents_without_spatial_labels() -> None:
+    rng = np.random.default_rng(2026)
+    coords_parts = []
+    feature_parts = []
+    subregion_members = []
+    start = 0
+    spatial_centers = [np.array([0.0, 0.0]), np.array([2.0, 0.0]), np.array([100.0, 0.0]), np.array([102.0, 0.0])]
+    feature_centers = [np.array([-3.0, 0.0]), np.array([3.0, 0.0]), np.array([-3.0, 0.0]), np.array([3.0, 0.0])]
+    for spatial_center, feature_center in zip(spatial_centers, feature_centers, strict=True):
+        coords_parts.append(spatial_center + rng.normal(scale=0.15, size=(24, 2)))
+        feature_parts.append(feature_center + rng.normal(scale=0.05, size=(24, 2)))
+        subregion_members.append(np.arange(start, start + 24, dtype=np.int32))
+        start += 24
+    coords = np.vstack(coords_parts).astype(np.float32)
+    features = np.vstack(feature_parts).astype(np.float32)
+    centers = np.vstack([coords[members].mean(axis=0) for members in subregion_members]).astype(np.float32)
+
+    result = fit_multilevel_ot(
+        features=features,
+        coords_um=coords,
+        subregion_members=subregion_members,
+        subregion_centers_um=centers,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=10.0,
+        stride_um=10.0,
+        min_cells=12,
+        max_subregions=4,
+        lambda_x=100.0,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=8,
+        align_iters=1,
+        allow_reflection=False,
+        allow_scale=False,
+        allow_convex_hull_fallback=True,
+        max_iter=1,
+        tol=1e-4,
+        basic_niche_size_um=None,
+        min_subregions_per_cluster=2,
+        compute_spot_latent=False,
+        seed=2026,
+        compute_device="cpu",
+    )
+
+    labels = result.subregion_cluster_labels
+    assert result.subregion_clustering_method == "pooled_subregion_latent"
+    assert result.subregion_clustering_uses_spatial is False
+    assert result.subregion_latent_embeddings.shape[0] == 4
+    assert labels[0] == labels[2]
+    assert labels[1] == labels[3]
+    assert labels[0] != labels[1]
+
+
+def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution() -> None:
+    rng = np.random.default_rng(2027)
+    coords_parts = []
+    feature_parts = []
+    subregion_members = []
+    start = 0
+    spatial_centers = [
+        np.array([0.0, 0.0]),
+        np.array([2.0, 0.0]),
+        np.array([100.0, 0.0]),
+        np.array([102.0, 0.0]),
+    ]
+    feature_patterns = [
+        np.tile(np.array([[-0.05], [0.05]], dtype=np.float32), (16, 1)),
+        np.tile(np.array([[-6.0], [6.0]], dtype=np.float32), (16, 1)),
+        np.tile(np.array([[-0.05], [0.05]], dtype=np.float32), (16, 1)),
+        np.tile(np.array([[-6.0], [6.0]], dtype=np.float32), (16, 1)),
+    ]
+    for spatial_center, pattern in zip(spatial_centers, feature_patterns, strict=True):
+        coords_parts.append(spatial_center + rng.normal(scale=0.1, size=(pattern.shape[0], 2)))
+        feature_parts.append(pattern)
+        subregion_members.append(np.arange(start, start + pattern.shape[0], dtype=np.int32))
+        start += pattern.shape[0]
+    coords = np.vstack(coords_parts).astype(np.float32)
+    features = np.vstack(feature_parts).astype(np.float32)
+    centers = np.vstack([coords[members].mean(axis=0) for members in subregion_members]).astype(np.float32)
+
+    result = fit_multilevel_ot(
+        features=features,
+        coords_um=coords,
+        subregion_members=subregion_members,
+        subregion_centers_um=centers,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=10.0,
+        stride_um=10.0,
+        min_cells=12,
+        max_subregions=4,
+        lambda_x=100.0,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=2,
+        align_iters=1,
+        allow_reflection=False,
+        allow_scale=False,
+        allow_convex_hull_fallback=True,
+        max_iter=1,
+        tol=1e-4,
+        basic_niche_size_um=None,
+        min_subregions_per_cluster=2,
+        compute_spot_latent=False,
+        seed=2027,
+        compute_device="cpu",
+    )
+
+    labels = result.subregion_cluster_labels
+    assert result.subregion_clustering_method == "pooled_subregion_latent"
+    assert result.subregion_clustering_uses_spatial is False
+    assert result.subregion_latent_embeddings.shape == (4, 2)
+    standardized_features = ((features - features.mean(axis=0, keepdims=True)) / features.std(axis=0, keepdims=True)).astype(
+        np.float32
+    )
+    expected_latents = []
+    for members in subregion_members:
+        values = standardized_features[members]
+        expected_latents.append([float(values.mean()), float(values.std())])
+    assert np.allclose(result.subregion_latent_embeddings, np.asarray(expected_latents, dtype=np.float32), atol=1e-5)
+    assert result.subregion_latent_embeddings[1, 1] > result.subregion_latent_embeddings[0, 1]
+    assert labels[0] == labels[2]
+    assert labels[1] == labels[3]
+    assert labels[0] != labels[1]
 
 
 def test_generated_subregions_use_data_driven_geometry_without_hull_fallback() -> None:
@@ -1478,6 +1746,7 @@ def test_returned_costs_match_returned_atoms() -> None:
         max_iter=3,
         tol=1e-4,
         basic_niche_size_um=None,
+        subregion_clustering_method="ot_dictionary",
         seed=7,
         compute_device="cpu",
     )

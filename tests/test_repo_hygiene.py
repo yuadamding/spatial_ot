@@ -248,7 +248,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'DEEP_LATENT_DIM="${DEEP_LATENT_DIM:-64}"' in deep_segmentation_sh
     assert 'DEEP_HIDDEN_DIM="${DEEP_HIDDEN_DIM:-1024}"' in deep_segmentation_sh
     assert 'DEEP_LAYERS="${DEEP_LAYERS:-3}"' in deep_segmentation_sh
-    assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-131072}"' in deep_segmentation_sh
+    assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-81920}"' in deep_segmentation_sh
     assert 'CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-9}"' in deep_segmentation_sh
     assert 'SPATIAL_OT_CUDA_MAX_TARGET_FRACTION="${SPATIAL_OT_CUDA_MAX_TARGET_FRACTION:-$CUDA_MAX_TARGET_FRACTION}"' in deep_segmentation_sh
     assert 'DEEP_SEGMENTATION_REFINEMENT_ITERS="${DEEP_SEGMENTATION_REFINEMENT_ITERS:-6}"' in deep_segmentation_sh
@@ -263,6 +263,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-20}"' in optimal_search_sh
     assert 'ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"' in optimal_search_sh
     assert 'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-data_driven}"' in optimal_search_sh
+    assert 'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-pooled_subregion_latent}"' in optimal_search_sh
+    assert 'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-pooled_subregion_latent}"' in run_sh
     assert 'SUBREGION_FEATURE_WEIGHT="${SUBREGION_FEATURE_WEIGHT:-0}"' in optimal_search_sh
     assert '--subregion-feature-weight "$SUBREGION_FEATURE_WEIGHT"' in optimal_search_sh
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in optimal_search_sh
@@ -278,6 +280,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "max_subregions = 5000" in config_toml
     assert "allow_convex_hull_fallback = false" in config_toml
     assert 'subregion_construction_method = "deep_segmentation"' in config_toml
+    assert 'subregion_clustering_method = "pooled_subregion_latent"' in config_toml
     assert "auto_n_clusters = false" in config_toml
     assert "candidate_n_clusters = [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]" in config_toml
     assert "min_subregions_per_cluster = 50" in config_toml

@@ -41,10 +41,13 @@ from .io import (
     run_multilevel_ot_with_config,
 )
 from .model_selection import (
+    comprehensive_select_k_from_latent_embeddings,
     effective_min_cluster_size,
+    fit_kmeans_on_latent_embeddings,
     ot_landmark_distance_matrix,
     parse_candidate_n_clusters,
     repair_labels_to_minimum_size,
+    select_k_from_latent_embeddings,
     select_k_from_ot_landmark_costs,
 )
 from .types import (
@@ -79,7 +82,9 @@ __all__ = [
     "build_deep_graph_segmentation_subregions",
     "build_data_driven_subregions",
     "build_subregions",
+    "comprehensive_select_k_from_latent_embeddings",
     "effective_min_cluster_size",
+    "fit_kmeans_on_latent_embeddings",
     "build_composite_subregions_from_basic_niches",
     "build_concern_resolution_report",
     "fit_multilevel_ot",
@@ -97,6 +102,7 @@ __all__ = [
     "run_multilevel_ot_on_h5ad",
     "run_multilevel_ot_with_config",
     "sample_geometry_points",
+    "select_k_from_latent_embeddings",
     "select_k_from_ot_landmark_costs",
     "weighted_similarity_fit",
     "write_concern_resolution_report",

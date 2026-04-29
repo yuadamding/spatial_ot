@@ -178,6 +178,35 @@ def test_concern_report_allows_clustering_but_blocks_unvalidated_latent_claim(tm
     assert "missing_held_out_sample_projection" in latent_claim["evidence"]["blockers"]
 
 
+def test_concern_report_blocks_latent_claim_on_anchor_ot_fallback(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _write_summary(run_dir, coordinate_only=True, warnings=[], auto_k=False)
+    summary_path = run_dir / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["spot_level_latent"] = {
+        "implemented": True,
+        "projection": "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors",
+        "chart_learning_mode": "model_grounded_atom_distance_mds_without_fisher_labels",
+        "validation_role": "diagnostic_visualization_not_independent_evidence",
+        "cluster_anchor_distance_method": "balanced_ot",
+        "cluster_anchor_distance_effective_method": "balanced_ot_with_expected_cross_cost_fallback",
+        "cluster_anchor_ot_fallback_fraction": 0.25,
+        "cluster_anchor_mds_stress": 0.08,
+        "cluster_anchor_mds_positive_eigenvalue_mass_2d": 0.9,
+        "cluster_anchor_mds_negative_eigenvalue_mass_fraction": 0.0,
+        "atom_mds_stress_summary": {"max": 0.1},
+        "normalized_posterior_entropy_summary": {"median": 0.45},
+        "temperature_used_q95_q05_ratio": 1.5,
+    }
+    summary_path.write_text(json.dumps(summary))
+
+    report = build_concern_resolution_report(run_dir, coordinate_baseline_run_dir=run_dir, stability_run_dirs=[run_dir])
+
+    latent_claim = next(item for item in report["concerns"] if item["code"] == "within_niche_latent_heterogeneity_claim")
+    assert "anchor_ot_fallback_used" in latent_claim["evidence"]["blockers"]
+    assert latent_claim["evidence"]["anchor_ot_fallback_fraction"] == 0.25
+
+
 def test_validate_run_concerns_strict_exits_nonzero_for_blockers(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     _write_summary(run_dir, coordinate_only=False, warnings=["shape_descriptors_predict_subregion_clusters"])

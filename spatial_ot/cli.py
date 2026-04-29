@@ -168,6 +168,49 @@ def build_parser() -> argparse.ArgumentParser:
     validate_run.add_argument("--output-json", default=None, help="Optional JSON report path.")
     validate_run.add_argument("--output-md", default=None, help="Optional Markdown report path.")
 
+    select_k = sub.add_parser(
+        "select-k",
+        help="Run comprehensive K selection on pooled subregion latent embeddings from a finished run.",
+    )
+    select_k.add_argument("--run-dir", required=True, help="Finished multilevel OT run directory.")
+    select_k.add_argument(
+        "--diagnostics-npz",
+        default=None,
+        help="Optional diagnostics NPZ containing subregion_latent_embeddings. Defaults to multilevel_ot_candidate_cost_diagnostics.npz under --run-dir.",
+    )
+    select_k.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory for K-selection artifacts. Defaults to comprehensive_k_selection under --run-dir.",
+    )
+    select_k.add_argument(
+        "--candidate-n-clusters",
+        default="15-25",
+        help="Candidate K values, e.g. '15-25' or '15,16,17'.",
+    )
+    select_k.add_argument(
+        "--seeds",
+        default="1337-1356",
+        help="KMeans seeds used for multistart stability, e.g. '1337-1356'.",
+    )
+    select_k.add_argument("--n-init", type=int, default=10, help="KMeans n_init for each seed and K.")
+    select_k.add_argument(
+        "--min-subregions-per-cluster",
+        type=int,
+        default=50,
+        help="Minimum number of subregions per cluster when feasible.",
+    )
+    select_k.add_argument("--gap-references", type=int, default=16, help="Reference resamples for the gap statistic.")
+    select_k.add_argument("--bootstrap-repeats", type=int, default=12, help="Bootstrap stability repeats per K.")
+    select_k.add_argument("--bootstrap-fraction", type=float, default=0.8, help="Fraction of subregions sampled per bootstrap repeat.")
+    select_k.add_argument(
+        "--max-silhouette-subregions",
+        type=int,
+        default=0,
+        help="Maximum subregions used for silhouette. Use 0 for all subregions.",
+    )
+    select_k.add_argument("--seed", type=int, default=1337, help="Random seed for sampling/reference draws.")
+
     pool_inputs = sub.add_parser(
         "pool-inputs",
         help="Pool multiple cohort H5AD files into one non-overlapping AnnData for joint latent learning and niche discovery.",
@@ -276,6 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--basic-niche-size-um", type=float, default=None, help="Target scale in microns for data-driven atomic membership seeds. Set to 0 to disable this scale hint.")
     multilevel.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
     multilevel.add_argument("--max-subregions", type=int, default=None, help="Maximum number of data-driven subregions to retain after minimum-size merging.")
+    multilevel.add_argument("--max-subregion-area-um2", type=float, default=None, help="Optional maximum observed point-cloud area in square microns for generated subregions.")
     multilevel.add_argument("--lambda-x", type=float, default=None, help="Weight on canonical spatial coordinates in the OT cost.")
     multilevel.add_argument("--lambda-y", type=float, default=None, help="Weight on feature coordinates in the OT cost.")
     multilevel.add_argument("--geometry-eps", type=float, default=None, help="Entropic OT regularization for geometry-only normalization into the reference domain.")
@@ -302,6 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--deep-segmentation-feature-dims", type=int, default=None, help="Leading learned feature dimensions used for deep graph segmentation affinities.")
     multilevel.add_argument("--deep-segmentation-feature-weight", type=float, default=None, help="Weight on learned-feature edge contrast during deep graph segmentation.")
     multilevel.add_argument("--deep-segmentation-spatial-weight", type=float, default=None, help="Weight on spatial edge length during deep graph segmentation.")
+    multilevel.add_argument("--subregion-clustering-method", default=None, choices=["pooled_subregion_latent", "ot_dictionary"], help="How fitted subregions receive niche labels. pooled_subregion_latent clusters pooled raw-member feature-distribution subregion latent embeddings and does not use spatial coordinates in this label step; ot_dictionary keeps the historical OT-dictionary assignment.")
     multilevel.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     multilevel.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
     multilevel.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level OT atom-barycentric spot latent diagnostic charts.")
@@ -340,6 +385,7 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--basic-niche-size-um", type=float, default=None, help="Target scale in microns for data-driven atomic membership seeds.")
     optimal_search.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
     optimal_search.add_argument("--max-subregions", type=int, default=None, help="Maximum number of data-driven subregions retained after minimum-size merging.")
+    optimal_search.add_argument("--max-subregion-area-um2", type=float, default=None, help="Optional maximum observed point-cloud area in square microns for generated subregions.")
     optimal_search.add_argument("--lambda-x", type=float, default=None, help="Weight on canonical spatial coordinates in the OT cost.")
     optimal_search.add_argument("--lambda-y", type=float, default=None, help="Weight on feature coordinates in the OT cost.")
     optimal_search.add_argument("--geometry-eps", type=float, default=None, help="Entropic OT regularization for geometry-only normalization.")
@@ -366,6 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--deep-segmentation-feature-dims", type=int, default=None, help="Leading learned feature dimensions used for deep graph segmentation affinities.")
     optimal_search.add_argument("--deep-segmentation-feature-weight", type=float, default=None, help="Weight on learned-feature edge contrast during deep graph segmentation.")
     optimal_search.add_argument("--deep-segmentation-spatial-weight", type=float, default=None, help="Weight on spatial edge length during deep graph segmentation.")
+    optimal_search.add_argument("--subregion-clustering-method", default=None, choices=["pooled_subregion_latent", "ot_dictionary"], help="How fitted subregions receive niche labels. pooled_subregion_latent clusters pooled raw-member feature-distribution subregion latent embeddings and does not use spatial coordinates in this label step; ot_dictionary keeps the historical OT-dictionary assignment.")
     optimal_search.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     optimal_search.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
     optimal_search.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level OT atom-barycentric spot latent diagnostic charts.")
@@ -419,6 +466,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "basic_niche_size_um",
         "min_cells",
         "max_subregions",
+        "max_subregion_area_um2",
         "lambda_x",
         "lambda_y",
         "geometry_eps",
@@ -445,6 +493,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "deep_segmentation_feature_dims",
         "deep_segmentation_feature_weight",
         "deep_segmentation_spatial_weight",
+        "subregion_clustering_method",
         "shape_diagnostics",
         "shape_leakage_permutations",
         "compute_spot_latent",
@@ -624,6 +673,130 @@ def main() -> None:
         print(json.dumps(report, indent=2))
         if args.strict and report.get("blocking_concerns"):
             raise SystemExit(1)
+    elif args.command == "select-k":
+        import csv
+
+        import matplotlib
+        import numpy as np
+
+        from .multilevel.model_selection import (
+            comprehensive_select_k_from_latent_embeddings,
+            fit_kmeans_on_latent_embeddings,
+        )
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        def _json_default(value):
+            if isinstance(value, np.integer):
+                return int(value)
+            if isinstance(value, np.floating):
+                return float(value)
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+        def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
+            keys: list[str] = []
+            seen: set[str] = set()
+            for row in rows:
+                for key in row:
+                    if key not in seen:
+                        seen.add(key)
+                        keys.append(key)
+            with path.open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=keys)
+                writer.writeheader()
+                writer.writerows(rows)
+
+        run_dir = Path(args.run_dir)
+        diagnostics_npz = Path(args.diagnostics_npz) if args.diagnostics_npz else run_dir / "multilevel_ot_candidate_cost_diagnostics.npz"
+        output_dir = Path(args.output_dir) if args.output_dir else run_dir / "comprehensive_k_selection"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with np.load(diagnostics_npz, allow_pickle=False) as data:
+            if "subregion_latent_embeddings" not in data:
+                raise ValueError(f"{diagnostics_npz} does not contain subregion_latent_embeddings.")
+            latent_embeddings = np.asarray(data["subregion_latent_embeddings"], dtype=np.float32)
+
+        selection = comprehensive_select_k_from_latent_embeddings(
+            latent_embeddings,
+            candidate_n_clusters=args.candidate_n_clusters,
+            fallback_n_clusters=15,
+            seeds=args.seeds,
+            n_init=args.n_init,
+            min_cluster_size=args.min_subregions_per_cluster,
+            gap_references=args.gap_references,
+            bootstrap_repeats=args.bootstrap_repeats,
+            bootstrap_fraction=args.bootstrap_fraction,
+            max_silhouette_subregions=args.max_silhouette_subregions,
+            random_state=args.seed,
+        )
+        scores = list(selection.get("scores", []))
+        seed_runs = list(selection.get("seed_runs", []))
+        selected_k = int(selection["selected_k"])
+        selected_seed_rows = [row for row in seed_runs if int(row["n_clusters"]) == selected_k]
+        selected_seed = int(min(selected_seed_rows, key=lambda row: float(row["inertia"]))["seed"]) if selected_seed_rows else int(args.seed)
+        recommended_fit = fit_kmeans_on_latent_embeddings(
+            latent_embeddings,
+            n_clusters=selected_k,
+            n_init=args.n_init,
+            min_cluster_size=args.min_subregions_per_cluster,
+            random_state=selected_seed + 104729 * selected_k,
+        )
+
+        summary_path = output_dir / "comprehensive_k_selection.json"
+        score_csv = output_dir / "comprehensive_k_selection_scores.csv"
+        seed_csv = output_dir / "comprehensive_k_selection_seed_runs.csv"
+        labels_npz = output_dir / "recommended_k_labels.npz"
+        selection["output_dir"] = str(output_dir)
+        selection["diagnostics_npz"] = str(diagnostics_npz)
+        selection["recommended_seed"] = int(selected_seed)
+        selection["recommended_k_labels_npz"] = str(labels_npz)
+        summary_path.write_text(json.dumps(selection, indent=2, default=_json_default) + "\n")
+        _write_csv(score_csv, scores)
+        _write_csv(seed_csv, seed_runs)
+        np.savez_compressed(
+            labels_npz,
+            labels=np.asarray(recommended_fit["labels"], dtype=np.int32),
+            centers=np.asarray(recommended_fit["centers"], dtype=np.float32),
+            costs=np.asarray(recommended_fit["costs"], dtype=np.float32),
+            forced_label_mask=np.asarray(recommended_fit["forced_label_mask"], dtype=bool),
+            standardized_embeddings=np.asarray(recommended_fit["standardized_embeddings"], dtype=np.float32),
+            selected_k=np.asarray(selected_k, dtype=np.int32),
+            selected_seed=np.asarray(selected_seed, dtype=np.int32),
+        )
+
+        if scores:
+            ks = np.asarray([int(row["n_clusters"]) for row in scores], dtype=np.int32)
+            metric_panels = [
+                ("silhouette", "Silhouette", True),
+                ("gap", "Gap", True),
+                ("calinski_harabasz", "Calinski-Harabasz", True),
+                ("davies_bouldin", "Davies-Bouldin", False),
+                ("seed_ari_mean", "Seed ARI", True),
+                ("bootstrap_ari_mean", "Bootstrap ARI", True),
+                ("forced_repair_fraction_mean", "Forced Repair Fraction", False),
+                ("best_seed_inertia", "Best Inertia", False),
+            ]
+            fig, axes = plt.subplots(2, 4, figsize=(17, 7), constrained_layout=True)
+            for ax, (metric, title, higher) in zip(axes.ravel(), metric_panels, strict=True):
+                values = np.asarray(
+                    [
+                        np.nan if row.get(metric) is None else float(row.get(metric))
+                        for row in scores
+                    ],
+                    dtype=np.float64,
+                )
+                ax.plot(ks, values, marker="o", linewidth=1.8)
+                ax.axvline(selected_k, color="#d62728", linewidth=1.2, linestyle="--")
+                ax.set_title(f"{title} ({'higher' if higher else 'lower'} better)")
+                ax.set_xlabel("K")
+                ax.grid(alpha=0.25)
+            fig.suptitle("Comprehensive K Selection on Pooled Subregion Latent Embeddings")
+            fig.savefig(output_dir / "comprehensive_k_selection_scores.png", dpi=180)
+            plt.close(fig)
+
+        print(json.dumps(selection, indent=2, default=_json_default))
     elif args.command == "pool-inputs":
         summary = pool_h5ads_in_directory(
             input_dir=args.input_dir,

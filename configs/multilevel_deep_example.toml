@@ -29,6 +29,7 @@ allow_convex_hull_fallback = false
 subregion_feature_weight = 0.0
 subregion_feature_dims = 16
 subregion_construction_method = "deep_segmentation"
+subregion_clustering_method = "pooled_subregion_latent"
 deep_segmentation_knn = 12
 deep_segmentation_feature_dims = 16
 deep_segmentation_feature_weight = 1.0

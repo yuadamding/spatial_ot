@@ -1,14 +1,14 @@
 # spatial_ot
 
-`spatial_ot` is a compact research package for multilevel, shape-normalized semi-relaxed Wasserstein clustering on spatial subregions.
+`spatial_ot` is a compact research package for multilevel spatial subregion discovery and pooled feature-latent niche clustering.
 
 The active path realizes:
 
 - geometry-only OT normalization of each subregion into a shared reference domain
 - an optional learned deep feature adapter with fit/transform/save/load behavior
-- compressed empirical measures over canonical coordinates plus local features
-- cluster-specific shared heterogeneity atoms with subregion-specific mixture weights
-- semi-relaxed unbalanced OT matching with residual similarity alignment
+- raw member-cell feature-distribution latent embeddings for each fitted subregion, pooled across the cohort for niche clustering
+- cluster-specific shared heterogeneity atoms with subregion-specific mixture weights for downstream diagnostics
+- semi-relaxed unbalanced OT matching with residual similarity alignment after labels are fixed, used for atom/projection QC rather than primary label assignment
 - shape-leakage diagnostics so boundary geometry can be checked explicitly
 - cell-level projection and visualization from the fitted subregion clusters
 
@@ -48,7 +48,7 @@ Operational helpers live under `scripts/`; root-level shell wrappers were remove
 
 ## Multilevel OT — primary path
 
-`spatial_ot multilevel-ot` runs shape-normalized cluster-specific semi-relaxed Wasserstein clustering on subregions built from cell-level features.
+`spatial_ot multilevel-ot` forms spatial subregions, converts every subregion to a raw member-cell feature-distribution latent embedding, pools all subregion embeddings across the cohort, and clusters that pooled latent matrix.
 
 Prefer PCA, standardized marker expression, or another calibrated latent space. UMAP is exploratory only — its Euclidean geometry is not metric-preserving.
 
@@ -57,7 +57,7 @@ Prefer PCA, standardized marker expression, or another calibrated latent space. 
 The active method should be interpreted as three linked layers:
 
 - **Layer 1: subregion formation.** The biological unit is a mutually exclusive subregion: a small tissue region containing many cells, not a single cell or spot. Subregion boundaries can be coordinate-only, feature-aware, deep-graph refined, or supplied explicitly; realized size, shape, density, and minimum-size constraints are part of the method.
-- **Layer 2: subregion heterogeneity clustering.** Each subregion is represented as a compressed empirical measure over canonical within-subregion coordinates and cell-level features. Clustering compares the internal heterogeneity of these subregion measures with semi-relaxed OT against shared cluster atoms. This is the primary niche-clustering layer.
+- **Layer 2: subregion heterogeneity clustering.** Each subregion is represented by a raw member-cell feature-distribution latent embedding summarizing its internal cell-state distribution. The primary niche labels are learned by pooling all subregion embeddings across the cohort and clustering that matrix. This step does not use spatial coordinates, subregion centers, overlap edges, compressed OT supports, or OT candidate costs.
 - **Layer 3: projection and visualization.** Cell labels, spot-level latent fields, and sample maps are downstream projections from fitted subregion clusters. They are for interpretation and QC; they do not redefine the fitted subregion labels.
 
 Supported modes:
@@ -66,6 +66,8 @@ Supported modes:
 - **feature-aware data-driven subregion discovery**: set `--subregion-feature-weight > 0` to let the OT feature view influence generated boundaries; this is useful for sensitivity analysis but should be compared against the coordinate-only baseline because the same feature signal may later enter OT clustering
 - **deep graph segmentation**: set `--subregion-construction-method deep_segmentation` and provide a learned feature view, typically `--deep-feature-method autoencoder --deep-output-embedding context`; many coordinate seeds give full tissue coverage, then a spatial kNN boundary-refinement pass moves boundaries using learned embedding affinity before minimum-size merging
 - **explicit-region clustering**: pass `--region-obs-key` and ideally explicit geometry objects so boundary shape can be treated as nuisance
+
+The historical OT-dictionary assignment is still available as `--subregion-clustering-method ot_dictionary`, but the packaged cohort workflow uses `pooled_subregion_latent`. In the default workflow, OT atoms and spot-latent charts are downstream diagnostics/projections conditioned on the pooled-latent subregion labels.
 
 For generated subregions, membership and boundary shape are data-driven from the observed member cells. `--radius-um` is not a fixed ball/window membership radius in this mode; it is retained for compatibility and graph diagnostics. The realized subregion scale comes from `--basic-niche-size-um` or `--stride-um`, `--min-cells`, `--max-subregions`, spatial connectivity, and optionally feature-aware boundary refinement or deep graph segmentation. For explicit-region runs without masks or polygons, boundary-shape invariance is not guaranteed unless you intentionally opt into the observed-coordinate convex-hull fallback via `--allow-observed-hull-geometry`.
 
@@ -263,7 +265,7 @@ For multi-GPU restart parallelism in the outer `n_init` loop:
 - `SPATIAL_OT_PARALLEL_RESTARTS=auto` (spread independent restarts across GPUs when `n_init > 1`)
 - `SPATIAL_OT_CUDA_TARGET_VRAM_GB=50` (per-device working set, capped to `SPATIAL_OT_CUDA_MAX_TARGET_FRACTION`, default `0.9`, of visible memory)
 
-`scripts/run_deep_segmentation_cohort_gpu.sh` is the high-VRAM pooled cohort profile. On the local 10 GB RTX 3080 it defaults to `CUDA_TARGET_VRAM_GB=9`, `DEEP_HIDDEN_DIM=1024`, `DEEP_LAYERS=3`, `DEEP_LATENT_DIM=64`, and `DEEP_BATCH_SIZE=131072`, which probes around the 9 GB live-VRAM band while avoiding the OOM profiles seen above that size. Each CUDA run writes `runtime_memory_qc` into `summary.json` with the requested target and observed peak reserved memory.
+`scripts/run_deep_segmentation_cohort_gpu.sh` is the high-VRAM pooled cohort profile. On the local 10 GB RTX 3080 it defaults to `CUDA_TARGET_VRAM_GB=9`, `DEEP_HIDDEN_DIM=1024`, `DEEP_LAYERS=3`, `DEEP_LATENT_DIM=64`, and `DEEP_BATCH_SIZE=81920`, which reached the 9 GB live-VRAM band on the pooled cohort while leaving enough headroom for backward-pass transients. Each CUDA run writes `runtime_memory_qc` into `summary.json` with the requested target and observed peak reserved memory.
 
 When restart workers run in parallel, the Torch/BLAS thread budget is divided across them automatically. The multilevel OT and deep-feature implementations are still single-GPU within any one restart.
 
@@ -287,7 +289,7 @@ The Python API and TOML config still accept `auto`, `cuda`, `cuda:0`, `cuda:1`, 
 
 The niche-map command writes a paired figure for each sample: a subregion-wise filled polygon panel and a cell-wise inherited-label scatter panel. It reads `mlot_subregion_id` from `cells_multilevel_ot.h5ad` when available, otherwise recovers subregion membership from `spot_level_latent_multilevel_ot.npz`.
 
-Per-sample spot-latent fields are rendered as one whole-slide map per sample. The default stored spot latent is an OT-grounded atom-barycentric MDS chart: fitted cluster atom measures define global anchors using balanced OT distances between atom measures, and each spot/cell occurrence is placed inside its assigned cluster by barycentering that cluster's atom embedding with an entropy-calibrated OT atom posterior. Raw aligned x/y coordinates are not concatenated into the default chart features, and cluster-local variance is not forced to a fixed display radius. The supervised Fisher/local-PCA chart remains available only as an explicit diagnostic mode through `SPATIAL_OT_SPOT_LATENT_MODE=diagnostic_fisher_current`. The slide map uses global latent color scaling by default so colors are comparable across clusters and samples; within-cluster RGB rescaling is available only through `SPATIAL_OT_SPOT_LATENT_COLOR_SCALE=within_cluster` as a diagnostic. This remains diagnostic visualization, not independent validation of niche discovery; use MDS stress/eigenvalue diagnostics, posterior entropy, atom-argmax maps, effective-temperature summaries, stability, leakage, and held-out-sample checks before interpreting biological heterogeneity.
+Per-sample spot-latent fields are rendered as one whole-slide map per sample. The default stored spot latent is an OT-grounded atom-barycentric MDS chart: fitted cluster atom measures define global anchors using balanced OT distances between atom measures, and each spot/cell occurrence is placed inside its assigned cluster by barycentering that cluster's atom embedding with an entropy-calibrated OT atom posterior. Raw aligned x/y coordinates are not concatenated into the default chart features, and cluster-local variance is not forced to a fixed display radius. The supervised Fisher/local-PCA chart remains available only as an explicit diagnostic mode through `SPATIAL_OT_SPOT_LATENT_MODE=diagnostic_fisher_current`. The slide map uses global latent color scaling by default so colors are comparable across clusters and samples; within-cluster RGB rescaling is available only through `SPATIAL_OT_SPOT_LATENT_COLOR_SCALE=within_cluster` as a diagnostic. Anchor-distance fallbacks are recorded explicitly; any balanced/sinkhorn anchor OT fallback blocks within-niche latent-heterogeneity claims. This remains diagnostic visualization, not independent validation of niche discovery; use MDS stress/eigenvalue diagnostics, posterior entropy, atom-argmax maps, fixed/cost-gap/entropy-calibrated temperature summaries, stability, leakage, and held-out-sample checks before interpreting biological heterogeneity.
 
 ```bash
 ../.venv/bin/python -m spatial_ot plot-sample-spot-latent \
@@ -306,7 +308,7 @@ Multilevel OT writes:
 - `cells_multilevel_ot.h5ad`
 - `subregions_multilevel_ot.parquet`
 - `cluster_supports_multilevel_ot.npz`
-- `spot_level_latent_multilevel_ot.npz` with occurrence-level `(subregion, spot)` OT atom-barycentric latent coordinates plus posterior entropy, atom argmax, effective temperature, balanced-OT cluster-anchor distances, MDS diagnostics, cluster anchors, and atom embeddings
+- `spot_level_latent_multilevel_ot.npz` with occurrence-level `(subregion, spot)` OT atom-barycentric latent coordinates plus posterior entropy, atom argmax, effective/cost-gap/fixed temperature diagnostics, balanced-OT cluster-anchor distances, anchor-OT fallback diagnostics, MDS diagnostics, cluster anchors, and atom embeddings
 - `multilevel_ot_spatial_map.png`, `multilevel_ot_subregion_embedding.png`, `multilevel_ot_atom_layouts.png`
 - `summary.json`
 - `deep_feature_model.pt`, `deep_feature_history.csv`, `deep_feature_config.json` (when deep features are enabled)

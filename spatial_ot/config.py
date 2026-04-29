@@ -33,6 +33,7 @@ class MultilevelOTConfig:
     basic_niche_size_um: float | None = 50.0
     min_cells: int = 25
     max_subregions: int = 5000
+    max_subregion_area_um2: float | None = None
     lambda_x: float = 0.5
     lambda_y: float = 1.0
     geometry_eps: float = 0.03
@@ -59,6 +60,7 @@ class MultilevelOTConfig:
     deep_segmentation_feature_dims: int = 32
     deep_segmentation_feature_weight: float = 1.0
     deep_segmentation_spatial_weight: float = 0.05
+    subregion_clustering_method: str = "pooled_subregion_latent"
     shape_diagnostics: bool = True
     shape_leakage_permutations: int = 64
     compute_spot_latent: bool = True
@@ -195,6 +197,8 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.min_cells must be >= 1")
     if config.ot.max_subregions != 0 and config.ot.max_subregions < 1:
         raise ValueError("ot.max_subregions must be positive or 0")
+    if config.ot.max_subregion_area_um2 is not None and config.ot.max_subregion_area_um2 <= 0:
+        config.ot.max_subregion_area_um2 = None
     if config.ot.lambda_x < 0 or config.ot.lambda_y < 0:
         raise ValueError("ot.lambda_x and ot.lambda_y must be non-negative")
     if config.ot.lambda_x == 0 and config.ot.lambda_y == 0:
@@ -224,6 +228,13 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.deep_segmentation_feature_weight and ot.deep_segmentation_spatial_weight must be >= 0")
     if config.ot.deep_segmentation_feature_weight == 0 and config.ot.deep_segmentation_spatial_weight == 0:
         raise ValueError("at least one deep segmentation edge weight must be positive")
+    valid_clustering_methods = {"pooled_subregion_latent", "ot_dictionary"}
+    config.ot.subregion_clustering_method = str(config.ot.subregion_clustering_method).strip().lower()
+    if config.ot.subregion_clustering_method not in valid_clustering_methods:
+        raise ValueError(
+            "ot.subregion_clustering_method must be one of "
+            f"{sorted(valid_clustering_methods)}, got '{config.ot.subregion_clustering_method}'"
+        )
     if config.ot.geometry_eps <= 0 or config.ot.ot_eps <= 0:
         raise ValueError("ot.geometry_eps and ot.ot_eps must be > 0")
     if config.ot.rho <= 0:

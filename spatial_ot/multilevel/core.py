@@ -42,8 +42,10 @@ from .geometry import (
 from .gpu_ot import sinkhorn_semirelaxed_unbalanced_log_torch
 from .model_selection import (
     effective_min_cluster_size,
+    fit_kmeans_on_latent_embeddings,
     repair_labels_to_minimum_size,
     sanitize_candidate_n_clusters,
+    select_k_from_latent_embeddings,
     select_k_from_ot_landmark_costs,
 )
 from .numerics import pairwise_sqdist_array as _pairwise_sqdist_array
@@ -79,6 +81,18 @@ def _cpu_sinkhorn_max_iter() -> int:
 
 def _cpu_sinkhorn_tol() -> float:
     return _env_float("SPATIAL_OT_CPU_SINKHORN_TOL", 1e-8)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
 
 
 def _make_optimization_measures(measures: list[SubregionMeasure]) -> list[OptimizationMeasure]:
@@ -378,6 +392,84 @@ def _measure_summary(measure: SubregionMeasure) -> np.ndarray:
     mean = np.average(z, axis=0, weights=measure.weights)
     var = np.average((z - mean) ** 2, axis=0, weights=measure.weights)
     return np.hstack([mean, np.sqrt(np.maximum(var, 0.0))]).astype(np.float32)
+
+
+def _feature_distribution_latent_embedding(values: np.ndarray, weights: np.ndarray | None = None) -> np.ndarray:
+    y = np.asarray(values, dtype=np.float64)
+    if y.ndim != 2:
+        raise ValueError("feature values must be a 2D matrix.")
+    if y.shape[0] == 0:
+        raise ValueError("feature values must contain at least one row.")
+    if weights is None:
+        weights_arr = np.full(y.shape[0], 1.0 / float(y.shape[0]), dtype=np.float64)
+    else:
+        weights_arr = _normalize_hist(np.asarray(weights, dtype=np.float64))
+        if weights_arr.shape[0] != y.shape[0]:
+            raise ValueError("feature weights must have one value per feature row.")
+    mean = np.average(y, axis=0, weights=weights_arr)
+    centered = y - mean
+    std = np.sqrt(np.maximum(np.average(centered * centered, axis=0, weights=weights_arr), 0.0))
+    return np.hstack([mean, std]).astype(np.float32)
+
+
+def _measure_feature_latent_embedding(measure: SubregionMeasure) -> np.ndarray:
+    return _feature_distribution_latent_embedding(measure.features, measure.weights)
+
+
+def _member_feature_latent_embedding(features: np.ndarray, members: np.ndarray) -> np.ndarray:
+    member_idx = np.asarray(members, dtype=np.int64)
+    if member_idx.ndim != 1 or member_idx.size == 0:
+        raise ValueError("subregion members must be a non-empty 1D vector.")
+    return _feature_distribution_latent_embedding(np.asarray(features, dtype=np.float32)[member_idx])
+
+
+def _build_subregion_latent_embeddings_from_members(
+    features: np.ndarray,
+    subregion_members: list[np.ndarray],
+) -> np.ndarray:
+    if not subregion_members:
+        return np.zeros((0, 0), dtype=np.float32)
+    x = np.asarray(features, dtype=np.float32)
+    n_regions = int(len(subregion_members))
+    if x.ndim != 2:
+        raise ValueError("features must be a 2D matrix.")
+    labels = np.full(int(x.shape[0]), -1, dtype=np.int32)
+    for rid, members in enumerate(subregion_members):
+        member_idx = np.asarray(members, dtype=np.int64)
+        if member_idx.ndim != 1 or member_idx.size == 0:
+            raise ValueError("subregion members must be non-empty 1D vectors.")
+        labels[member_idx] = int(rid)
+    valid = labels >= 0
+    if not np.any(valid):
+        return np.zeros((n_regions, int(x.shape[1]) * 2), dtype=np.float32)
+    region_ids = labels[valid].astype(np.int64, copy=False)
+    counts = np.bincount(region_ids, minlength=n_regions).astype(np.float64)
+    sums = np.zeros((n_regions, int(x.shape[1])), dtype=np.float64)
+    sums_sq = np.zeros_like(sums)
+    values = x[valid].astype(np.float64, copy=False)
+    for dim in range(int(x.shape[1])):
+        col = values[:, dim]
+        sums[:, dim] = np.bincount(region_ids, weights=col, minlength=n_regions)
+        sums_sq[:, dim] = np.bincount(region_ids, weights=col * col, minlength=n_regions)
+    denom = np.maximum(counts[:, None], 1.0)
+    mean = sums / denom
+    var = np.maximum(sums_sq / denom - mean * mean, 0.0)
+    latent = np.hstack([mean, np.sqrt(var)]).astype(np.float32)
+    latent[counts <= 0] = 0.0
+    return latent
+
+
+def _build_subregion_latent_embeddings(measures: list[SubregionMeasure]) -> np.ndarray:
+    """Return feature-only summaries for compressed measures.
+
+    This helper is retained for diagnostics and backwards-compatible internal
+    uses. Primary pooled-latent clustering uses raw member-cell features through
+    ``_build_subregion_latent_embeddings_from_members`` so the label step cannot
+    inherit spatial effects from coordinate-aware measure compression.
+    """
+    if not measures:
+        return np.zeros((0, 0), dtype=np.float32)
+    return np.vstack([_measure_feature_latent_embedding(measure) for measure in measures]).astype(np.float32)
 
 
 def _initialize_cluster_atoms(
@@ -2335,6 +2427,456 @@ def _fit_restart_bundles(
     return restart_results, restart_summaries, best_bundle
 
 
+def _fit_fixed_label_atom_dictionary(
+    *,
+    measures: list[OptimizationMeasure],
+    labels: np.ndarray,
+    n_clusters: int,
+    atoms_per_cluster: int,
+    lambda_x: float,
+    lambda_y: float,
+    ot_eps: float,
+    rho: float,
+    align_iters: int,
+    allow_reflection: bool,
+    allow_scale: bool,
+    cost_scale_x: float,
+    cost_scale_y: float,
+    min_scale: float,
+    max_scale: float,
+    scale_penalty: float,
+    shift_penalty: float,
+    max_iter: int,
+    tol: float,
+    seed: int,
+    compute_device: torch.device,
+) -> dict[str, object]:
+    fixed_labels = np.asarray(labels, dtype=np.int32)
+    atom_coords, atom_features, betas = _initialize_cluster_atoms(
+        measures=measures,
+        labels=fixed_labels,
+        n_clusters=int(n_clusters),
+        atoms_per_cluster=int(atoms_per_cluster),
+        lambda_x=float(lambda_x),
+        lambda_y=float(lambda_y),
+        random_state=int(seed),
+    )
+    objective_history: list[dict[str, float]] = []
+    final_plans: list[np.ndarray] = []
+    final_transforms: list[dict[str, np.ndarray | float]] = []
+    final_thetas: list[np.ndarray] = []
+    final_costs = np.zeros(len(measures), dtype=np.float32)
+    final_eps = np.full(len(measures), float(ot_eps), dtype=np.float32)
+    final_fallback = np.zeros(len(measures), dtype=bool)
+
+    for iteration in range(max(int(max_iter), 1)):
+        prev_coords = atom_coords.copy()
+        prev_features = atom_features.copy()
+        plans, transforms, thetas, assigned_costs, assigned_eps, assigned_fallback = _compute_assigned_artifacts(
+            measures=measures,
+            labels=fixed_labels,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            betas=betas,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            eps=ot_eps,
+            rho=rho,
+            align_iters=align_iters,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            scale_penalty=scale_penalty,
+            shift_penalty=shift_penalty,
+            compute_device=compute_device,
+        )
+        atom_coords, atom_features, betas = _update_atoms(
+            measures=measures,
+            labels=fixed_labels,
+            plans=plans,
+            transforms=transforms,
+            thetas=thetas,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            beta_smoothing=1e-3,
+            random_state=int(seed) + int(iteration),
+        )
+        coord_shift = _relative_change(atom_coords, prev_coords)
+        feat_shift = _relative_change(atom_features, prev_features)
+        objective_history.append(
+            {
+                "iteration": int(iteration + 1),
+                "mean_objective": float(np.mean(assigned_costs)),
+                "mean_transport_objective": float(np.mean(assigned_costs)),
+                "mean_overlap_consistency_penalty": 0.0,
+                "label_change_rate": 0.0,
+                "coord_shift": coord_shift,
+                "feature_shift": feat_shift,
+                "mean_assignment_margin": float("nan"),
+                "forced_label_count": 0,
+                "assigned_ot_fallback_fraction": float(np.mean(np.asarray(assigned_fallback, dtype=np.float32))),
+            }
+        )
+        final_plans = plans
+        final_transforms = transforms
+        final_thetas = thetas
+        final_costs = np.asarray(assigned_costs, dtype=np.float32)
+        final_eps = np.asarray(assigned_eps, dtype=np.float32)
+        final_fallback = np.asarray(assigned_fallback, dtype=bool)
+        if max(coord_shift, feat_shift) < float(tol):
+            break
+
+    final_plans, final_transforms, final_thetas, final_costs, final_eps, final_fallback = _compute_assigned_artifacts(
+        measures=measures,
+        labels=fixed_labels,
+        atom_coords=atom_coords,
+        atom_features=atom_features,
+        betas=betas,
+        lambda_x=lambda_x,
+        lambda_y=lambda_y,
+        eps=ot_eps,
+        rho=rho,
+        align_iters=align_iters,
+        allow_reflection=allow_reflection,
+        allow_scale=allow_scale,
+        cost_scale_x=cost_scale_x,
+        cost_scale_y=cost_scale_y,
+        min_scale=min_scale,
+        max_scale=max_scale,
+        scale_penalty=scale_penalty,
+        shift_penalty=shift_penalty,
+        compute_device=compute_device,
+    )
+    return {
+        "atom_coords": atom_coords.astype(np.float32),
+        "atom_features": atom_features.astype(np.float32),
+        "betas": betas.astype(np.float32),
+        "plans": final_plans,
+        "transforms": final_transforms,
+        "thetas": final_thetas,
+        "assigned_costs": np.asarray(final_costs, dtype=np.float32),
+        "assigned_effective_eps": np.asarray(final_eps, dtype=np.float32),
+        "assigned_used_fallback": np.asarray(final_fallback, dtype=bool),
+        "objective_history": objective_history,
+        "runtime_memory": _runtime_memory_snapshot(compute_device),
+    }
+
+
+def _cell_projection_from_subregion_probabilities(
+    *,
+    n_cells: int,
+    subregion_members: list[np.ndarray],
+    subregion_labels: np.ndarray,
+    subregion_probs: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    labels = np.full(int(n_cells), -1, dtype=np.int32)
+    probs = np.zeros((int(n_cells), int(subregion_probs.shape[1])), dtype=np.float32)
+    for rid, members in enumerate(subregion_members):
+        member_idx = np.asarray(members, dtype=np.int64)
+        if member_idx.size == 0:
+            continue
+        labels[member_idx] = int(subregion_labels[int(rid)])
+        probs[member_idx] = np.asarray(subregion_probs[int(rid)], dtype=np.float32)
+    return labels, probs
+
+
+def _cluster_feature_centroids_from_subregions(
+    subregion_latent_embeddings: np.ndarray,
+    labels: np.ndarray,
+    *,
+    n_clusters: int,
+    feature_dim: int,
+) -> np.ndarray:
+    latent = np.asarray(subregion_latent_embeddings, dtype=np.float32)
+    label_arr = np.asarray(labels, dtype=np.int32)
+    feature_dim = int(feature_dim)
+    if latent.ndim != 2 or latent.shape[1] < feature_dim:
+        return np.zeros((int(n_clusters), feature_dim), dtype=np.float32)
+    mean_features = latent[:, :feature_dim]
+    centroids = np.zeros((int(n_clusters), feature_dim), dtype=np.float32)
+    global_mean = (
+        mean_features.mean(axis=0).astype(np.float32)
+        if mean_features.size
+        else np.zeros(feature_dim, dtype=np.float32)
+    )
+    for cid in range(int(n_clusters)):
+        idx = label_arr == int(cid)
+        centroids[cid] = mean_features[idx].mean(axis=0).astype(np.float32) if np.any(idx) else global_mean
+    return centroids
+
+
+def _fast_pooled_latent_only_threshold() -> int:
+    return max(_env_int("SPATIAL_OT_FAST_POOLED_LATENT_MAX_SUBREGIONS", 50000), 1)
+
+
+def _fit_pooled_latent_only_result(
+    *,
+    features: np.ndarray,
+    centers_um: np.ndarray,
+    subregion_members: list[np.ndarray],
+    n_clusters: int,
+    atoms_per_cluster: int,
+    n_init: int,
+    auto_n_clusters: bool,
+    candidate_ks: tuple[int, ...],
+    auto_k_max_score_subregions: int,
+    auto_k_gap_references: int,
+    min_subregions_per_cluster: int,
+    requested_min_subregions_per_cluster: int,
+    ot_eps: float,
+    seed: int,
+    basic_niche_size_um: float | None,
+    used_basic_niches: bool,
+) -> MultilevelOTResult:
+    _progress(
+        "using fast pooled-subregion-latent-only fit; skipping fixed-label OT atom diagnostics "
+        "because the hard area cap produced a very large subregion set"
+    )
+    n_subregions = int(len(subregion_members))
+    feature_dim = int(np.asarray(features).shape[1])
+    subregion_latent_embeddings = _build_subregion_latent_embeddings_from_members(features, subregion_members)
+    auto_k_selection: dict[str, object] | None = None
+    selected_n_clusters = int(n_clusters)
+    if bool(auto_n_clusters):
+        _progress(
+            "automatic K selection enabled on pooled subregion latent embeddings; candidate K="
+            + ",".join(str(k) for k in candidate_ks)
+        )
+        auto_k_selection = select_k_from_latent_embeddings(
+            subregion_latent_embeddings,
+            candidate_n_clusters=candidate_ks,
+            fallback_n_clusters=int(n_clusters),
+            max_score_subregions=int(auto_k_max_score_subregions),
+            gap_references=int(auto_k_gap_references),
+            min_cluster_size=int(min_subregions_per_cluster),
+            random_state=int(seed),
+        )
+        selected_n_clusters = int(auto_k_selection["selected_k"])
+        auto_k_selection.update(
+            {
+                "requested_n_clusters": int(n_clusters),
+                "selection_clustering_method": "pooled_subregion_latent",
+                "pilot_n_clusters": None,
+                "pilot_n_init": None,
+                "pilot_max_iter": None,
+                "final_refit_n_init": int(n_init),
+                "requested_min_subregions_per_cluster": int(requested_min_subregions_per_cluster),
+                "reused_pilot_fit_for_final": False,
+                "fast_pooled_latent_only": True,
+            }
+        )
+        _progress(
+            f"automatic K selection chose K={selected_n_clusters} "
+            f"from votes={auto_k_selection.get('criterion_votes', {})}"
+        )
+
+    _progress(f"fitting selected K={selected_n_clusters} pooled subregion latent clusters")
+    latent_fit = fit_kmeans_on_latent_embeddings(
+        subregion_latent_embeddings,
+        n_clusters=int(selected_n_clusters),
+        n_init=max(int(n_init), 1),
+        min_cluster_size=int(min_subregions_per_cluster),
+        random_state=int(seed),
+    )
+    _progress("pooled subregion latent clustering finished; assembling large-run result")
+    labels = np.asarray(latent_fit["labels"], dtype=np.int32)
+    final_argmin_labels = np.asarray(latent_fit["argmin_labels"], dtype=np.int32)
+    final_costs = np.asarray(latent_fit["costs"], dtype=np.float32)
+    subregion_cluster_probs = _softmax_over_negative_costs(
+        final_costs,
+        temperature=max(float(np.std(final_costs)), 1e-3),
+    )
+    cell_labels, cell_probs = _cell_projection_from_subregion_probabilities(
+        n_cells=int(features.shape[0]),
+        subregion_members=subregion_members,
+        subregion_labels=labels,
+        subregion_probs=subregion_cluster_probs,
+    )
+
+    atom_count = max(int(atoms_per_cluster), 1)
+    cluster_feature_centroids = _cluster_feature_centroids_from_subregions(
+        subregion_latent_embeddings,
+        labels,
+        n_clusters=int(selected_n_clusters),
+        feature_dim=feature_dim,
+    )
+    atom_coords = np.zeros((int(selected_n_clusters), atom_count, 2), dtype=np.float32)
+    atom_features = np.repeat(cluster_feature_centroids[:, None, :], atom_count, axis=1).astype(np.float32)
+    betas = np.full((int(selected_n_clusters), atom_count), 1.0 / float(atom_count), dtype=np.float32)
+    cluster_supports = np.concatenate([atom_coords, atom_features], axis=2).astype(np.float32)
+
+    standardized = np.asarray(latent_fit.get("standardized_embeddings", subregion_latent_embeddings), dtype=np.float32)
+    measure_summaries = standardized.astype(np.float32)
+    atom_weights = standardized[:, : min(standardized.shape[1], 32)].astype(np.float32)
+    if atom_weights.shape[1] == 0:
+        atom_weights = np.zeros((n_subregions, 1), dtype=np.float32)
+
+    assigned = final_costs[np.arange(n_subregions, dtype=np.int64), labels.astype(np.int64)].astype(np.float32)
+    spot_latent = empty_spot_level_latent_charts(
+        n_cells=int(features.shape[0]),
+        atoms_per_cluster=atom_count,
+        n_clusters=int(selected_n_clusters),
+    )
+    restart_summaries = [
+        {
+            "run": 0,
+            "seed": int(seed),
+            "objective": float(latent_fit["inertia"]),
+            "n_iter": 0,
+            "mean_assigned_cost": float(np.mean(assigned)) if assigned.size else 0.0,
+            "mean_assigned_transport_cost": 0.0,
+            "mean_assigned_overlap_penalty": 0.0,
+            "device": "cpu",
+            "assigned_ot_fallback_fraction": 0.0,
+            "candidate_ot_fallback_fraction": 0.0,
+            "initial_min_size_forced_label_count": int(np.asarray(latent_fit["forced_label_mask"], dtype=bool).sum()),
+            "final_min_size_forced_label_count": int(np.asarray(latent_fit["forced_label_mask"], dtype=bool).sum()),
+            "min_subregions_per_cluster": int(
+                effective_min_cluster_size(n_subregions, int(selected_n_clusters), int(min_subregions_per_cluster))
+            ),
+            "runtime_memory": _runtime_memory_snapshot(_resolve_compute_device("cpu")),
+            "label_assignment_source": "pooled_subregion_latent_embeddings",
+            "fast_pooled_latent_only": True,
+            "fixed_label_ot_atom_diagnostics": "skipped_large_area_capped_partition",
+        }
+    ]
+    zero_sub = np.zeros(n_subregions, dtype=np.float32)
+    false_sub = np.zeros(n_subregions, dtype=bool)
+    candidate_eps = np.full((n_subregions, int(selected_n_clusters)), float(ot_eps), dtype=np.float32)
+    candidate_fallback = np.zeros((n_subregions, int(selected_n_clusters)), dtype=bool)
+    subregion_basic_niche_ids = [np.zeros(0, dtype=np.int32) for _ in range(n_subregions)]
+    return MultilevelOTResult(
+        basic_niche_size_um=float(basic_niche_size_um) if used_basic_niches and basic_niche_size_um is not None else None,
+        basic_niche_centers_um=np.zeros((0, 2), dtype=np.float32),
+        basic_niche_members=[],
+        subregion_basic_niche_ids=subregion_basic_niche_ids,
+        subregion_centers_um=np.asarray(centers_um, dtype=np.float32),
+        subregion_members=[np.asarray(members, dtype=np.int32) for members in subregion_members],
+        subregion_argmin_labels=final_argmin_labels,
+        subregion_forced_label_mask=np.asarray(latent_fit["forced_label_mask"], dtype=bool),
+        subregion_geometry_point_counts=np.asarray([len(members) for members in subregion_members], dtype=np.int32),
+        subregion_geometry_sources=["observed_point_cloud_fast_area_capped"] * n_subregions,
+        subregion_geometry_used_fallback=np.zeros(n_subregions, dtype=bool),
+        subregion_normalizer_radius_p95=np.full(n_subregions, np.nan, dtype=np.float32),
+        subregion_normalizer_radius_max=np.full(n_subregions, np.nan, dtype=np.float32),
+        subregion_normalizer_interpolation_residual=np.full(n_subregions, np.nan, dtype=np.float32),
+        subregion_cluster_labels=labels,
+        subregion_cluster_probs=subregion_cluster_probs.astype(np.float32),
+        subregion_cluster_costs=final_costs.astype(np.float32),
+        subregion_cluster_transport_costs=np.zeros_like(final_costs, dtype=np.float32),
+        subregion_cluster_overlap_penalties=np.zeros_like(final_costs, dtype=np.float32),
+        subregion_atom_weights=atom_weights.astype(np.float32),
+        subregion_measure_summaries=measure_summaries.astype(np.float32),
+        subregion_latent_embeddings=subregion_latent_embeddings.astype(np.float32),
+        subregion_clustering_method="pooled_subregion_latent",
+        subregion_clustering_uses_spatial=False,
+        subregion_assigned_effective_eps=np.full(n_subregions, float(ot_eps), dtype=np.float32),
+        subregion_assigned_used_ot_fallback=false_sub,
+        subregion_candidate_effective_eps_matrix=candidate_eps,
+        subregion_candidate_used_ot_fallback_matrix=candidate_fallback,
+        subregion_assigned_geometry_transport_costs=zero_sub,
+        subregion_assigned_feature_transport_costs=assigned,
+        subregion_assigned_transform_penalties=zero_sub,
+        subregion_assigned_overlap_consistency_penalties=zero_sub,
+        subregion_assigned_transform_rotation_deg=zero_sub,
+        subregion_assigned_transform_reflection=false_sub,
+        subregion_assigned_transform_scale=np.ones(n_subregions, dtype=np.float32),
+        subregion_assigned_transform_translation_norm=zero_sub,
+        cluster_supports=cluster_supports,
+        cluster_atom_coords=atom_coords,
+        cluster_atom_features=atom_features,
+        cluster_prototype_weights=betas,
+        cell_feature_cluster_probs=cell_probs,
+        cell_context_cluster_probs=cell_probs,
+        cell_cluster_probs=cell_probs,
+        cell_cluster_labels=cell_labels,
+        spot_latent_cell_indices=spot_latent["spot_latent_cell_indices"].astype(np.int32),
+        spot_latent_subregion_ids=spot_latent["spot_latent_subregion_ids"].astype(np.int32),
+        spot_latent_cluster_labels=spot_latent["spot_latent_cluster_labels"].astype(np.int32),
+        spot_latent_coords=spot_latent["spot_latent_coords"].astype(np.float32),
+        spot_latent_within_coords=spot_latent["spot_latent_within_coords"].astype(np.float32),
+        spot_latent_cluster_anchors=spot_latent["spot_latent_cluster_anchors"].astype(np.float32),
+        spot_latent_atom_embedding=spot_latent["spot_latent_atom_embedding"].astype(np.float32),
+        spot_latent_aligned_coords=spot_latent["spot_latent_aligned_coords"].astype(np.float32),
+        spot_latent_cluster_probs=spot_latent["spot_latent_cluster_probs"].astype(np.float32),
+        spot_latent_atom_confidence=spot_latent["spot_latent_atom_confidence"].astype(np.float32),
+        spot_latent_posterior_entropy=spot_latent["spot_latent_posterior_entropy"].astype(np.float32),
+        spot_latent_normalized_posterior_entropy=spot_latent["spot_latent_normalized_posterior_entropy"].astype(np.float32),
+        spot_latent_atom_argmax=spot_latent["spot_latent_atom_argmax"].astype(np.int32),
+        spot_latent_temperature_used=spot_latent["spot_latent_temperature_used"].astype(np.float32),
+        spot_latent_temperature_cost_gap=spot_latent["spot_latent_temperature_cost_gap"].astype(np.float32),
+        spot_latent_temperature_fixed=spot_latent["spot_latent_temperature_fixed"].astype(np.float32),
+        spot_latent_weights=spot_latent["spot_latent_weights"].astype(np.float32),
+        spot_latent_atom_posteriors=spot_latent["spot_latent_atom_posteriors"].astype(np.float32),
+        spot_latent_posterior_entropy_cost_gap=spot_latent["spot_latent_posterior_entropy_cost_gap"].astype(np.float32),
+        spot_latent_normalized_posterior_entropy_cost_gap=spot_latent["spot_latent_normalized_posterior_entropy_cost_gap"].astype(np.float32),
+        spot_latent_posterior_entropy_fixed=spot_latent["spot_latent_posterior_entropy_fixed"].astype(np.float32),
+        spot_latent_normalized_posterior_entropy_fixed=spot_latent["spot_latent_normalized_posterior_entropy_fixed"].astype(np.float32),
+        spot_latent_cluster_anchor_distance=spot_latent["spot_latent_cluster_anchor_distance"].astype(np.float32),
+        spot_latent_cluster_anchor_ot_fallback_matrix=spot_latent["spot_latent_cluster_anchor_ot_fallback_matrix"].astype(bool),
+        spot_latent_cluster_anchor_solver_status_matrix=spot_latent["spot_latent_cluster_anchor_solver_status_matrix"].astype(np.int8),
+        spot_latent_cluster_anchor_ot_fallback_fraction=float(
+            spot_latent["spot_latent_cluster_anchor_ot_fallback_fraction"].item()
+        ),
+        spot_latent_atom_mds_stress=spot_latent["spot_latent_atom_mds_stress"].astype(np.float32),
+        spot_latent_atom_mds_positive_eigenvalue_mass_2d=spot_latent[
+            "spot_latent_atom_mds_positive_eigenvalue_mass_2d"
+        ].astype(np.float32),
+        spot_latent_atom_mds_negative_eigenvalue_mass_fraction=spot_latent[
+            "spot_latent_atom_mds_negative_eigenvalue_mass_fraction"
+        ].astype(np.float32),
+        cell_spot_latent_unweighted_coords=spot_latent["cell_spot_latent_unweighted_coords"].astype(np.float32),
+        cell_spot_latent_confidence_weighted_coords=spot_latent[
+            "cell_spot_latent_confidence_weighted_coords"
+        ].astype(np.float32),
+        cell_spot_latent_coords=spot_latent["cell_spot_latent_coords"].astype(np.float32),
+        cell_spot_latent_cluster_labels=spot_latent["cell_spot_latent_cluster_labels"].astype(np.int32),
+        cell_spot_latent_weights=spot_latent["cell_spot_latent_weights"].astype(np.float32),
+        cell_spot_latent_posterior_entropy=spot_latent["cell_spot_latent_posterior_entropy"].astype(np.float32),
+        spot_latent_mode=str(spot_latent["spot_latent_mode"].item()),
+        spot_latent_chart_learning_mode=str(spot_latent["spot_latent_chart_learning_mode"].item()),
+        spot_latent_projection_mode=str(spot_latent["spot_latent_projection_mode"].item()),
+        spot_latent_validation_role=str(spot_latent["spot_latent_validation_role"].item()),
+        spot_latent_global_within_scale=float(spot_latent["spot_latent_global_within_scale"].item()),
+        spot_latent_assignment_temperature=float(spot_latent["spot_latent_assignment_temperature"].item()),
+        spot_latent_temperature_mode=str(spot_latent["spot_latent_temperature_mode"].item()),
+        spot_latent_cluster_anchor_distance_method=str(spot_latent["spot_latent_cluster_anchor_distance_method"].item()),
+        spot_latent_cluster_anchor_distance_requested_method=str(
+            spot_latent["spot_latent_cluster_anchor_distance_requested_method"].item()
+        ),
+        spot_latent_cluster_anchor_distance_effective_method=str(
+            spot_latent["spot_latent_cluster_anchor_distance_effective_method"].item()
+        ),
+        spot_latent_cluster_mds_stress=float(spot_latent["spot_latent_cluster_mds_stress"].item()),
+        spot_latent_cluster_mds_positive_eigenvalue_mass_2d=float(
+            spot_latent["spot_latent_cluster_mds_positive_eigenvalue_mass_2d"].item()
+        ),
+        spot_latent_cluster_mds_negative_eigenvalue_mass_fraction=float(
+            spot_latent["spot_latent_cluster_mds_negative_eigenvalue_mass_fraction"].item()
+        ),
+        cost_scale_x=1.0,
+        cost_scale_y=1.0,
+        objective_history=[
+            {
+                "iteration": 0.0,
+                "objective": float(latent_fit["inertia"]),
+                "label_assignment_source": "pooled_subregion_latent_embeddings",
+                "fast_pooled_latent_only": 1.0,
+            }
+        ],
+        selected_restart=0,
+        restart_summaries=restart_summaries,
+        min_subregions_per_cluster=int(requested_min_subregions_per_cluster),
+        effective_min_subregions_per_cluster=int(
+            effective_min_cluster_size(n_subregions, int(selected_n_clusters), int(min_subregions_per_cluster))
+        ),
+        auto_k_selection=auto_k_selection,
+    )
+
+
 def fit_multilevel_ot(
     features: np.ndarray,
     coords_um: np.ndarray,
@@ -2372,6 +2914,7 @@ def fit_multilevel_ot(
     overlap_jaccard_min: float = 0.15,
     overlap_contrast_scale: float = 1.0,
     basic_niche_size_um: float | None = 200.0,
+    max_subregion_area_um2: float | None = None,
     subregion_construction_method: str = "data_driven",
     subregion_feature_weight: float = 0.0,
     subregion_feature_dims: int = 16,
@@ -2380,6 +2923,7 @@ def fit_multilevel_ot(
     deep_segmentation_feature_weight: float = 1.0,
     deep_segmentation_spatial_weight: float = 0.05,
     compute_spot_latent: bool = True,
+    subregion_clustering_method: str = "pooled_subregion_latent",
     auto_n_clusters: bool = False,
     candidate_n_clusters: tuple[int, ...] | list[int] | str | None = None,
     auto_k_max_score_subregions: int = 2500,
@@ -2406,6 +2950,7 @@ def fit_multilevel_ot(
         basic_niche_size_um=basic_niche_size_um,
         min_cells=min_cells,
         max_subregions=max_subregions,
+        max_subregion_area_um2=max_subregion_area_um2,
         lambda_x=lambda_x,
         lambda_y=lambda_y,
         geometry_eps=geometry_eps,
@@ -2433,6 +2978,9 @@ def fit_multilevel_ot(
     construction_method = str(subregion_construction_method).strip().lower()
     if construction_method not in {"data_driven", "deep_segmentation"}:
         raise ValueError("subregion_construction_method must be 'data_driven' or 'deep_segmentation'.")
+    clustering_method = str(subregion_clustering_method).strip().lower()
+    if clustering_method not in {"pooled_subregion_latent", "ot_dictionary"}:
+        raise ValueError("subregion_clustering_method must be 'pooled_subregion_latent' or 'ot_dictionary'.")
     subregion_feature_weight = max(0.0, float(subregion_feature_weight))
     subregion_feature_dims = max(0, int(subregion_feature_dims))
 
@@ -2460,7 +3008,8 @@ def fit_multilevel_ot(
                 _progress(
                     "building mutually exclusive deep-graph segmentation subregions "
                     f"(target_scale={target_scale_for_subregions:g}um, knn={int(deep_segmentation_knn)}, "
-                    f"cap={int(max_subregions)}; learned embedding affinity drives boundary cuts)"
+                    f"cap={int(max_subregions)}, max_area={max_subregion_area_um2}; "
+                    "learned embedding affinity drives boundary cuts)"
                 )
                 used_basic_niches = True
                 (
@@ -2475,6 +3024,7 @@ def fit_multilevel_ot(
                     target_scale_um=target_scale_for_subregions,
                     min_cells=min_cells,
                     max_subregions=max_subregions,
+                    max_area_um2=max_subregion_area_um2,
                     segmentation_knn=int(deep_segmentation_knn),
                     segmentation_feature_dims=int(deep_segmentation_feature_dims),
                     segmentation_feature_weight=float(deep_segmentation_feature_weight),
@@ -2486,7 +3036,8 @@ def fit_multilevel_ot(
                 _progress(
                     "building mutually exclusive data-driven subregions "
                     f"(target_scale={float(basic_niche_size_um):g}um, stride={float(stride_um):g}um, "
-                    f"feature_weight={subregion_feature_weight:g}, cap={int(max_subregions)}; "
+                    f"feature_weight={subregion_feature_weight:g}, cap={int(max_subregions)}, "
+                    f"max_area={max_subregion_area_um2}; "
                     "radius_um is not a membership radius)"
                 )
                 used_basic_niches = True
@@ -2506,6 +3057,7 @@ def fit_multilevel_ot(
                     partition_features=features,
                     partition_feature_weight=subregion_feature_weight,
                     partition_feature_dims=subregion_feature_dims,
+                    max_area_um2=max_subregion_area_um2,
                     seed=seed,
                 )
                 proposal_region_geometries = _region_geometries_from_observed_points(subregion_members)
@@ -2513,7 +3065,7 @@ def fit_multilevel_ot(
                 _progress(
                     "building mutually exclusive data-driven subregions "
                     f"(target_scale={float(stride_um):g}um, feature_weight={subregion_feature_weight:g}, "
-                    f"cap={int(max_subregions)}; "
+                    f"cap={int(max_subregions)}, max_area={max_subregion_area_um2}; "
                     "radius_um is not a membership radius); geometry is data-driven"
                 )
                 (
@@ -2528,6 +3080,7 @@ def fit_multilevel_ot(
                     stride_um=stride_um,
                     min_cells=min_cells,
                     max_subregions=max_subregions,
+                    max_area_um2=max_subregion_area_um2,
                     partition_features=features,
                     partition_feature_weight=subregion_feature_weight,
                     partition_feature_dims=subregion_feature_dims,
@@ -2558,20 +3111,21 @@ def fit_multilevel_ot(
     except RuntimeError as exc:
         raise ValueError("Subregion memberships must be mutually exclusive and contain valid non-empty cell indices.") from exc
 
-    keep_idx = [idx for idx, members in enumerate(subregion_members) if np.asarray(members).size >= int(min_cells)]
-    if len(keep_idx) != len(subregion_members):
-        if not keep_idx:
-            raise RuntimeError("No valid subregions remain after applying min_cells.")
-        keep_arr = np.asarray(keep_idx, dtype=np.int32)
-        if centers_um is not None:
-            centers_um = centers_um[keep_arr]
-        subregion_members = [subregion_members[int(idx)] for idx in keep_idx]
-        subregion_basic_niche_ids = [subregion_basic_niche_ids[int(idx)] for idx in keep_idx]
-        region_geometries = [region_geometries[int(idx)] for idx in keep_idx]
-        try:
-            _validate_mutually_exclusive_memberships(features.shape[0], subregion_members)
-        except RuntimeError as exc:
-            raise ValueError("Subregion memberships must remain mutually exclusive after min_cells filtering.") from exc
+    if max_subregion_area_um2 is None:
+        keep_idx = [idx for idx, members in enumerate(subregion_members) if np.asarray(members).size >= int(min_cells)]
+        if len(keep_idx) != len(subregion_members):
+            if not keep_idx:
+                raise RuntimeError("No valid subregions remain after applying min_cells.")
+            keep_arr = np.asarray(keep_idx, dtype=np.int32)
+            if centers_um is not None:
+                centers_um = centers_um[keep_arr]
+            subregion_members = [subregion_members[int(idx)] for idx in keep_idx]
+            subregion_basic_niche_ids = [subregion_basic_niche_ids[int(idx)] for idx in keep_idx]
+            region_geometries = [region_geometries[int(idx)] for idx in keep_idx]
+            try:
+                _validate_mutually_exclusive_memberships(features.shape[0], subregion_members)
+            except RuntimeError as exc:
+                raise ValueError("Subregion memberships must remain mutually exclusive after min_cells filtering.") from exc
     if centers_um is None:
         centers_um = np.vstack(
             [
@@ -2603,6 +3157,31 @@ def fit_multilevel_ot(
             f"available average for K={required_n_clusters}; using effective minimum {effective_min_for_requested_k}"
         )
 
+    fast_pooled_latent_enabled = _env_bool("SPATIAL_OT_FAST_POOLED_LATENT_ONLY", True)
+    if (
+        clustering_method == "pooled_subregion_latent"
+        and fast_pooled_latent_enabled
+        and len(subregion_members) > _fast_pooled_latent_only_threshold()
+    ):
+        return _fit_pooled_latent_only_result(
+            features=features,
+            centers_um=centers_um,
+            subregion_members=subregion_members,
+            n_clusters=requested_n_clusters,
+            atoms_per_cluster=atoms_per_cluster,
+            n_init=n_init,
+            auto_n_clusters=auto_n_clusters,
+            candidate_ks=candidate_ks,
+            auto_k_max_score_subregions=auto_k_max_score_subregions,
+            auto_k_gap_references=auto_k_gap_references,
+            min_subregions_per_cluster=effective_min_for_requested_k,
+            requested_min_subregions_per_cluster=requested_min_subregions_per_cluster,
+            ot_eps=ot_eps,
+            seed=seed,
+            basic_niche_size_um=basic_niche_size_um,
+            used_basic_niches=used_basic_niches,
+        )
+
     _progress(f"constructed {len(subregion_members)} subregions; fitting shape normalizers and compressed measures")
     for rid, (region, members) in enumerate(zip(region_geometries, subregion_members, strict=False)):
         region.members = np.asarray(members, dtype=np.int32)
@@ -2630,6 +3209,7 @@ def fit_multilevel_ot(
     _progress("estimating overlap graph and cost scales")
     optimization_measures = _make_optimization_measures(measures)
     summaries = np.vstack([_measure_summary(m) for m in optimization_measures])
+    subregion_latent_embeddings = _build_subregion_latent_embeddings_from_members(features, subregion_members)
     overlap_edge_i, overlap_edge_j, overlap_edge_weight = _build_overlap_consistency_graph(
         measures=measures,
         summaries=summaries,
@@ -2643,66 +3223,76 @@ def fit_multilevel_ot(
     pilot_restart_summaries: list[dict[str, object]] | None = None
     pilot_best_bundle: dict[str, object] | None = None
     if bool(auto_n_clusters):
-        pilot_n_clusters = int(max(candidate_ks))
-        pilot_n_init = int(auto_k_pilot_n_init)
-        pilot_max_iter = int(auto_k_pilot_max_iter)
-        _progress(
-            "automatic K selection enabled; "
-            f"candidate K={','.join(str(k) for k in candidate_ks)}, pilot K={pilot_n_clusters}"
-        )
-        _pilot_restart_results, pilot_restart_summaries, pilot_best_bundle = _fit_restart_bundles(
-            measures=optimization_measures,
-            summaries=summaries,
-            n_clusters=pilot_n_clusters,
-            atoms_per_cluster=atoms_per_cluster,
-            lambda_x=lambda_x,
-            lambda_y=lambda_y,
-            ot_eps=ot_eps,
-            rho=rho,
-            align_iters=align_iters,
-            allow_reflection=allow_reflection,
-            allow_scale=allow_scale,
-            cost_scale_x=cost_scale_x,
-            cost_scale_y=cost_scale_y,
-            min_scale=min_scale,
-            max_scale=max_scale,
-            scale_penalty=scale_penalty,
-            shift_penalty=shift_penalty,
-            max_iter=pilot_max_iter,
-            tol=tol,
-            min_subregions_per_cluster=min_subregions_per_cluster,
-            seed=seed,
-            overlap_edge_i=overlap_edge_i,
-            overlap_edge_j=overlap_edge_j,
-            overlap_edge_weight=overlap_edge_weight,
-            overlap_consistency_weight=overlap_consistency_weight,
-            n_init=pilot_n_init,
-            compute_device=compute_device,
-            resolved_compute_device=resolved_compute_device,
-            progress_label="auto-K pilot",
-        )
-        auto_k_selection = select_k_from_ot_landmark_costs(
-            np.asarray(pilot_best_bundle["transport_costs"], dtype=np.float32),
-            candidate_n_clusters=candidate_ks,
-            fallback_n_clusters=requested_n_clusters,
-            max_score_subregions=int(auto_k_max_score_subregions),
-            mds_components=int(auto_k_mds_components),
-            gap_references=int(auto_k_gap_references),
-            min_cluster_size=int(min_subregions_per_cluster),
-            random_state=int(seed),
-        )
+        _progress("automatic K selection enabled; candidate K=" + ",".join(str(k) for k in candidate_ks))
+        if clustering_method == "pooled_subregion_latent":
+            auto_k_selection = select_k_from_latent_embeddings(
+                subregion_latent_embeddings,
+                candidate_n_clusters=candidate_ks,
+                fallback_n_clusters=requested_n_clusters,
+                max_score_subregions=int(auto_k_max_score_subregions),
+                gap_references=int(auto_k_gap_references),
+                min_cluster_size=int(min_subregions_per_cluster),
+                random_state=int(seed),
+            )
+        else:
+            pilot_n_clusters = int(max(candidate_ks))
+            pilot_n_init = int(auto_k_pilot_n_init)
+            pilot_max_iter = int(auto_k_pilot_max_iter)
+            _progress(f"auto-K OT pilot K={pilot_n_clusters}")
+            _pilot_restart_results, pilot_restart_summaries, pilot_best_bundle = _fit_restart_bundles(
+                measures=optimization_measures,
+                summaries=summaries,
+                n_clusters=pilot_n_clusters,
+                atoms_per_cluster=atoms_per_cluster,
+                lambda_x=lambda_x,
+                lambda_y=lambda_y,
+                ot_eps=ot_eps,
+                rho=rho,
+                align_iters=align_iters,
+                allow_reflection=allow_reflection,
+                allow_scale=allow_scale,
+                cost_scale_x=cost_scale_x,
+                cost_scale_y=cost_scale_y,
+                min_scale=min_scale,
+                max_scale=max_scale,
+                scale_penalty=scale_penalty,
+                shift_penalty=shift_penalty,
+                max_iter=pilot_max_iter,
+                tol=tol,
+                min_subregions_per_cluster=min_subregions_per_cluster,
+                seed=seed,
+                overlap_edge_i=overlap_edge_i,
+                overlap_edge_j=overlap_edge_j,
+                overlap_edge_weight=overlap_edge_weight,
+                overlap_consistency_weight=overlap_consistency_weight,
+                n_init=pilot_n_init,
+                compute_device=compute_device,
+                resolved_compute_device=resolved_compute_device,
+                progress_label="auto-K pilot",
+            )
+            auto_k_selection = select_k_from_ot_landmark_costs(
+                np.asarray(pilot_best_bundle["transport_costs"], dtype=np.float32),
+                candidate_n_clusters=candidate_ks,
+                fallback_n_clusters=requested_n_clusters,
+                max_score_subregions=int(auto_k_max_score_subregions),
+                mds_components=int(auto_k_mds_components),
+                gap_references=int(auto_k_gap_references),
+                min_cluster_size=int(min_subregions_per_cluster),
+                random_state=int(seed),
+            )
+            reused_pilot_fit = (
+                int(auto_k_selection["selected_k"]) == pilot_n_clusters
+                and pilot_n_init == int(n_init)
+                and pilot_max_iter == int(max_iter)
+            )
         selected_n_clusters = int(auto_k_selection["selected_k"])
-        reused_pilot_fit = (
-            selected_n_clusters == pilot_n_clusters
-            and pilot_n_init == int(n_init)
-            and pilot_max_iter == int(max_iter)
-        )
         auto_k_selection.update(
             {
                 "requested_n_clusters": int(requested_n_clusters),
-                "pilot_n_clusters": int(pilot_n_clusters),
-                "pilot_n_init": int(pilot_n_init),
-                "pilot_max_iter": int(pilot_max_iter),
+                "selection_clustering_method": str(clustering_method),
+                "pilot_n_clusters": int(max(candidate_ks)) if clustering_method == "ot_dictionary" else None,
+                "pilot_n_init": int(auto_k_pilot_n_init) if clustering_method == "ot_dictionary" else None,
+                "pilot_max_iter": int(auto_k_pilot_max_iter) if clustering_method == "ot_dictionary" else None,
                 "final_refit_n_init": int(n_init),
                 "final_refit_max_iter": int(max_iter),
                 "requested_min_subregions_per_cluster": int(requested_min_subregions_per_cluster),
@@ -2716,13 +3306,30 @@ def fit_multilevel_ot(
         )
 
     n_clusters = int(selected_n_clusters)
-    if reused_pilot_fit and pilot_best_bundle is not None and pilot_restart_summaries is not None:
-        restart_summaries = pilot_restart_summaries
-        best_bundle = pilot_best_bundle
-    else:
-        _final_restart_results, restart_summaries, best_bundle = _fit_restart_bundles(
+    selected_restart_id = 0
+    if clustering_method == "pooled_subregion_latent":
+        _progress(
+            "clustering pooled raw-member feature-distribution subregion latent embeddings "
+            f"(K={n_clusters}; no spatial coordinates or OT costs in label assignment)"
+        )
+        latent_fit = fit_kmeans_on_latent_embeddings(
+            subregion_latent_embeddings,
+            n_clusters=n_clusters,
+            n_init=max(int(n_init), 1),
+            min_cluster_size=int(min_subregions_per_cluster),
+            random_state=int(seed),
+        )
+        labels = np.asarray(latent_fit["labels"], dtype=np.int32)
+        final_argmin_labels_best = np.asarray(latent_fit["argmin_labels"], dtype=np.int32)
+        final_costs = np.asarray(latent_fit["costs"], dtype=np.float32)
+        final_transport_costs = final_costs.astype(np.float32, copy=True)
+        final_overlap_penalties = np.zeros_like(final_costs, dtype=np.float32)
+        forced_label_mask_best = np.asarray(latent_fit["forced_label_mask"], dtype=bool)
+        candidate_effective_eps_matrix_best = np.full(final_costs.shape, float(ot_eps), dtype=np.float32)
+        candidate_used_fallback_matrix_best = np.zeros(final_costs.shape, dtype=bool)
+        fixed_atom_bundle = _fit_fixed_label_atom_dictionary(
             measures=optimization_measures,
-            summaries=summaries,
+            labels=labels,
             n_clusters=n_clusters,
             atoms_per_cluster=atoms_per_cluster,
             lambda_x=lambda_x,
@@ -2740,102 +3347,162 @@ def fit_multilevel_ot(
             shift_penalty=shift_penalty,
             max_iter=max_iter,
             tol=tol,
-            min_subregions_per_cluster=min_subregions_per_cluster,
             seed=seed,
-            overlap_edge_i=overlap_edge_i,
-            overlap_edge_j=overlap_edge_j,
-            overlap_edge_weight=overlap_edge_weight,
-            overlap_consistency_weight=overlap_consistency_weight,
-            n_init=n_init,
-            compute_device=compute_device,
-            resolved_compute_device=resolved_compute_device,
-            progress_label="final fit",
+            compute_device=resolved_compute_device,
         )
-    _progress(f"selected restart {int(best_bundle['run'])}; computing final diagnostics")
-    atom_coords = np.asarray(best_bundle["atom_coords"], dtype=np.float32)
-    atom_features = np.asarray(best_bundle["atom_features"], dtype=np.float32)
-    betas = np.asarray(best_bundle["betas"], dtype=np.float32)
-    objective_history = list(best_bundle["objective_history"])
-    best_compute_device = _resolve_compute_device(str(best_bundle["device"]))
-    final_transport_costs, candidate_effective_eps_matrix_best, candidate_used_fallback_matrix_best = _compute_assignment_costs(
-        measures=measures,
-        atom_coords=atom_coords,
-        atom_features=atom_features,
-        betas=betas,
-        lambda_x=lambda_x,
-        lambda_y=lambda_y,
-        eps=ot_eps,
-        rho=rho,
-        align_iters=align_iters,
-        allow_reflection=allow_reflection,
-        allow_scale=allow_scale,
-        cost_scale_x=cost_scale_x,
-        cost_scale_y=cost_scale_y,
-        min_scale=min_scale,
-        max_scale=max_scale,
-        scale_penalty=scale_penalty,
-        shift_penalty=shift_penalty,
-        compute_device=best_compute_device,
-        return_diagnostics=True,
-    )
-    final_transport_costs, candidate_effective_eps_matrix_best, candidate_used_fallback_matrix_best = _stabilize_mixed_candidate_assignment_costs(
-        measures=measures,
-        atom_coords=atom_coords,
-        atom_features=atom_features,
-        betas=betas,
-        transport_costs=final_transport_costs,
-        candidate_effective_eps_matrix=candidate_effective_eps_matrix_best,
-        candidate_used_fallback_matrix=candidate_used_fallback_matrix_best,
-        lambda_x=lambda_x,
-        lambda_y=lambda_y,
-        ot_eps=ot_eps,
-        rho=rho,
-        align_iters=align_iters,
-        allow_reflection=allow_reflection,
-        allow_scale=allow_scale,
-        cost_scale_x=cost_scale_x,
-        cost_scale_y=cost_scale_y,
-        min_scale=min_scale,
-        max_scale=max_scale,
-        scale_penalty=scale_penalty,
-        shift_penalty=shift_penalty,
-        compute_device=best_compute_device,
-    )
-    final_costs, final_overlap_penalties = _apply_overlap_consistency_regularization(
-        final_transport_costs,
-        edge_i=overlap_edge_i,
-        edge_j=overlap_edge_j,
-        edge_weight=overlap_edge_weight,
-        overlap_consistency_weight=overlap_consistency_weight,
-    )
-    final_argmin_labels_best = final_costs.argmin(axis=1).astype(np.int32)
-    labels, forced_label_mask_best = _ensure_minimum_cluster_size(
-        final_argmin_labels_best,
-        final_costs,
-        n_clusters=n_clusters,
-        min_subregions_per_cluster=min_subregions_per_cluster,
-    )
-    plans, transforms, thetas, _assigned_transport_costs_best, assigned_effective_eps_best, assigned_used_fallback_best = _compute_assigned_artifacts(
-        measures=measures,
-        labels=labels,
-        atom_coords=atom_coords,
-        atom_features=atom_features,
-        betas=betas,
-        lambda_x=lambda_x,
-        lambda_y=lambda_y,
-        eps=ot_eps,
-        rho=rho,
-        align_iters=align_iters,
-        allow_reflection=allow_reflection,
-        allow_scale=allow_scale,
-        cost_scale_x=cost_scale_x,
-        cost_scale_y=cost_scale_y,
-        min_scale=min_scale,
-        max_scale=max_scale,
-        scale_penalty=scale_penalty,
-        shift_penalty=shift_penalty,
-        compute_device=best_compute_device,
-    )
+        atom_coords = np.asarray(fixed_atom_bundle["atom_coords"], dtype=np.float32)
+        atom_features = np.asarray(fixed_atom_bundle["atom_features"], dtype=np.float32)
+        betas = np.asarray(fixed_atom_bundle["betas"], dtype=np.float32)
+        objective_history = list(fixed_atom_bundle["objective_history"])
+        best_compute_device = resolved_compute_device
+        plans = list(fixed_atom_bundle["plans"])
+        transforms = list(fixed_atom_bundle["transforms"])
+        thetas = list(fixed_atom_bundle["thetas"])
+        assigned_effective_eps_best = np.asarray(fixed_atom_bundle["assigned_effective_eps"], dtype=np.float32)
+        assigned_used_fallback_best = np.asarray(fixed_atom_bundle["assigned_used_fallback"], dtype=bool)
+        restart_summaries = [
+            {
+                "run": 0,
+                "seed": int(seed),
+                "objective": float(latent_fit["inertia"]),
+                "n_iter": int(len(objective_history)),
+                "mean_assigned_cost": float(np.mean(final_costs[np.arange(labels.shape[0]), labels])),
+                "mean_assigned_transport_cost": float(np.mean(fixed_atom_bundle["assigned_costs"])),
+                "mean_assigned_overlap_penalty": 0.0,
+                "device": str(resolved_compute_device),
+                "assigned_ot_fallback_fraction": float(np.mean(assigned_used_fallback_best.astype(np.float32))),
+                "candidate_ot_fallback_fraction": 0.0,
+                "initial_min_size_forced_label_count": int(forced_label_mask_best.sum()),
+                "final_min_size_forced_label_count": int(forced_label_mask_best.sum()),
+                "min_subregions_per_cluster": int(
+                    effective_min_cluster_size(len(labels), n_clusters, int(min_subregions_per_cluster))
+                ),
+                "runtime_memory": dict(fixed_atom_bundle.get("runtime_memory", {})),
+                "label_assignment_source": "pooled_subregion_latent_embeddings",
+            }
+        ]
+    else:
+        if reused_pilot_fit and pilot_best_bundle is not None and pilot_restart_summaries is not None:
+            restart_summaries = pilot_restart_summaries
+            best_bundle = pilot_best_bundle
+        else:
+            _final_restart_results, restart_summaries, best_bundle = _fit_restart_bundles(
+                measures=optimization_measures,
+                summaries=summaries,
+                n_clusters=n_clusters,
+                atoms_per_cluster=atoms_per_cluster,
+                lambda_x=lambda_x,
+                lambda_y=lambda_y,
+                ot_eps=ot_eps,
+                rho=rho,
+                align_iters=align_iters,
+                allow_reflection=allow_reflection,
+                allow_scale=allow_scale,
+                cost_scale_x=cost_scale_x,
+                cost_scale_y=cost_scale_y,
+                min_scale=min_scale,
+                max_scale=max_scale,
+                scale_penalty=scale_penalty,
+                shift_penalty=shift_penalty,
+                max_iter=max_iter,
+                tol=tol,
+                min_subregions_per_cluster=min_subregions_per_cluster,
+                seed=seed,
+                overlap_edge_i=overlap_edge_i,
+                overlap_edge_j=overlap_edge_j,
+                overlap_edge_weight=overlap_edge_weight,
+                overlap_consistency_weight=overlap_consistency_weight,
+                n_init=n_init,
+                compute_device=compute_device,
+                resolved_compute_device=resolved_compute_device,
+                progress_label="final fit",
+            )
+        selected_restart_id = int(best_bundle["run"])
+        _progress(f"selected restart {selected_restart_id}; computing final diagnostics")
+        atom_coords = np.asarray(best_bundle["atom_coords"], dtype=np.float32)
+        atom_features = np.asarray(best_bundle["atom_features"], dtype=np.float32)
+        betas = np.asarray(best_bundle["betas"], dtype=np.float32)
+        objective_history = list(best_bundle["objective_history"])
+        best_compute_device = _resolve_compute_device(str(best_bundle["device"]))
+        final_transport_costs, candidate_effective_eps_matrix_best, candidate_used_fallback_matrix_best = _compute_assignment_costs(
+            measures=measures,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            betas=betas,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            eps=ot_eps,
+            rho=rho,
+            align_iters=align_iters,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            scale_penalty=scale_penalty,
+            shift_penalty=shift_penalty,
+            compute_device=best_compute_device,
+            return_diagnostics=True,
+        )
+        final_transport_costs, candidate_effective_eps_matrix_best, candidate_used_fallback_matrix_best = _stabilize_mixed_candidate_assignment_costs(
+            measures=measures,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            betas=betas,
+            transport_costs=final_transport_costs,
+            candidate_effective_eps_matrix=candidate_effective_eps_matrix_best,
+            candidate_used_fallback_matrix=candidate_used_fallback_matrix_best,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            ot_eps=ot_eps,
+            rho=rho,
+            align_iters=align_iters,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            scale_penalty=scale_penalty,
+            shift_penalty=shift_penalty,
+            compute_device=best_compute_device,
+        )
+        final_costs, final_overlap_penalties = _apply_overlap_consistency_regularization(
+            final_transport_costs,
+            edge_i=overlap_edge_i,
+            edge_j=overlap_edge_j,
+            edge_weight=overlap_edge_weight,
+            overlap_consistency_weight=overlap_consistency_weight,
+        )
+        final_argmin_labels_best = final_costs.argmin(axis=1).astype(np.int32)
+        labels, forced_label_mask_best = _ensure_minimum_cluster_size(
+            final_argmin_labels_best,
+            final_costs,
+            n_clusters=n_clusters,
+            min_subregions_per_cluster=min_subregions_per_cluster,
+        )
+        plans, transforms, thetas, _assigned_transport_costs_best, assigned_effective_eps_best, assigned_used_fallback_best = _compute_assigned_artifacts(
+            measures=measures,
+            labels=labels,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            betas=betas,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            eps=ot_eps,
+            rho=rho,
+            align_iters=align_iters,
+            allow_reflection=allow_reflection,
+            allow_scale=allow_scale,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            min_scale=min_scale,
+            max_scale=max_scale,
+            scale_penalty=scale_penalty,
+            shift_penalty=shift_penalty,
+            compute_device=best_compute_device,
+        )
     assigned_overlap_penalties_best = final_overlap_penalties[
         np.arange(labels.shape[0], dtype=np.int64),
         labels.astype(np.int64),
@@ -2928,6 +3595,9 @@ def fit_multilevel_ot(
         subregion_cluster_overlap_penalties=final_overlap_penalties.astype(np.float32),
         subregion_atom_weights=thetas_assigned.astype(np.float32),
         subregion_measure_summaries=summaries.astype(np.float32),
+        subregion_latent_embeddings=subregion_latent_embeddings.astype(np.float32),
+        subregion_clustering_method=str(clustering_method),
+        subregion_clustering_uses_spatial=bool(clustering_method != "pooled_subregion_latent"),
         subregion_assigned_effective_eps=assigned_effective_eps_best.astype(np.float32),
         subregion_assigned_used_ot_fallback=assigned_used_fallback_best.astype(bool),
         subregion_candidate_effective_eps_matrix=candidate_effective_eps_matrix_best.astype(np.float32),
@@ -2964,9 +3634,30 @@ def fit_multilevel_ot(
         ].astype(np.float32),
         spot_latent_atom_argmax=spot_latent["spot_latent_atom_argmax"].astype(np.int32),
         spot_latent_temperature_used=spot_latent["spot_latent_temperature_used"].astype(np.float32),
+        spot_latent_temperature_cost_gap=spot_latent["spot_latent_temperature_cost_gap"].astype(np.float32),
+        spot_latent_temperature_fixed=spot_latent["spot_latent_temperature_fixed"].astype(np.float32),
         spot_latent_weights=spot_latent["spot_latent_weights"].astype(np.float32),
         spot_latent_atom_posteriors=spot_latent["spot_latent_atom_posteriors"].astype(np.float32),
+        spot_latent_posterior_entropy_cost_gap=spot_latent["spot_latent_posterior_entropy_cost_gap"].astype(
+            np.float32
+        ),
+        spot_latent_normalized_posterior_entropy_cost_gap=spot_latent[
+            "spot_latent_normalized_posterior_entropy_cost_gap"
+        ].astype(np.float32),
+        spot_latent_posterior_entropy_fixed=spot_latent["spot_latent_posterior_entropy_fixed"].astype(np.float32),
+        spot_latent_normalized_posterior_entropy_fixed=spot_latent[
+            "spot_latent_normalized_posterior_entropy_fixed"
+        ].astype(np.float32),
         spot_latent_cluster_anchor_distance=spot_latent["spot_latent_cluster_anchor_distance"].astype(np.float32),
+        spot_latent_cluster_anchor_ot_fallback_matrix=spot_latent[
+            "spot_latent_cluster_anchor_ot_fallback_matrix"
+        ].astype(bool),
+        spot_latent_cluster_anchor_solver_status_matrix=spot_latent[
+            "spot_latent_cluster_anchor_solver_status_matrix"
+        ].astype(np.int8),
+        spot_latent_cluster_anchor_ot_fallback_fraction=float(
+            spot_latent["spot_latent_cluster_anchor_ot_fallback_fraction"].item()
+        ),
         spot_latent_atom_mds_stress=spot_latent["spot_latent_atom_mds_stress"].astype(np.float32),
         spot_latent_atom_mds_positive_eigenvalue_mass_2d=spot_latent[
             "spot_latent_atom_mds_positive_eigenvalue_mass_2d"
@@ -2994,6 +3685,12 @@ def fit_multilevel_ot(
         spot_latent_cluster_anchor_distance_method=str(
             spot_latent["spot_latent_cluster_anchor_distance_method"].item()
         ),
+        spot_latent_cluster_anchor_distance_requested_method=str(
+            spot_latent["spot_latent_cluster_anchor_distance_requested_method"].item()
+        ),
+        spot_latent_cluster_anchor_distance_effective_method=str(
+            spot_latent["spot_latent_cluster_anchor_distance_effective_method"].item()
+        ),
         spot_latent_cluster_mds_stress=float(spot_latent["spot_latent_cluster_mds_stress"].item()),
         spot_latent_cluster_mds_positive_eigenvalue_mass_2d=float(
             spot_latent["spot_latent_cluster_mds_positive_eigenvalue_mass_2d"].item()
@@ -3004,7 +3701,7 @@ def fit_multilevel_ot(
         cost_scale_x=float(cost_scale_x),
         cost_scale_y=float(cost_scale_y),
         objective_history=objective_history,
-        selected_restart=int(best_bundle["run"]),
+        selected_restart=int(selected_restart_id),
         restart_summaries=restart_summaries,
         min_subregions_per_cluster=int(requested_min_subregions_per_cluster),
         effective_min_subregions_per_cluster=int(

@@ -15,13 +15,18 @@ def assigned_transport_cost_decomposition(result: MultilevelOTResult) -> dict[st
     transform = np.asarray(result.subregion_assigned_transform_penalties, dtype=np.float64)
     overlap = np.asarray(result.subregion_assigned_overlap_consistency_penalties, dtype=np.float64)
     transport_plus_transform = geometry + feature + transform
-    assigned_transport_objective = np.asarray(
-        result.subregion_cluster_transport_costs[
-            np.arange(result.subregion_cluster_labels.shape[0], dtype=np.int64),
-            result.subregion_cluster_labels.astype(np.int64),
-        ],
-        dtype=np.float64,
-    )
+    if result.subregion_clustering_uses_spatial:
+        assigned_transport_objective = np.asarray(
+            result.subregion_cluster_transport_costs[
+                np.arange(result.subregion_cluster_labels.shape[0], dtype=np.int64),
+                result.subregion_cluster_labels.astype(np.int64),
+            ],
+            dtype=np.float64,
+        )
+        assignment_cost_source = "ot_dictionary_candidate_costs"
+    else:
+        assigned_transport_objective = transport_plus_transform
+        assignment_cost_source = "fixed_label_ot_atom_diagnostics_not_primary_label_cost"
     assigned_total_objective = np.asarray(
         result.subregion_cluster_costs[
             np.arange(result.subregion_cluster_labels.shape[0], dtype=np.int64),
@@ -45,6 +50,7 @@ def assigned_transport_cost_decomposition(result: MultilevelOTResult) -> dict[st
         "mean_transport_assignment_objective": float(np.mean(assigned_transport_objective)) if assigned_transport_objective.size else 0.0,
         "mean_total_assignment_cost": float(np.mean(assigned_total_objective)) if assigned_total_objective.size else 0.0,
         "mean_ot_regularization_gap": float(np.mean(assigned_transport_objective - transport_plus_transform)) if assigned_transport_objective.size else 0.0,
+        "assignment_cost_source": assignment_cost_source,
         "geometry_transport_fraction": float(np.sum(geometry) / transport_denom),
         "feature_transport_fraction": float(np.sum(feature) / transport_denom),
         "transform_penalty_fraction": float(np.sum(transform) / transport_denom),
@@ -69,6 +75,12 @@ def cost_reliability_metrics(result: MultilevelOTResult) -> dict[str, object]:
     mixed_fallback = np.mean(np.any(used_fallback != used_fallback[:, :1], axis=1)) if used_fallback.size else 0.0
     return {
         "effective_eps_matrix_available": True,
+        "candidate_cost_source": (
+            "ot_dictionary_candidate_costs"
+            if result.subregion_clustering_uses_spatial
+            else "pooled_subregion_latent_embedding_squared_euclidean"
+        ),
+        "candidate_cost_uses_spatial": bool(result.subregion_clustering_uses_spatial),
         "fallback_fraction_all_costs": float(np.mean(used_fallback.astype(np.float32))) if used_fallback.size else 0.0,
         "fallback_fraction_assigned": float(np.mean(result.subregion_assigned_used_ot_fallback.astype(np.float32))),
         "mixed_candidate_effective_eps_fraction": float(mixed_eps),
@@ -186,6 +198,7 @@ def build_qc_warnings(
     shape_leakage_diagnostics: dict | None = None,
     density_leakage_diagnostics: dict | None = None,
     subregion_construction: dict | None = None,
+    realized_subregion_statistics: dict | None = None,
     auto_k_enabled: bool = False,
 ) -> list[dict[str, object]]:
     warnings_out: list[dict[str, object]] = [
@@ -229,6 +242,33 @@ def build_qc_warnings(
                 "auto_k_is_exploratory",
                 "info",
                 "Automatic K selection is an exploratory shortlist/final-refit convenience and should be confirmed with stability and ablation analysis.",
+            )
+        )
+    if realized_subregion_statistics and not bool(
+        realized_subregion_statistics.get("minimum_cell_constraint_satisfied", True)
+    ):
+        min_cells = realized_subregion_statistics.get("minimum_cell_constraint")
+        n_cell_stats = realized_subregion_statistics.get("n_cells")
+        realized_min = None
+        if isinstance(n_cell_stats, dict):
+            realized_min = n_cell_stats.get("min")
+        area_cap = realized_subregion_statistics.get("maximum_area_constraint_um2")
+        if area_cap is not None:
+            message = (
+                "At least one subregion has fewer cells than min_cells because the maximum area cap takes precedence; "
+                "treat this as an area-constrained partition rather than a minimum-cell niche partition."
+            )
+        else:
+            message = (
+                "At least one subregion has fewer cells than min_cells; treat this run as violating the requested "
+                "minimum subregion size constraint."
+            )
+        warnings_out.append(
+            _qc_warning(
+                "minimum_cell_constraint_not_satisfied",
+                "warning",
+                message,
+                value=float(realized_min) if realized_min is not None else min_cells,
             )
         )
     if feature_embedding_warning == "umap_exploratory":

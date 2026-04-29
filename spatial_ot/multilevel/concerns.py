@@ -96,6 +96,7 @@ def _common_run_env(summary: dict[str, object], run_dir: Path, *, omit: set[str]
         ("MAX_SPOT_LATENT_PLOT_OCCURRENCES", 0),
         ("COMPUTE_SPOT_LATENT", 0),
         ("PLOT_SAMPLE_SPOT_LATENT", 0),
+        ("SUBREGION_CLUSTERING_METHOD", summary.get("subregion_clustering_method")),
     ]
     tokens = [_env_token(key, value) for key, value in env_items if key not in omit]
     deep_model = _deep_model_path(summary, run_dir)
@@ -353,6 +354,26 @@ def _summary_median(summary: dict[str, object], key: str) -> float | None:
     return out if out == out else None
 
 
+def _summary_max(summary: dict[str, object], key: str) -> float | None:
+    value = summary.get(key)
+    if not isinstance(value, dict):
+        return None
+    max_value = value.get("max")
+    try:
+        out = float(max_value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out else None
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out else None
+
+
 def _within_niche_latent_claim_status(summary: dict[str, object]) -> tuple[str, bool, dict[str, object]]:
     spot = summary.get("spot_level_latent")
     if not isinstance(spot, dict) or not bool(spot.get("implemented")):
@@ -367,6 +388,10 @@ def _within_niche_latent_claim_status(summary: dict[str, object]) -> tuple[str, 
     anchor_method = str(spot.get("cluster_anchor_distance_method", "")).lower()
     if anchor_method not in {"balanced_ot", "sinkhorn_ot"}:
         blockers.append("non_ot_cluster_anchor_distance")
+    anchor_effective = str(spot.get("cluster_anchor_distance_effective_method", anchor_method)).lower()
+    anchor_fallback_fraction = _float_or_none(spot.get("cluster_anchor_ot_fallback_fraction")) or 0.0
+    if anchor_fallback_fraction > 0.0 or "fallback" in anchor_effective:
+        blockers.append("anchor_ot_fallback_used")
     stress = spot.get("cluster_anchor_mds_stress")
     try:
         stress_value = float(stress)
@@ -376,11 +401,23 @@ def _within_niche_latent_claim_status(summary: dict[str, object]) -> tuple[str, 
         blockers.append("missing_cluster_anchor_mds_stress")
     elif stress_value > 0.20:
         blockers.append("high_cluster_anchor_mds_stress")
+    positive_mass = _float_or_none(spot.get("cluster_anchor_mds_positive_eigenvalue_mass_2d"))
+    if positive_mass is not None and positive_mass < 0.70:
+        blockers.append("low_cluster_anchor_mds_positive_eigenvalue_mass")
+    negative_mass = _float_or_none(spot.get("cluster_anchor_mds_negative_eigenvalue_mass_fraction"))
+    if negative_mass is not None and negative_mass > 0.10:
+        blockers.append("non_euclidean_cluster_anchor_distance_geometry")
+    atom_stress_max = _summary_max(spot, "atom_mds_stress_summary")
+    if atom_stress_max is not None and atom_stress_max > 0.25:
+        blockers.append("high_atom_mds_stress")
     entropy_median = _summary_median(spot, "normalized_posterior_entropy_summary")
     if entropy_median is None:
         blockers.append("missing_posterior_entropy_summary")
     elif entropy_median < 0.25 or entropy_median > 0.65:
         blockers.append("posterior_entropy_outside_target_range")
+    temperature_ratio = _float_or_none(spot.get("temperature_used_q95_q05_ratio"))
+    if temperature_ratio is not None and temperature_ratio > 20.0:
+        blockers.append("temperature_calibration_inconsistent_cost_scale")
     if not bool(spot.get("held_out_sample_projection_available", False)):
         blockers.append("missing_held_out_sample_projection")
     if not bool(spot.get("unsupervised_baseline_available", False)):
@@ -398,6 +435,13 @@ def _within_niche_latent_claim_status(summary: dict[str, object]) -> tuple[str, 
             "feature_space_kind": feature_kind,
             "recommended_entropy_median_range": [0.25, 0.65],
             "cluster_anchor_mds_stress_threshold": 0.20,
+            "cluster_anchor_mds_strong_threshold": 0.10,
+            "atom_mds_stress_threshold": 0.25,
+            "cluster_anchor_positive_eigenvalue_mass_2d_warning": 0.70,
+            "cluster_anchor_negative_eigenvalue_mass_fraction_warning": 0.10,
+            "anchor_ot_fallback_fraction": anchor_fallback_fraction,
+            "cluster_anchor_distance_effective_method": anchor_effective,
+            "temperature_used_q95_q05_ratio": temperature_ratio,
         },
     )
 

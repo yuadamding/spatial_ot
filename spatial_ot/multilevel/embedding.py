@@ -11,6 +11,24 @@ from .geometry import _validate_mutually_exclusive_memberships
 from .types import MultilevelOTResult
 
 
+_LARGE_SUBREGION_DIAGNOSTIC_MAX = 50000
+_LARGE_SUBREGION_SCORE_MAX = 5000
+
+
+def _sample_embedding_rows(
+    embedding: np.ndarray,
+    labels: np.ndarray,
+    *,
+    max_rows: int = _LARGE_SUBREGION_DIAGNOSTIC_MAX,
+) -> tuple[np.ndarray, np.ndarray]:
+    x = np.asarray(embedding, dtype=np.float32)
+    y = np.asarray(labels, dtype=np.int32)
+    if x.shape[0] <= int(max_rows):
+        return x, y
+    keep = _deterministic_subsample_indices(x.shape[0], int(max_rows))
+    return x[keep], y[keep]
+
+
 def compute_subregion_embedding(weights: np.ndarray, seed: int) -> tuple[np.ndarray, str]:
     weights_arr = np.asarray(weights, dtype=np.float32)
     if weights_arr.ndim != 2:
@@ -19,6 +37,18 @@ def compute_subregion_embedding(weights: np.ndarray, seed: int) -> tuple[np.ndar
         return np.zeros((0, 2), dtype=np.float32), "empty"
     if weights_arr.shape[0] == 1:
         return np.zeros((1, 2), dtype=np.float32), "constant"
+    if weights_arr.shape[0] > _LARGE_SUBREGION_DIAGNOSTIC_MAX:
+        if min(weights_arr.shape) >= 2:
+            pca = PCA(n_components=2, random_state=seed)
+            keep = _deterministic_subsample_indices(
+                int(weights_arr.shape[0]),
+                _LARGE_SUBREGION_DIAGNOSTIC_MAX,
+            )
+            pca.fit(weights_arr[keep])
+            return pca.transform(weights_arr).astype(np.float32), "PCA_sample_fit_large_subregion_fast_path"
+        values = weights_arr[:, 0] if weights_arr.shape[1] else np.zeros(weights_arr.shape[0], dtype=np.float32)
+        values = (values.astype(np.float32, copy=False) - float(values.mean())) / max(float(values.std()), 1e-6)
+        return np.column_stack([values, np.zeros_like(values)]).astype(np.float32), "1D_large_subregion_fast_path"
     try:
         import umap.umap_ as umap  # type: ignore
 
@@ -88,17 +118,23 @@ def subregion_embedding_compactness(result: MultilevelOTResult) -> dict[str, obj
     silhouette_native = None
     davies_bouldin_native = None
     calinski_harabasz_native = None
-    if unique_labels.size >= 2 and embedding.shape[0] > unique_labels.size:
+    score_embedding, score_labels = _sample_embedding_rows(
+        embedding,
+        labels,
+        max_rows=_LARGE_SUBREGION_SCORE_MAX,
+    )
+    score_unique = np.unique(score_labels)
+    if score_unique.size >= 2 and score_embedding.shape[0] > score_unique.size:
         try:
-            silhouette_native = float(silhouette_score(embedding, labels, metric="euclidean"))
+            silhouette_native = float(silhouette_score(score_embedding, score_labels, metric="euclidean"))
         except Exception:
             silhouette_native = None
         try:
-            davies_bouldin_native = float(davies_bouldin_score(embedding, labels))
+            davies_bouldin_native = float(davies_bouldin_score(score_embedding, score_labels))
         except Exception:
             davies_bouldin_native = None
         try:
-            calinski_harabasz_native = float(calinski_harabasz_score(embedding, labels))
+            calinski_harabasz_native = float(calinski_harabasz_score(score_embedding, score_labels))
         except Exception:
             calinski_harabasz_native = None
 
@@ -252,6 +288,27 @@ def subregion_graph_metrics(
         subregion_members=result.subregion_members,
         subregion_labels=labels,
     )
+    if n_subregions > _LARGE_SUBREGION_DIAGNOSTIC_MAX:
+        return {
+            "subregion_graph_edge_count": None,
+            "overlap_edge_count": None,
+            "proximity_only_edge_count": None,
+            "same_label_edge_fraction": None,
+            "boundary_edge_fraction": None,
+            "boundary_entropy_mean": None,
+            "boundary_entropy_p95": None,
+            "overlap_probability_l2_mean": None,
+            "high_overlap_edge_count": None,
+            "high_overlap_same_label_fraction": None,
+            "isolated_subregion_fraction": None,
+            "cluster_connected_components": {},
+            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, cell_labels),
+            "diagnostic_sampled_or_skipped": True,
+            "skip_reason": (
+                f"subregion graph diagnostics skipped for {int(n_subregions)} subregions; "
+                f"threshold is {_LARGE_SUBREGION_DIAGNOSTIC_MAX}"
+            ),
+        }
     if n_subregions < 2:
         return {
             "subregion_graph_edge_count": 0,

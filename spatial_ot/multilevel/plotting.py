@@ -970,6 +970,16 @@ def plot_sample_spot_latent_maps(
         metadata.get("spot_level_latent_validation_role", "diagnostic_visualization_not_independent_evidence")
     )
     cluster_anchor_distance_method = str(metadata.get("spot_level_latent_cluster_anchor_distance_method", "unknown"))
+    cluster_anchor_distance_effective_method = str(
+        metadata.get("spot_level_latent_cluster_anchor_distance_effective_method", cluster_anchor_distance_method)
+    )
+    cluster_anchor_ot_fallback_fraction = None
+    try:
+        cluster_anchor_ot_fallback_fraction = float(
+            metadata.get("spot_level_latent_cluster_anchor_ot_fallback_fraction")
+        )
+    except (TypeError, ValueError):
+        cluster_anchor_ot_fallback_fraction = None
     cluster_anchor_mds_stress: float | None = None
 
     def _payload_scalar(payload: np.lib.npyio.NpzFile, key: str, default: str) -> str:
@@ -1006,6 +1016,12 @@ def plot_sample_spot_latent_maps(
                 cluster_anchor_distance_method,
             )
             cluster_anchor_mds_stress = _payload_float(payload, "cluster_anchor_mds_stress")
+            cluster_anchor_distance_effective_method = _payload_scalar(
+                payload,
+                "cluster_anchor_distance_effective_method",
+                cluster_anchor_distance_effective_method,
+            )
+            cluster_anchor_ot_fallback_fraction = _payload_float(payload, "cluster_anchor_ot_fallback_fraction")
             if "subregion_ids" in payload.files:
                 occurrence_subregion_ids = np.asarray(payload["subregion_ids"], dtype=np.int32)
                 subregion_id_source = "occurrence_npz[subregion_ids]"
@@ -1044,6 +1060,14 @@ def plot_sample_spot_latent_maps(
         chart_learning_mode = str(latent_mode_metadata["chart_learning_mode"])
     if not validation_role:
         validation_role = str(latent_mode_metadata["validation_role"])
+    if cluster_anchor_mds_stress is None:
+        mds_status = "missing"
+    elif cluster_anchor_mds_stress < 0.10:
+        mds_status = "interpretable"
+    elif cluster_anchor_mds_stress <= 0.20:
+        mds_status = "diagnostic_only"
+    else:
+        mds_status = "not_geometrically_interpretable"
 
     if latent.ndim != 2 or latent.shape[1] != 2:
         raise ValueError("Spot latent coordinates must have shape (n_observations, 2).")
@@ -1181,6 +1205,11 @@ def plot_sample_spot_latent_maps(
                 source_name = sources
 
         title = f"Within-niche spot latent heterogeneity: {sample_id}\n{int(occurrence_idx.size)}/{total_occurrences} latent occurrences"
+        if cluster_anchor_mds_stress is not None:
+            title = (
+                f"{title}\nanchor MDS stress={cluster_anchor_mds_stress:.3g} "
+                f"({mds_status}); anchor={cluster_anchor_distance_effective_method}"
+            )
         if isinstance(source_name, str):
             title = f"{title}\n{source_name}"
         ax.set_title(title)
@@ -1263,7 +1292,10 @@ def plot_sample_spot_latent_maps(
         "chart_learning_mode": chart_learning_mode,
         "validation_role": validation_role,
         "cluster_anchor_distance_method": cluster_anchor_distance_method,
+        "cluster_anchor_distance_effective_method": cluster_anchor_distance_effective_method,
+        "cluster_anchor_ot_fallback_fraction": cluster_anchor_ot_fallback_fraction,
         "cluster_anchor_mds_stress": cluster_anchor_mds_stress,
+        "cluster_anchor_mds_status": mds_status,
         "rendering": "whole_sample_within_niche_latent_rgb",
         "color_scale_mode": color_scale_mode,
         "color_encoding": "The side key uses the stored 2D spot-latent coordinates to show model-grounded between-cluster layout. Slide colors use global latent color scaling by default so colors remain comparable across clusters and samples; within-cluster rescaling is available only as an explicit diagnostic mode. Treat this as diagnostic visualization, not independent validation.",
