@@ -54,12 +54,12 @@ def test_no_generated_files_tracked_when_git_metadata_is_available() -> None:
         assert not any(path.endswith(suffix) for suffix in forbidden_suffixes)
 
 
-def test_package_version_matches_0_1_16_state() -> None:
+def test_package_version_matches_0_2_2_state() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
     package_init = (repo_root / "spatial_ot" / "__init__.py").read_text()
-    assert 'version = "0.1.16"' in pyproject_toml
-    assert '__version__ = "0.1.16"' in package_init
+    assert 'version = "0.2.2"' in pyproject_toml
+    assert '__version__ = "0.2.2"' in package_init
 
 
 def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
@@ -393,11 +393,11 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         in optimal_search_sh
     )
     assert (
-        'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-heterogeneity_ot_niche}"'
+        'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-heterogeneity_descriptor_niche}"'
         in optimal_search_sh
     )
     assert (
-        'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-heterogeneity_ot_niche}"'
+        'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-heterogeneity_descriptor_niche}"'
         in run_sh
     )
     assert (
@@ -439,7 +439,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "max_subregions = 5000" in config_toml
     assert "allow_convex_hull_fallback = false" in config_toml
     assert 'subregion_construction_method = "joint_refinement"' in config_toml
-    assert 'subregion_clustering_method = "heterogeneity_ot_niche"' in config_toml
+    assert 'subregion_clustering_method = "heterogeneity_descriptor_niche"' in config_toml
     assert 'subregion_latent_embedding_mode = "mean_std_shrunk"' in config_toml
     assert "subregion_latent_heterogeneity_weight = 0.5" in config_toml
     assert "subregion_latent_sample_prior_weight = 0.5" in config_toml

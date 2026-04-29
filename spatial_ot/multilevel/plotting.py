@@ -11,7 +11,7 @@ import pandas as pd
 from scipy.spatial import ConvexHull, QhullError
 
 from .geometry import _validate_mutually_exclusive_memberships
-from .spot_latent import spot_latent_mode_metadata
+from .spot_latent import _classical_mds_from_sqdist, spot_latent_mode_metadata
 
 
 def cluster_palette(n_clusters: int) -> np.ndarray:
@@ -420,6 +420,118 @@ def _cluster_mean_latent_anchors(latent: np.ndarray, cluster_ids: np.ndarray) ->
             center = np.nanmean(latent_arr[idx], axis=0)
             anchors[int(cluster_id)] = [float(center[0]), float(center[1])]
     return anchors
+
+
+def _coordinate_limits(coords: np.ndarray, *, n_dims: int) -> dict[str, list[float]]:
+    coords_arr = np.asarray(coords, dtype=np.float32)
+    n_dims = max(1, int(n_dims))
+    if coords_arr.ndim != 2 or coords_arr.shape[1] < n_dims:
+        return {"lower": [0.0] * n_dims, "upper": [1.0] * n_dims}
+    finite = np.all(np.isfinite(coords_arr[:, :n_dims]), axis=1)
+    if not np.any(finite):
+        return {"lower": [0.0] * n_dims, "upper": [1.0] * n_dims}
+    reference = coords_arr[finite, :n_dims]
+    lower = np.nanpercentile(reference, 1.0, axis=0).astype(np.float32)
+    upper = np.nanpercentile(reference, 99.0, axis=0).astype(np.float32)
+    span = upper - lower
+    for dim in range(n_dims):
+        if not np.isfinite(span[dim]) or float(span[dim]) <= 1e-6:
+            center = float(np.nanmean(reference[:, dim]))
+            lower[dim] = center - 0.5
+            upper[dim] = center + 0.5
+    return {
+        "lower": [float(value) for value in lower.tolist()],
+        "upper": [float(value) for value in upper.tolist()],
+    }
+
+
+def _cluster_mean_coordinate_anchors(coords: np.ndarray, cluster_ids: np.ndarray) -> dict[int, list[float]]:
+    coords_arr = np.asarray(coords, dtype=np.float32)
+    cluster_arr = np.asarray(cluster_ids, dtype=np.int32)
+    anchors: dict[int, list[float]] = {}
+    if coords_arr.ndim != 2 or coords_arr.shape[0] != cluster_arr.shape[0]:
+        return anchors
+    finite = np.all(np.isfinite(coords_arr), axis=1)
+    for cluster_id in np.unique(cluster_arr[(cluster_arr >= 0) & finite]).tolist():
+        idx = np.flatnonzero((cluster_arr == int(cluster_id)) & finite)
+        if idx.size:
+            anchors[int(cluster_id)] = [float(value) for value in np.nanmean(coords_arr[idx], axis=0).tolist()]
+    return anchors
+
+
+def _spot_latent_key_coordinates_3d(
+    latent: np.ndarray,
+    cluster_ids: np.ndarray,
+    *,
+    within_coords: np.ndarray | None,
+    cluster_anchor_distance: np.ndarray | None,
+    cluster_anchors: np.ndarray | None,
+) -> tuple[np.ndarray, dict[int, list[float]], dict[str, list[float]], str]:
+    """Build 3D display coordinates for the global spot-latent key.
+
+    Stored spot-latent maps use two coordinates for RGB color compatibility.
+    The key can still show a 3D between-cluster layout by re-embedding the
+    model-grounded cluster-anchor distance matrix and adding the within-cluster
+    barycentric residual in the first two dimensions.
+    """
+
+    latent_arr = np.asarray(latent, dtype=np.float32)
+    cluster_arr = np.asarray(cluster_ids, dtype=np.int32)
+    if latent_arr.ndim != 2 or latent_arr.shape[0] != cluster_arr.shape[0] or latent_arr.shape[1] < 2:
+        empty = np.zeros((cluster_arr.shape[0], 3), dtype=np.float32)
+        return empty, {}, _coordinate_limits(empty, n_dims=3), "unavailable"
+    if cluster_anchor_distance is None and cluster_anchors is None and latent_arr.shape[1] >= 3:
+        key_coords = latent_arr[:, :3].astype(np.float32)
+        key_anchors = _cluster_mean_coordinate_anchors(key_coords, cluster_arr)
+        key_limits = _coordinate_limits(key_coords[(cluster_arr >= 0) & np.all(np.isfinite(key_coords), axis=1)], n_dims=3)
+        return key_coords, key_anchors, key_limits, "stored_latent_coordinates_3d"
+
+    n_clusters = int(np.max(cluster_arr[cluster_arr >= 0]) + 1) if np.any(cluster_arr >= 0) else 0
+    anchors_3d: np.ndarray | None = None
+    key_mode = "cluster_mean_latent_xy_zero_z"
+    if cluster_anchor_distance is not None:
+        distance = np.asarray(cluster_anchor_distance, dtype=np.float32)
+        if distance.ndim == 2 and distance.shape[0] == distance.shape[1] and distance.shape[0] >= n_clusters:
+            anchors_3d = _classical_mds_from_sqdist(distance, n_components=3).astype(np.float32)
+            key_mode = "cluster_anchor_distance_mds3d_plus_within_xy"
+    if anchors_3d is None and cluster_anchors is not None:
+        stored = np.asarray(cluster_anchors, dtype=np.float32)
+        if stored.ndim == 2 and stored.shape[0] >= n_clusters and stored.shape[1] >= 2:
+            anchors_3d = np.zeros((stored.shape[0], 3), dtype=np.float32)
+            anchors_3d[:, : min(3, stored.shape[1])] = stored[:, : min(3, stored.shape[1])]
+            key_mode = "stored_cluster_anchor_coordinates_zero_padded_to_3d"
+    if anchors_3d is None:
+        anchors_2d = _cluster_mean_latent_anchors(latent_arr[:, :2], cluster_arr)
+        anchors_3d = np.zeros((max(n_clusters, 1), 3), dtype=np.float32)
+        for cluster_id, anchor in anchors_2d.items():
+            if 0 <= int(cluster_id) < anchors_3d.shape[0]:
+                anchors_3d[int(cluster_id), :2] = np.asarray(anchor[:2], dtype=np.float32)
+
+    if anchors_3d.shape[0] < n_clusters:
+        anchors_3d = np.pad(anchors_3d, ((0, n_clusters - anchors_3d.shape[0]), (0, 0)), constant_values=0.0)
+    if anchors_3d.shape[1] < 3:
+        anchors_3d = np.pad(anchors_3d, ((0, 0), (0, 3 - anchors_3d.shape[1])), constant_values=0.0)
+    anchors_3d = anchors_3d[:, :3].astype(np.float32)
+
+    residual = np.zeros((latent_arr.shape[0], 3), dtype=np.float32)
+    if within_coords is not None:
+        within = np.asarray(within_coords, dtype=np.float32)
+        if within.ndim == 2 and within.shape[0] == latent_arr.shape[0] and within.shape[1] >= 2:
+            residual[:, :2] = within[:, :2]
+    else:
+        display_anchors = _cluster_mean_latent_anchors(latent_arr[:, :2], cluster_arr)
+        for cluster_id, anchor in display_anchors.items():
+            idx = np.flatnonzero(cluster_arr == int(cluster_id))
+            if idx.size:
+                residual[idx, :2] = latent_arr[idx, :2] - np.asarray(anchor[:2], dtype=np.float32)[None, :]
+
+    key_coords = np.zeros((latent_arr.shape[0], 3), dtype=np.float32)
+    valid = (cluster_arr >= 0) & (cluster_arr < anchors_3d.shape[0])
+    key_coords[valid] = anchors_3d[cluster_arr[valid]] + residual[valid]
+    key_coords[~np.all(np.isfinite(key_coords), axis=1)] = 0.0
+    key_anchors = _cluster_mean_coordinate_anchors(key_coords, cluster_arr)
+    key_limits = _coordinate_limits(key_coords[valid], n_dims=3)
+    return key_coords, key_anchors, key_limits, key_mode
 
 
 def _plot_sample_cluster_maps(
@@ -1008,6 +1120,9 @@ def plot_sample_spot_latent_maps(
     latent_source = "occurrence_npz"
     occurrence_weights: np.ndarray
     occurrence_subregion_ids: np.ndarray
+    latent_within_coords: np.ndarray | None = None
+    cluster_anchor_distance_matrix: np.ndarray | None = None
+    cluster_anchor_coords: np.ndarray | None = None
     subregion_id_source = "unavailable"
     spot_latent_mode = str(metadata.get("spot_level_latent_mode", "atom_barycentric_mds"))
     latent_projection_mode = str(
@@ -1054,6 +1169,12 @@ def plot_sample_spot_latent_maps(
             latent = np.asarray(payload["latent_coords"], dtype=np.float32)
             cluster_ids = np.asarray(payload["cluster_labels"], dtype=np.int32)
             occurrence_weights = np.asarray(payload["weights"], dtype=np.float32) if "weights" in payload.files else np.ones(latent.shape[0], dtype=np.float32)
+            if "within_coords" in payload.files:
+                latent_within_coords = np.asarray(payload["within_coords"], dtype=np.float32)
+            if "cluster_anchor_distance" in payload.files:
+                cluster_anchor_distance_matrix = np.asarray(payload["cluster_anchor_distance"], dtype=np.float32)
+            if "cluster_anchors" in payload.files:
+                cluster_anchor_coords = np.asarray(payload["cluster_anchors"], dtype=np.float32)
             spot_latent_mode = _payload_scalar(payload, "spot_latent_mode", spot_latent_mode)
             latent_projection_mode = _payload_scalar(payload, "latent_projection_mode", latent_projection_mode)
             chart_learning_mode = _payload_scalar(payload, "chart_learning_mode", chart_learning_mode)
@@ -1163,8 +1284,8 @@ def plot_sample_spot_latent_maps(
     else:
         mds_status = "not_geometrically_interpretable"
 
-    if latent.ndim != 2 or latent.shape[1] != 2:
-        raise ValueError("Spot latent coordinates must have shape (n_observations, 2).")
+    if latent.ndim != 2 or latent.shape[1] < 2:
+        raise ValueError("Spot latent coordinates must have shape (n_observations, >=2).")
     if cluster_ids.shape[0] != latent.shape[0]:
         raise ValueError("Spot latent cluster labels must have one entry per latent coordinate.")
     if occurrence_subregion_ids.shape[0] != latent.shape[0]:
@@ -1201,15 +1322,25 @@ def plot_sample_spot_latent_maps(
     )
     occurrence_sample_values = sample_values[occurrence_cell_indices]
     occurrence_coords = coords_um[occurrence_cell_indices]
-    finite_latent = np.all(np.isfinite(latent), axis=1)
+    display_latent = np.asarray(latent[:, :2], dtype=np.float32)
+    finite_latent = np.all(np.isfinite(display_latent), axis=1)
     valid_cluster = cluster_ids >= 0
     if occurrence_weights.shape[0] != latent.shape[0]:
         raise ValueError("Spot latent weights must have one entry per latent coordinate.")
     rng = np.random.default_rng(int(random_state))
-    display_latent = np.asarray(latent, dtype=np.float32)
     cluster_display_anchors = _cluster_mean_latent_anchors(display_latent, cluster_ids)
     display_latent_limits = _latent_color_limits(display_latent[finite_latent & valid_cluster])
-    within_niche_color_limits = _latent_color_limits_by_cluster(latent, cluster_ids)
+    within_niche_color_limits = _latent_color_limits_by_cluster(display_latent, cluster_ids)
+    key_latent_3d, key_cluster_display_anchors, key_latent_limits, global_latent_key_mode = (
+        _spot_latent_key_coordinates_3d(
+            display_latent,
+            cluster_ids,
+            within_coords=latent_within_coords,
+            cluster_anchor_distance=cluster_anchor_distance_matrix,
+            cluster_anchors=cluster_anchor_coords,
+        )
+    )
+    max_key_points = max(0, int(os.environ.get("SPATIAL_OT_SPOT_LATENT_KEY_MAX_POINTS", "30000")))
     color_scale_mode = os.environ.get("SPATIAL_OT_SPOT_LATENT_COLOR_SCALE", "global").strip().lower()
     if color_scale_mode not in {"global", "within_cluster"}:
         color_scale_mode = "global"
@@ -1231,7 +1362,8 @@ def plot_sample_spot_latent_maps(
                 rng.choice(occurrence_idx, size=int(max_occurrences_per_cluster), replace=False)
             )
         display_latent_values = display_latent[occurrence_idx]
-        local_latent_values = latent[occurrence_idx]
+        local_latent_values = display_latent[occurrence_idx]
+        key_latent_values = key_latent_3d[occurrence_idx]
         local_cluster_ids = cluster_ids[occurrence_idx]
         latent_coords_um = occurrence_coords[occurrence_idx]
         if color_scale_mode == "within_cluster":
@@ -1251,14 +1383,9 @@ def plot_sample_spot_latent_maps(
                 subregion_mask = boundary_subregion_ids == int(subregion_id)
                 boundary_polygons.extend(_subregion_boundary_polygons(boundary_coords_um[subregion_mask]))
 
-        fig, axes = plt.subplots(
-            nrows=1,
-            ncols=2,
-            figsize=(12.5, 7.2),
-            gridspec_kw={"width_ratios": [4.2, 1.25]},
-            constrained_layout=True,
-        )
-        ax = axes[0]
+        fig = plt.figure(figsize=(12.8, 7.2), constrained_layout=True)
+        gridspec = fig.add_gridspec(nrows=1, ncols=2, width_ratios=[4.2, 1.45])
+        ax = fig.add_subplot(gridspec[0, 0])
         ax.scatter(
             background_coords[:, 0],
             background_coords[:, 1],
@@ -1321,31 +1448,49 @@ def plot_sample_spot_latent_maps(
         ax.set_aspect("equal")
         ax.invert_yaxis()
 
-        key_ax = axes[1]
+        key_ax = fig.add_subplot(gridspec[0, 1], projection="3d")
+        key_plot_idx = np.arange(key_latent_values.shape[0], dtype=np.int64)
+        if max_key_points > 0 and key_plot_idx.size > max_key_points:
+            key_plot_idx = np.sort(rng.choice(key_plot_idx, size=max_key_points, replace=False))
         key_ax.scatter(
-            display_latent_values[:, 0],
-            display_latent_values[:, 1],
+            key_latent_values[key_plot_idx, 0],
+            key_latent_values[key_plot_idx, 1],
+            key_latent_values[key_plot_idx, 2],
             s=max(point_size * 0.8, 0.4),
-            color=colors,
+            color=colors[key_plot_idx],
             linewidths=0,
             alpha=0.85,
-            rasterized=display_latent_values.shape[0] > 20000,
+            depthshade=False,
         )
-        key_ax.set_title("pooled latent key" if latent_source == "subregion_table_embed_preview" else "global latent key")
+        key_ax.set_title(
+            "pooled latent key (3D)" if latent_source == "subregion_table_embed_preview" else "global latent key (3D)"
+        )
         key_ax.set_xlabel("latent 1")
         key_ax.set_ylabel("latent 2")
-        key_ax.set_aspect("equal", adjustable="box")
-        key_ax.set_xlim(float(display_latent_limits["lower"][0]), float(display_latent_limits["upper"][0]))
-        key_ax.set_ylim(float(display_latent_limits["lower"][1]), float(display_latent_limits["upper"][1]))
+        key_ax.set_zlabel("latent 3")
+        key_ax.set_xlim(float(key_latent_limits["lower"][0]), float(key_latent_limits["upper"][0]))
+        key_ax.set_ylim(float(key_latent_limits["lower"][1]), float(key_latent_limits["upper"][1]))
+        key_ax.set_zlim(float(key_latent_limits["lower"][2]), float(key_latent_limits["upper"][2]))
+        key_ax.view_init(elev=18.0, azim=-58.0)
+        try:
+            span = np.maximum(
+                np.asarray(key_latent_limits["upper"], dtype=np.float32)
+                - np.asarray(key_latent_limits["lower"], dtype=np.float32),
+                1e-6,
+            )
+            key_ax.set_box_aspect(tuple(float(value) for value in span / np.max(span)))
+        except Exception:
+            pass
 
         present_clusters = np.unique(cluster_ids[occurrence_idx][cluster_ids[occurrence_idx] >= 0])
         for cluster_id in present_clusters.tolist():
-            anchor = cluster_display_anchors.get(int(cluster_id))
+            anchor = key_cluster_display_anchors.get(int(cluster_id))
             if anchor is None:
                 continue
             key_ax.text(
                 float(anchor[0]),
                 float(anchor[1]),
+                float(anchor[2]) if len(anchor) > 2 else 0.0,
                 f"C{int(cluster_id)}",
                 fontsize=8,
                 ha="center",
@@ -1364,6 +1509,7 @@ def plot_sample_spot_latent_maps(
                 "n_clusters_present": int(present_clusters.size),
                 "n_latent_occurrences": total_occurrences,
                 "n_plotted_occurrences": int(occurrence_idx.size),
+                "n_global_key_occurrences": int(key_plot_idx.size),
                 "n_subregion_boundary_outlines": int(len(boundary_polygons)),
                 "local_latent1_min": float(np.nanmin(local_latent_values[:, 0])),
                 "local_latent1_max": float(np.nanmax(local_latent_values[:, 0])),
@@ -1383,7 +1529,9 @@ def plot_sample_spot_latent_maps(
         rendering = "whole_sample_pooled_subregion_latent_rgb"
     else:
         color_encoding = (
-            "The side key uses the stored 2D spot-latent coordinates to show model-grounded between-cluster layout. "
+            "The side key uses a 3D global latent display; when model-grounded cluster-anchor distances are saved, "
+            "the key re-embeds those anchors by 3D MDS and adds the within-cluster barycentric residual in the first "
+            "two axes. "
             "Slide colors use global latent color scaling by default so colors remain comparable across clusters "
             "and samples; within-cluster rescaling is available only as an explicit diagnostic mode. Treat this as "
             "diagnostic visualization, not independent validation."
@@ -1419,6 +1567,10 @@ def plot_sample_spot_latent_maps(
         "rendering": rendering,
         "color_scale_mode": color_scale_mode,
         "color_encoding": color_encoding,
+        "global_latent_key_dimension": 3,
+        "global_latent_key_mode": global_latent_key_mode,
+        "global_latent_key_max_points": int(max_key_points),
+        "global_latent_key_limits": key_latent_limits,
         "includes_aligned_coordinates_in_chart_features": bool(
             latent_mode_metadata["includes_aligned_coordinates_in_chart_features"]
         ),
@@ -1427,6 +1579,7 @@ def plot_sample_spot_latent_maps(
         "within_niche_latent_color_limits": within_niche_color_limits,
         "display_latent_limits": display_latent_limits,
         "cluster_display_anchors": {str(key): value for key, value in cluster_display_anchors.items()},
+        "cluster_display_anchors_3d": {str(key): value for key, value in key_cluster_display_anchors.items()},
         "max_occurrences_per_sample": int(max_occurrences_per_cluster),
         "max_occurrences_per_cluster": int(max_occurrences_per_cluster),
         "plots": plots,

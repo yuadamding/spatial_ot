@@ -1628,12 +1628,196 @@ def test_internal_heterogeneity_embedding_separates_arrangement_not_composition(
         codebook_sample_size=64,
         random_state=2028,
     )
-    assert metadata["mode"] == "heterogeneity_ot_niche"
+    assert metadata["mode"] == "heterogeneity_descriptor_niche"
+    assert metadata["requested_mode"] == "heterogeneity_descriptor_niche"
+    assert metadata["uses_ot_costs"] is False
     assert metadata["uses_internal_canonical_coordinates"] is True
     assert metadata["uses_pairwise_internal_spatial_graph"] is True
+    assert metadata["pair_cooccurrence_normalization"] == "observed_over_expected"
+    assert metadata["reserved_ot_modes"] == [
+        "heterogeneity_fused_ot_niche",
+        "heterogeneity_fgw_niche",
+    ]
+    assert set(metadata["block_weights"]) == {
+        "composition",
+        "diversity",
+        "spatial_field",
+        "pair_cooccurrence",
+    }
+    assert set(metadata["block_slices"]) == set(metadata["block_weights"])
+    assert set(metadata["block_diagnostics"]) == set(metadata["block_weights"])
     assert embeddings.shape[0] == 4
 
     dist = np.linalg.norm(embeddings[:, None, :] - embeddings[None, :, :], axis=2)
+    assert dist[0, 2] < dist[0, 1]
+    assert dist[1, 3] < dist[1, 0]
+
+
+def test_internal_heterogeneity_composition_only_loses_arrangement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_GRID_SIZE", "4")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_MAX_CODEBOOK_SIZE", "2")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_COMPOSITION_WEIGHT", "1")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_DIVERSITY_WEIGHT", "0")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_FIELD_WEIGHT", "0")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_PAIR_WEIGHT", "0")
+    rng = np.random.default_rng(2029)
+
+    def make_measure(subregion_id: int, arrangement: str) -> SubregionMeasure:
+        if arrangement == "left_right":
+            coords_a = np.column_stack(
+                [
+                    rng.normal(-0.6, 0.04, size=12),
+                    rng.normal(0.0, 0.20, size=12),
+                ]
+            )
+            coords_b = np.column_stack(
+                [
+                    rng.normal(0.6, 0.04, size=12),
+                    rng.normal(0.0, 0.20, size=12),
+                ]
+            )
+        else:
+            coords_a = np.column_stack(
+                [
+                    rng.normal(0.0, 0.20, size=12),
+                    rng.normal(-0.6, 0.04, size=12),
+                ]
+            )
+            coords_b = np.column_stack(
+                [
+                    rng.normal(0.0, 0.20, size=12),
+                    rng.normal(0.6, 0.04, size=12),
+                ]
+            )
+        coords = np.vstack([coords_a, coords_b]).astype(np.float32)
+        features = np.vstack(
+            [
+                np.tile(np.array([1.0, 0.0], dtype=np.float32), (12, 1)),
+                np.tile(np.array([0.0, 1.0], dtype=np.float32), (12, 1)),
+            ]
+        )
+        return SubregionMeasure(
+            subregion_id=int(subregion_id),
+            center_um=np.zeros(2, dtype=np.float32),
+            members=np.arange(24, dtype=np.int32),
+            canonical_coords=coords,
+            features=features,
+            weights=np.full(24, 1.0 / 24.0, dtype=np.float32),
+            geometry_point_count=24,
+            compressed_point_count=24,
+            normalizer=ShapeNormalizer(
+                center=np.zeros((1, 2), dtype=np.float32),
+                scale=1.0,
+                interpolator=None,
+            ),
+            normalizer_diagnostics=ShapeNormalizerDiagnostics(
+                geometry_source="test",
+                used_fallback=False,
+                ot_cost=None,
+                sinkhorn_converged=None,
+                mapped_radius_p95=None,
+                mapped_radius_max=None,
+                interpolation_residual=None,
+            ),
+        )
+
+    embeddings, metadata = build_internal_heterogeneity_embeddings(
+        [
+            make_measure(0, "left_right"),
+            make_measure(1, "bottom_top"),
+            make_measure(2, "left_right"),
+            make_measure(3, "bottom_top"),
+        ],
+        codebook_size=2,
+        codebook_sample_size=64,
+        random_state=2029,
+        mode="heterogeneity_ot_niche",
+    )
+
+    assert metadata["mode"] == "heterogeneity_descriptor_niche"
+    assert metadata["requested_mode"] == "heterogeneity_ot_niche"
+    assert metadata["legacy_alias_requested"] is True
+    assert metadata["block_weights"]["composition"] == pytest.approx(1.0)
+    assert metadata["block_weights"]["spatial_field"] == pytest.approx(0.0)
+    assert metadata["block_weights"]["pair_cooccurrence"] == pytest.approx(0.0)
+    pairwise_dist = np.linalg.norm(
+        embeddings[:, None, :] - embeddings[None, :, :],
+        axis=2,
+    )
+    assert np.max(pairwise_dist) < 1e-6
+
+
+def test_internal_heterogeneity_pair_block_detects_contact_motif(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_GRID_SIZE", "4")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_MAX_CODEBOOK_SIZE", "2")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_PAIR_BINS", "0.25,0.5,1.0,2.0")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_COMPOSITION_WEIGHT", "0")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_DIVERSITY_WEIGHT", "0")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_FIELD_WEIGHT", "0")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_PAIR_WEIGHT", "1")
+
+    def make_measure(subregion_id: int, motif: str) -> SubregionMeasure:
+        ys = np.linspace(-0.35, 0.35, 8, dtype=np.float32)
+        if motif == "intermixed":
+            coords_a = np.column_stack([np.full(8, -0.08, dtype=np.float32), ys])
+            coords_b = np.column_stack([np.full(8, 0.08, dtype=np.float32), ys])
+        else:
+            coords_a = np.column_stack([np.full(8, -0.55, dtype=np.float32), ys])
+            coords_b = np.column_stack([np.full(8, 0.55, dtype=np.float32), ys])
+        coords = np.vstack([coords_a, coords_b]).astype(np.float32)
+        features = np.vstack(
+            [
+                np.tile(np.array([1.0, 0.0], dtype=np.float32), (8, 1)),
+                np.tile(np.array([0.0, 1.0], dtype=np.float32), (8, 1)),
+            ]
+        )
+        return SubregionMeasure(
+            subregion_id=int(subregion_id),
+            center_um=np.zeros(2, dtype=np.float32),
+            members=np.arange(16, dtype=np.int32),
+            canonical_coords=coords,
+            features=features,
+            weights=np.full(16, 1.0 / 16.0, dtype=np.float32),
+            geometry_point_count=16,
+            compressed_point_count=16,
+            normalizer=ShapeNormalizer(
+                center=np.zeros((1, 2), dtype=np.float32),
+                scale=1.0,
+                interpolator=None,
+            ),
+            normalizer_diagnostics=ShapeNormalizerDiagnostics(
+                geometry_source="test",
+                used_fallback=False,
+                ot_cost=None,
+                sinkhorn_converged=None,
+                mapped_radius_p95=None,
+                mapped_radius_max=None,
+                interpolation_residual=None,
+            ),
+        )
+
+    embeddings, metadata = build_internal_heterogeneity_embeddings(
+        [
+            make_measure(0, "intermixed"),
+            make_measure(1, "segregated"),
+            make_measure(2, "intermixed"),
+            make_measure(3, "segregated"),
+        ],
+        codebook_size=2,
+        codebook_sample_size=64,
+        random_state=2030,
+    )
+
+    assert metadata["block_weights"]["pair_cooccurrence"] == pytest.approx(1.0)
+    assert metadata["pair_cooccurrence_normalization"] == "observed_over_expected"
+    dist = np.linalg.norm(embeddings[:, None, :] - embeddings[None, :, :], axis=2)
+    assert dist[0, 2] < 1e-6
+    assert dist[1, 3] < 1e-6
+    assert dist[0, 1] > 1e-3
     assert dist[0, 2] < dist[0, 1]
     assert dist[1, 3] < dist[1, 0]
 

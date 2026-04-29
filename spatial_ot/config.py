@@ -68,7 +68,7 @@ class MultilevelOTConfig:
     joint_refinement_spatial_weight: float = 0.25
     joint_refinement_cut_weight: float = 0.5
     joint_refinement_max_move_fraction: float = 0.05
-    subregion_clustering_method: str = "heterogeneity_ot_niche"
+    subregion_clustering_method: str = "heterogeneity_descriptor_niche"
     subregion_latent_embedding_mode: str = "mean_std_shrunk"
     subregion_latent_shrinkage_tau: float = 25.0
     subregion_latent_heterogeneity_weight: float = 0.5
@@ -280,6 +280,7 @@ def _validate_multilevel_experiment(
         raise ValueError("ot.joint_refinement_max_move_fraction must be in [0, 1]")
     valid_clustering_methods = {
         "pooled_subregion_latent",
+        "heterogeneity_descriptor_niche",
         "heterogeneity_ot_niche",
         "ot_dictionary",
     }

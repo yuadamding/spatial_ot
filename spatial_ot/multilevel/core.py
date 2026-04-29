@@ -41,7 +41,12 @@ from .geometry import (
     sample_geometry_points,
 )
 from .gpu_ot import sinkhorn_semirelaxed_unbalanced_log_torch
-from .heterogeneity import build_internal_heterogeneity_embeddings
+from .heterogeneity import (
+    HETEROGENEITY_DESCRIPTOR_ALIASES,
+    HETEROGENEITY_DESCRIPTOR_MODE,
+    LEGACY_HETEROGENEITY_OT_ALIAS,
+    build_internal_heterogeneity_embeddings,
+)
 from .model_selection import (
     comprehensive_select_k_from_latent_embeddings,
     effective_min_cluster_size,
@@ -4015,7 +4020,7 @@ def fit_multilevel_ot(
     joint_refinement_cut_weight: float = 0.5,
     joint_refinement_max_move_fraction: float = 0.05,
     compute_spot_latent: bool = True,
-    subregion_clustering_method: str = "heterogeneity_ot_niche",
+    subregion_clustering_method: str = HETEROGENEITY_DESCRIPTOR_MODE,
     subregion_latent_embedding_mode: str = "mean_std_shrunk",
     subregion_latent_shrinkage_tau: float = 25.0,
     subregion_latent_heterogeneity_weight: float = _SUBREGION_LATENT_HETEROGENEITY_WEIGHT,
@@ -4084,7 +4089,12 @@ def fit_multilevel_ot(
         raise ValueError(
             "subregion_construction_method must be 'data_driven', 'deep_segmentation', or 'joint_refinement'."
         )
-    clustering_method = str(subregion_clustering_method).strip().lower()
+    requested_clustering_method = str(subregion_clustering_method).strip().lower()
+    clustering_method = (
+        HETEROGENEITY_DESCRIPTOR_MODE
+        if requested_clustering_method == LEGACY_HETEROGENEITY_OT_ALIAS
+        else requested_clustering_method
+    )
     subregion_latent_embedding_mode = _normalize_subregion_latent_embedding_mode(
         subregion_latent_embedding_mode
     )
@@ -4101,12 +4111,13 @@ def fit_multilevel_ot(
     )
     if clustering_method not in {
         "pooled_subregion_latent",
-        "heterogeneity_ot_niche",
+        HETEROGENEITY_DESCRIPTOR_MODE,
         "ot_dictionary",
     }:
         raise ValueError(
             "subregion_clustering_method must be 'pooled_subregion_latent', "
-            "'heterogeneity_ot_niche', or 'ot_dictionary'."
+            f"'{HETEROGENEITY_DESCRIPTOR_MODE}', legacy alias "
+            f"'{LEGACY_HETEROGENEITY_OT_ALIAS}', or 'ot_dictionary'."
         )
     subregion_feature_weight = max(0.0, float(subregion_feature_weight))
     subregion_feature_dims = max(0, int(subregion_feature_dims))
@@ -4347,7 +4358,7 @@ def fit_multilevel_ot(
             raise ValueError(
                 "subregion_construction_method='joint_refinement' requires generated subregions."
             )
-        if clustering_method not in {"pooled_subregion_latent", "heterogeneity_ot_niche"}:
+        if clustering_method not in {"pooled_subregion_latent", HETEROGENEITY_DESCRIPTOR_MODE}:
             raise ValueError(
                 "subregion_construction_method='joint_refinement' requires "
                 "an embedding-based subregion_clustering_method."
@@ -4593,7 +4604,7 @@ def fit_multilevel_ot(
     _progress("estimating overlap graph and cost scales")
     optimization_measures = _make_optimization_measures(measures)
     summaries = np.vstack([_measure_summary(m) for m in optimization_measures])
-    if clustering_method == "heterogeneity_ot_niche":
+    if clustering_method in HETEROGENEITY_DESCRIPTOR_ALIASES:
         _progress(
             "building internal heterogeneity motif embeddings "
             "(soft state composition, diversity, canonical spatial-state field, pair graph)"
@@ -4604,9 +4615,10 @@ def fit_multilevel_ot(
                 codebook_size=int(subregion_latent_codebook_size),
                 codebook_sample_size=int(subregion_latent_codebook_sample_size),
                 random_state=int(seed),
+                mode=str(requested_clustering_method),
             )
         )
-        subregion_latent_embedding_mode = "heterogeneity_ot_niche"
+        subregion_latent_embedding_mode = HETEROGENEITY_DESCRIPTOR_MODE
         subregion_latent_diagnostics = {
             "shrinkage_alpha": np.ones(len(subregion_members), dtype=np.float32),
             "raw_to_shrunk_distance": np.zeros(len(subregion_members), dtype=np.float32),
@@ -4671,7 +4683,7 @@ def fit_multilevel_ot(
             "automatic K selection enabled; candidate K="
             + ",".join(str(k) for k in candidate_ks)
         )
-        if clustering_method in {"pooled_subregion_latent", "heterogeneity_ot_niche"}:
+        if clustering_method in {"pooled_subregion_latent", HETEROGENEITY_DESCRIPTOR_MODE}:
             stability_seed_count = max(
                 3, min(8, _env_int("SPATIAL_OT_AUTO_K_STABILITY_SEEDS", 5))
             )
@@ -4777,14 +4789,14 @@ def fit_multilevel_ot(
 
     n_clusters = int(selected_n_clusters)
     selected_restart_id = 0
-    if clustering_method in {"pooled_subregion_latent", "heterogeneity_ot_niche"}:
-        if clustering_method == "heterogeneity_ot_niche":
+    if clustering_method in {"pooled_subregion_latent", HETEROGENEITY_DESCRIPTOR_MODE}:
+        if clustering_method == HETEROGENEITY_DESCRIPTOR_MODE:
             _progress(
-                "clustering internal heterogeneity motif embeddings "
+                "clustering internal heterogeneity descriptor motif embeddings "
                 f"(K={n_clusters}; uses canonical within-subregion arrangement, "
                 "not raw tissue position or sample labels)"
             )
-            label_assignment_source = "internal_heterogeneity_motif_embeddings"
+            label_assignment_source = "internal_heterogeneity_descriptor_motif_embeddings"
         else:
             _progress(
                 "clustering pooled raw-member feature-distribution subregion latent embeddings "

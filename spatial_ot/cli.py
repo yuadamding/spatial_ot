@@ -1074,8 +1074,13 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument(
         "--subregion-clustering-method",
         default=None,
-        choices=["pooled_subregion_latent", "heterogeneity_ot_niche", "ot_dictionary"],
-        help="How fitted subregions receive niche labels. heterogeneity_ot_niche clusters recurring internal spatial-cell-state heterogeneity motifs; pooled_subregion_latent is the composition/distribution-summary baseline; ot_dictionary keeps the historical OT-dictionary assignment.",
+        choices=[
+            "pooled_subregion_latent",
+            "heterogeneity_descriptor_niche",
+            "heterogeneity_ot_niche",
+            "ot_dictionary",
+        ],
+        help="How fitted subregions receive niche labels. heterogeneity_descriptor_niche clusters block-normalized internal spatial-cell-state motif descriptors; heterogeneity_ot_niche is a legacy alias until true fused-OT/FGW modes are implemented; pooled_subregion_latent is the composition/distribution-summary baseline; ot_dictionary keeps the historical OT-dictionary assignment.",
     )
     multilevel.add_argument(
         "--subregion-latent-embedding-mode",
@@ -1495,8 +1500,13 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument(
         "--subregion-clustering-method",
         default=None,
-        choices=["pooled_subregion_latent", "heterogeneity_ot_niche", "ot_dictionary"],
-        help="How fitted subregions receive niche labels. heterogeneity_ot_niche clusters recurring internal spatial-cell-state heterogeneity motifs; pooled_subregion_latent is the composition/distribution-summary baseline; ot_dictionary keeps the historical OT-dictionary assignment.",
+        choices=[
+            "pooled_subregion_latent",
+            "heterogeneity_descriptor_niche",
+            "heterogeneity_ot_niche",
+            "ot_dictionary",
+        ],
+        help="How fitted subregions receive niche labels. heterogeneity_descriptor_niche clusters block-normalized internal spatial-cell-state motif descriptors; heterogeneity_ot_niche is a legacy alias until true fused-OT/FGW modes are implemented; pooled_subregion_latent is the composition/distribution-summary baseline; ot_dictionary keeps the historical OT-dictionary assignment.",
     )
     optimal_search.add_argument(
         "--subregion-latent-embedding-mode",

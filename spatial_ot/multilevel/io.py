@@ -49,6 +49,7 @@ from .geometry import (
     _shape_leakage_spatial_block_accuracy,
     _validate_mutually_exclusive_memberships,
 )
+from .heterogeneity import HETEROGENEITY_DESCRIPTOR_MODE
 from .metadata import (
     extract_count_target as _extract_count_target,
     git_sha as _git_sha,
@@ -123,8 +124,8 @@ def _method_stack_summary(
     subregion_clustering_method: str,
     subregion_clustering_uses_spatial: bool,
 ) -> dict[str, object]:
-    if str(subregion_clustering_method) == "heterogeneity_ot_niche":
-        core_model = "internal_heterogeneity_spatial_cell_state_motif_clustering"
+    if str(subregion_clustering_method) == HETEROGENEITY_DESCRIPTOR_MODE:
+        core_model = "internal_heterogeneity_descriptor_spatial_cell_state_motif_clustering"
     elif not bool(subregion_clustering_uses_spatial):
         core_model = "pooled_raw_member_feature_distribution_subregion_latent_clustering"
     else:
@@ -1628,7 +1629,7 @@ def run_multilevel_ot_on_h5ad(
     joint_refinement_spatial_weight: float = 0.25,
     joint_refinement_cut_weight: float = 0.5,
     joint_refinement_max_move_fraction: float = 0.05,
-    subregion_clustering_method: str = "heterogeneity_ot_niche",
+    subregion_clustering_method: str = HETEROGENEITY_DESCRIPTOR_MODE,
     subregion_latent_embedding_mode: str = "mean_std_shrunk",
     subregion_latent_shrinkage_tau: float = 25.0,
     subregion_latent_heterogeneity_weight: float = 0.5,
@@ -2351,8 +2352,8 @@ def run_multilevel_ot_on_h5ad(
             result.subregion_clustering_uses_spatial
         ),
         "subregion_clustering_feature_space": (
-            "internal heterogeneity motif embeddings over canonical spatial-state fields and pair co-occurrence graphs"
-            if result.subregion_clustering_method == "heterogeneity_ot_niche"
+            "block-normalized internal heterogeneity descriptor embeddings over canonical spatial-state fields and pair co-occurrence graphs"
+            if result.subregion_clustering_method == HETEROGENEITY_DESCRIPTOR_MODE
             else (
                 "pooled raw-member feature-distribution subregion latent embeddings"
                 if not result.subregion_clustering_uses_spatial
@@ -2599,7 +2600,7 @@ def run_multilevel_ot_on_h5ad(
             "subregion_cluster_size": "cluster-size constraints are applied to the number of fitted subregions assigned to each subregion cluster, not to projected cell or spot labels",
             "cell_boundary_projection": "cell-level scores are an approximate projection from canonical-coordinate plus feature fit to assigned cluster atoms, modulated by fitted-subregion cluster evidence; they are not an exact posterior under the OT model",
             "spot_level_latent": "spot-level latent charts are learned after the regional OT fit. The default chart is OT atom-barycentric MDS: fitted cluster atom measures define global anchors, and each occurrence is placed by barycentering its assigned cluster's atom embedding with a cost-gap-calibrated OT atom posterior. Raw aligned coordinates are not concatenated into the default chart features, cluster-local variance is not forced to a fixed radius, and posterior entropy/atom-argmax/effective-temperature diagnostics are saved. Treat this as diagnostic visualization, not independent validation",
-            "auto_k_selection": "when enabled under pooled_subregion_latent or heterogeneity_ot_niche clustering, K is selected directly from the corresponding subregion embedding using Silhouette, CH, DB, and Gap. The historical OT-landmark selector remains only for ot_dictionary mode. Treat auto-K as exploratory until full fixed-K stability checks are run around the selected K",
+            "auto_k_selection": f"when enabled under pooled_subregion_latent or {HETEROGENEITY_DESCRIPTOR_MODE} clustering, K is selected directly from the corresponding subregion embedding using Silhouette, CH, DB, and Gap. The historical OT-landmark selector remains only for ot_dictionary mode. Treat auto-K as exploratory until full fixed-K stability checks are run around the selected K",
         },
         "deep_features": deep_summary,
     }

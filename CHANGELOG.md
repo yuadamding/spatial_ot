@@ -1,9 +1,12 @@
 # Changelog
 
-## 0.1.16
+## 0.2.2
 
-- Add `subregion_clustering_method="heterogeneity_ot_niche"` as the target spatial-niche label mode. It clusters recurring internal heterogeneity motifs built from soft cell-state composition, diversity/multimodality, canonical spatial-state density fields, and within-subregion state-pair co-occurrence graphs.
-- Change packaged run defaults from `pooled_subregion_latent` to `heterogeneity_ot_niche`; the pooled summary path remains available as a composition/distribution baseline.
+- Rename the current heterogeneity target implementation to `subregion_clustering_method="heterogeneity_descriptor_niche"` and keep `heterogeneity_ot_niche` only as a legacy alias until true fused-OT / FGW distances are implemented.
+- Change packaged run defaults from `pooled_subregion_latent` to `heterogeneity_descriptor_niche`; the pooled summary path remains available as a composition/distribution baseline.
+- Block-normalize and explicitly weight the heterogeneity descriptor blocks: soft cell-state composition, diversity/multimodality, canonical spatial-state density fields, and within-subregion state-pair co-occurrence.
+- Change the pairwise co-occurrence descriptor to observed-over-expected enrichment by default, so common cell-state pairs do not dominate solely through marginal composition.
+- Align package metadata with the local `0.2.2` state.
 - Add `subregion_construction_method="joint_refinement"` for constrained segmentation-clustering feedback: deep graph segmentation initializes full-coverage regions, pooled subregion latent clusters provide prototypes, adjacent boundary cells may move only when cluster coherence improves after spatial/cut penalties, and the final partition is reconnected/merged to satisfy `min_cells`.
 - Update the high-VRAM cohort profile to default to `SUBREGION_CONSTRUCTION_METHOD=joint_refinement`, while leaving plain `deep_segmentation` and coordinate-only construction available as ablations.
 - Treat `max_subregion_area_um2` as a soft QC target for generated subregions. It is now reported in summaries and warnings, but it no longer shrinks seed scale, blocks connected-region merging, hard-splits final regions, or takes precedence over `min_cells`.
@@ -21,6 +24,7 @@
 - Promote latent MDS quality into visible QC fields, including anchor stress status, atom high-stress cluster counts, and explicit stress/eigenvalue thresholds used by the concern report.
 - Store alternate atom-posterior entropy diagnostics for fixed-temperature and cost-gap-temperature baselines alongside the default entropy-calibrated posterior.
 - Block within-niche latent-heterogeneity claims when anchor OT falls back, MDS geometry is unreliable, posterior entropy is uncalibrated, or temperature calibration suggests inconsistent atom-cost scaling.
+- Render the per-sample spot-latent global key as a 3D plot. The key uses 3D MDS of saved cluster-anchor distances when available, while the slide map keeps global 2D RGB scaling for visual comparability.
 - Calibrate the packaged 10 GB deep-segmentation cohort profile to `DEEP_BATCH_SIZE=81920`, matching the successful pooled run that peaked at roughly 8.9 GiB reserved VRAM without OOM.
 
 ## 0.1.12

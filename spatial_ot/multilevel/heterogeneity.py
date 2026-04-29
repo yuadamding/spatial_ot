@@ -7,6 +7,19 @@ from sklearn.cluster import MiniBatchKMeans
 
 from .types import SubregionMeasure
 
+HETEROGENEITY_DESCRIPTOR_MODE = "heterogeneity_descriptor_niche"
+LEGACY_HETEROGENEITY_OT_ALIAS = "heterogeneity_ot_niche"
+HETEROGENEITY_DESCRIPTOR_ALIASES = {
+    HETEROGENEITY_DESCRIPTOR_MODE,
+    LEGACY_HETEROGENEITY_OT_ALIAS,
+}
+DEFAULT_BLOCK_WEIGHTS = {
+    "composition": 0.20,
+    "diversity": 0.15,
+    "spatial_field": 0.35,
+    "pair_cooccurrence": 0.30,
+}
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
@@ -26,6 +39,43 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return float(default)
+
+
+def _env_block_weights() -> dict[str, float]:
+    weights = {
+        "composition": max(
+            0.0,
+            _env_float(
+                "SPATIAL_OT_HETEROGENEITY_COMPOSITION_WEIGHT",
+                DEFAULT_BLOCK_WEIGHTS["composition"],
+            ),
+        ),
+        "diversity": max(
+            0.0,
+            _env_float(
+                "SPATIAL_OT_HETEROGENEITY_DIVERSITY_WEIGHT",
+                DEFAULT_BLOCK_WEIGHTS["diversity"],
+            ),
+        ),
+        "spatial_field": max(
+            0.0,
+            _env_float(
+                "SPATIAL_OT_HETEROGENEITY_FIELD_WEIGHT",
+                DEFAULT_BLOCK_WEIGHTS["spatial_field"],
+            ),
+        ),
+        "pair_cooccurrence": max(
+            0.0,
+            _env_float(
+                "SPATIAL_OT_HETEROGENEITY_PAIR_WEIGHT",
+                DEFAULT_BLOCK_WEIGHTS["pair_cooccurrence"],
+            ),
+        ),
+    }
+    total = float(sum(weights.values()))
+    if total <= 1e-12:
+        return dict(DEFAULT_BLOCK_WEIGHTS)
+    return {key: float(value / total) for key, value in weights.items()}
 
 
 def _normalize_rows(values: np.ndarray) -> np.ndarray:
@@ -149,6 +199,7 @@ def _pair_cooccurrence(
     weights: np.ndarray,
     *,
     distance_bins: np.ndarray,
+    normalization: str = "observed_over_expected",
 ) -> np.ndarray:
     u = np.asarray(coords, dtype=np.float32)
     q = np.asarray(probs, dtype=np.float32)
@@ -173,8 +224,52 @@ def _pair_cooccurrence(
         weights_bin = pair_w[mask]
         mat = left.T @ (right * weights_bin[:, None])
         out[bin_idx] = mat + mat.T
+    requested = str(normalization or "observed_over_expected").strip().lower()
+    if requested in {"observed_over_expected", "enrichment", "oe"}:
+        composition = np.sum(q.astype(np.float64) * w.astype(np.float64)[:, None], axis=0)
+        composition = composition / max(float(np.sum(composition)), 1e-12)
+        expected = composition[:, None] * composition[None, :]
+        out = np.log1p(out / np.maximum(expected[None, :, :], 1e-8))
     total = max(float(np.sum(out)), 1e-12)
     return (out / total).reshape(-1).astype(np.float32)
+
+
+def _standardize_descriptor_block(
+    block: np.ndarray,
+    *,
+    weight: float,
+) -> tuple[np.ndarray, dict[str, object]]:
+    x = np.asarray(block, dtype=np.float32)
+    if x.ndim != 2:
+        raise ValueError("heterogeneity descriptor blocks must be 2D.")
+    if x.shape[1] == 0:
+        return x, {
+            "dimension": 0,
+            "weight": float(weight),
+            "mean_unweighted_l2": 0.0,
+            "mean_weighted_l2": 0.0,
+        }
+    center = np.mean(x, axis=0, dtype=np.float64)
+    scale = np.std(x, axis=0, dtype=np.float64)
+    finite_scale = scale[np.isfinite(scale) & (scale > 1e-8)]
+    scale_floor = float(np.median(finite_scale) * 1e-3) if finite_scale.size else 1.0
+    scale = np.where(np.isfinite(scale) & (scale > max(scale_floor, 1e-8)), scale, 1.0)
+    z = ((x.astype(np.float64, copy=False) - center[None, :]) / scale[None, :]).astype(
+        np.float32
+    )
+    weighted = z * (float(weight) / float(np.sqrt(max(int(x.shape[1]), 1))))
+    stats = {
+        "dimension": int(x.shape[1]),
+        "weight": float(weight),
+        "standardization": "subregion_block_mean_std_then_weight_over_sqrt_dimension",
+        "mean_unweighted_l2": (
+            float(np.mean(np.linalg.norm(z, axis=1))) if z.size else 0.0
+        ),
+        "mean_weighted_l2": (
+            float(np.mean(np.linalg.norm(weighted, axis=1))) if weighted.size else 0.0
+        ),
+    }
+    return weighted.astype(np.float32), stats
 
 
 def build_internal_heterogeneity_embeddings(
@@ -186,6 +281,7 @@ def build_internal_heterogeneity_embeddings(
     grid_radius: float | None = None,
     pair_distance_bins: tuple[float, ...] | None = None,
     random_state: int = 1337,
+    mode: str = HETEROGENEITY_DESCRIPTOR_MODE,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Build subregion embeddings from internal spatial-cell-state heterogeneity.
 
@@ -194,16 +290,27 @@ def build_internal_heterogeneity_embeddings(
     soft cell-state codebook posteriors rather than raw tissue position.
     """
 
+    requested_mode = str(mode or HETEROGENEITY_DESCRIPTOR_MODE).strip().lower()
+    if requested_mode not in HETEROGENEITY_DESCRIPTOR_ALIASES:
+        raise ValueError(
+            "Current heterogeneity embedding builder supports "
+            f"'{HETEROGENEITY_DESCRIPTOR_MODE}' and legacy alias "
+            f"'{LEGACY_HETEROGENEITY_OT_ALIAS}'."
+        )
     if not measures:
         return np.zeros((0, 0), dtype=np.float32), {
-            "mode": "heterogeneity_ot_niche",
+            "mode": HETEROGENEITY_DESCRIPTOR_MODE,
+            "requested_mode": requested_mode,
             "implemented": True,
             "n_subregions": 0,
         }
     grid = max(int(grid_size or _env_int("SPATIAL_OT_HETEROGENEITY_GRID_SIZE", 6)), 2)
     radius = float(grid_radius or _env_float("SPATIAL_OT_HETEROGENEITY_GRID_RADIUS", 1.5))
     if pair_distance_bins is None:
-        raw_bins = os.environ.get("SPATIAL_OT_HETEROGENEITY_PAIR_BINS", "0.25,0.5,1.0,2.0")
+        raw_bins = os.environ.get(
+            "SPATIAL_OT_HETEROGENEITY_PAIR_BINS",
+            "0.25,0.5,1.0,2.0",
+        )
         pair_distance_bins = tuple(
             float(part.strip()) for part in raw_bins.split(",") if part.strip()
         )
@@ -213,6 +320,10 @@ def build_internal_heterogeneity_embeddings(
     bins = np.sort(np.unique(bins[bins > 0])).astype(np.float32)
     if bins.size == 0:
         bins = np.asarray([1.0], dtype=np.float32)
+    pair_normalization = os.environ.get(
+        "SPATIAL_OT_HETEROGENEITY_PAIR_NORMALIZATION",
+        "observed_over_expected",
+    ).strip().lower()
 
     all_features = np.vstack([np.asarray(m.features, dtype=np.float32) for m in measures])
     max_codes = _env_int("SPATIAL_OT_HETEROGENEITY_MAX_CODEBOOK_SIZE", 16)
@@ -224,7 +335,11 @@ def build_internal_heterogeneity_embeddings(
         random_state=int(random_state),
     )
 
-    blocks: list[np.ndarray] = []
+    block_weights = _env_block_weights()
+    composition_blocks: list[np.ndarray] = []
+    diversity_blocks: list[np.ndarray] = []
+    field_blocks: list[np.ndarray] = []
+    pair_blocks: list[np.ndarray] = []
     for measure in measures:
         features = np.asarray(measure.features, dtype=np.float32)
         coords = np.asarray(measure.canonical_coords, dtype=np.float32)
@@ -249,12 +364,48 @@ def build_internal_heterogeneity_embeddings(
             probs,
             weights,
             distance_bins=bins,
+            normalization=pair_normalization,
         )
-        blocks.append(np.hstack([composition, diversity, field, pair]).astype(np.float32))
+        composition_blocks.append(composition.astype(np.float32))
+        diversity_blocks.append(diversity.astype(np.float32))
+        field_blocks.append(field.astype(np.float32))
+        pair_blocks.append(pair.astype(np.float32))
 
-    embeddings = np.vstack(blocks).astype(np.float32)
+    raw_blocks = {
+        "composition": np.vstack(composition_blocks).astype(np.float32),
+        "diversity": np.vstack(diversity_blocks).astype(np.float32),
+        "spatial_field": np.vstack(field_blocks).astype(np.float32),
+        "pair_cooccurrence": np.vstack(pair_blocks).astype(np.float32),
+    }
+    weighted_blocks: list[np.ndarray] = []
+    block_diagnostics: dict[str, dict[str, object]] = {}
+    block_slices: dict[str, list[int]] = {}
+    cursor = 0
+    for block_name in ("composition", "diversity", "spatial_field", "pair_cooccurrence"):
+        weighted, stats = _standardize_descriptor_block(
+            raw_blocks[block_name],
+            weight=float(block_weights[block_name]),
+        )
+        weighted_blocks.append(weighted)
+        block_diagnostics[block_name] = stats
+        block_slices[block_name] = [int(cursor), int(cursor + weighted.shape[1])]
+        cursor += int(weighted.shape[1])
+    embeddings = np.hstack(weighted_blocks).astype(np.float32)
+    total_energy = np.maximum(np.sum(embeddings * embeddings, axis=1), 1e-12)
+    for block_name, weighted in zip(
+        ("composition", "diversity", "spatial_field", "pair_cooccurrence"),
+        weighted_blocks,
+        strict=True,
+    ):
+        block_energy = np.sum(weighted * weighted, axis=1)
+        block_diagnostics[block_name]["mean_squared_distance_contribution_fraction"] = float(
+            np.mean(block_energy / total_energy)
+        )
+
     metadata: dict[str, object] = {
-        "mode": "heterogeneity_ot_niche",
+        "mode": HETEROGENEITY_DESCRIPTOR_MODE,
+        "requested_mode": requested_mode,
+        "legacy_alias_requested": bool(requested_mode == LEGACY_HETEROGENEITY_OT_ALIAS),
         "implemented": True,
         "description": (
             "Internal heterogeneity motif embedding over compressed subregion measures: "
@@ -262,7 +413,7 @@ def build_internal_heterogeneity_embeddings(
             "and within-subregion state-pair co-occurrence graph. Raw tissue coordinates, "
             "subregion centers, and sample labels are excluded from clustering."
         ),
-        "validation_role": "primary_spatial_niche_target_mvp_descriptor; fused_ot_or_fgw_distance_should_be_used_for_publication_validation",
+        "validation_role": "primary_spatial_niche_target_descriptor; fused_ot_or_fgw_distance_should_be_used_for_publication_validation",
         "n_subregions": int(len(measures)),
         "feature_dim": int(all_features.shape[1]),
         "embedding_dim": int(embeddings.shape[1]),
@@ -272,21 +423,28 @@ def build_internal_heterogeneity_embeddings(
         "canonical_grid_size": int(grid),
         "canonical_grid_radius": float(radius),
         "pair_distance_bins_canonical": [float(x) for x in bins.tolist()],
+        "pair_cooccurrence_normalization": str(pair_normalization),
         "blocks": [
             "soft_cell_state_composition",
             "state_diversity_multimodality",
             "canonical_spatial_state_density_field",
             "within_subregion_state_pair_cooccurrence",
         ],
+        "block_weights": dict(block_weights),
+        "block_slices": block_slices,
+        "block_diagnostics": block_diagnostics,
+        "block_scaling": "each block is mean/std standardized across subregions, multiplied by block_weight/sqrt(block_dimension), then concatenated",
         "uses_raw_spatial_coordinates": False,
         "uses_subregion_centers": False,
         "uses_internal_canonical_coordinates": True,
         "uses_pairwise_internal_spatial_graph": True,
         "uses_ot_costs": False,
+        "reserved_ot_modes": ["heterogeneity_fused_ot_niche", "heterogeneity_fgw_niche"],
         "distance_note": (
-            "The current MVP clusters a Euclidean descriptor of the heterogeneity object. "
-            "The descriptor is designed as the scalable precursor to fused OT/FGW over "
-            "the same canonical coordinate plus cell-state measure."
+            "This mode clusters a block-normalized Euclidean descriptor of the "
+            "heterogeneity object. True fused OT/FGW over canonical coordinate plus "
+            "cell-state measures is reserved for heterogeneity_fused_ot_niche / "
+            "heterogeneity_fgw_niche."
         ),
     }
     return embeddings, metadata

@@ -268,7 +268,21 @@ def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tm
             ],
             dtype=np.float32,
         ),
+        within_coords=np.asarray(
+            [
+                [-0.1, -0.1],
+                [0.1, -0.05],
+                [0.0, 0.1],
+                [-0.05, 0.0],
+                [0.1, 0.05],
+                [0.0, -0.1],
+                [0.05, 0.0],
+                [-0.05, 0.05],
+            ],
+            dtype=np.float32,
+        ),
         weights=np.ones(8, dtype=np.float32),
+        cluster_anchor_distance=np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
         spot_latent_mode=np.array("atom_barycentric_mds"),
         latent_projection_mode=np.array("balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"),
         chart_learning_mode=np.array("model_grounded_atom_distance_mds_without_fisher_labels"),
@@ -302,7 +316,11 @@ def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tm
     assert manifest["color_scale_mode"] == "global"
     assert manifest["includes_aligned_coordinates_in_chart_features"] is False
     assert manifest["uses_forced_cluster_local_radius"] is False
+    assert manifest["global_latent_key_dimension"] == 3
+    assert manifest["global_latent_key_mode"] == "cluster_anchor_distance_mds3d_plus_within_xy"
+    assert "global_latent_key_limits" in manifest
     assert "diagnostic visualization" in manifest["color_encoding"]
+    assert "3D global latent display" in manifest["color_encoding"]
     assert manifest["latent_source"] == "occurrence_npz"
     assert manifest["subregion_id_source"] == "occurrence_npz[subregion_ids]"
     assert manifest["subregion_boundary_overlay"] == "concave_hull_of_sample_occurrence_subregion_members"
@@ -310,6 +328,7 @@ def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tm
     assert set(manifest["within_niche_latent_color_limits"]) == {"0", "1"}
     assert "display_latent_limits" in manifest
     assert set(manifest["cluster_display_anchors"]) == {"0", "1"}
+    assert set(manifest["cluster_display_anchors_3d"]) == {"0", "1"}
     assert Path(str(manifest["manifest_json"])).exists()
 
     plots = manifest["plots"]
@@ -322,5 +341,6 @@ def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tm
         assert "_C" not in output_png.name
         assert int(item["n_latent_occurrences"]) == 4
         assert int(item["n_plotted_occurrences"]) == 4
+        assert int(item["n_global_key_occurrences"]) == 4
         assert "n_subregion_boundary_outlines" in item
         assert output_png.stat().st_size > 0
