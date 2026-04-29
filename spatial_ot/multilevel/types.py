@@ -96,6 +96,9 @@ class MultilevelOTResult:
     subregion_latent_embeddings: np.ndarray
     subregion_latent_embedding_mode: str
     subregion_latent_embedding_metadata: dict[str, object]
+    subregion_latent_shrinkage_alpha: np.ndarray
+    subregion_latent_raw_to_shrunk_distance: np.ndarray
+    subregion_sample_ids: np.ndarray
     subregion_clustering_method: str
     subregion_clustering_uses_spatial: bool
     subregion_assigned_effective_eps: np.ndarray

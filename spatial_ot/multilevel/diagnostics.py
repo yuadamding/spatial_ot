@@ -198,6 +198,7 @@ def build_qc_warnings(
     shape_leakage_diagnostics: dict | None = None,
     density_leakage_diagnostics: dict | None = None,
     subregion_construction: dict | None = None,
+    subregion_latent_embedding_metadata: dict | None = None,
     realized_subregion_statistics: dict | None = None,
     auto_k_enabled: bool = False,
 ) -> list[dict[str, object]]:
@@ -244,6 +245,15 @@ def build_qc_warnings(
                 "Automatic K selection is an exploratory shortlist/final-refit convenience and should be confirmed with stability and ablation analysis.",
             )
         )
+    if isinstance(subregion_latent_embedding_metadata, dict):
+        if subregion_latent_embedding_metadata.get("mode") == "mean_std_skew_count":
+            warnings_out.append(
+                _qc_warning(
+                    "density_aware_subregion_latent_mode",
+                    "warning",
+                    "The mean_std_skew_count subregion latent includes cell-count-derived features; strict biological claims require density-leakage controls.",
+                )
+            )
     if realized_subregion_statistics and not bool(
         realized_subregion_statistics.get("minimum_cell_constraint_satisfied", True)
     ):

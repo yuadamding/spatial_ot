@@ -18,6 +18,7 @@ class MultilevelPathConfig:
     feature_obsm_key: str = ""
     spatial_x_key: str = "cell_x"
     spatial_y_key: str = "cell_y"
+    sample_obs_key: str = "sample_id"
     spatial_scale: float = 1.0
     region_obs_key: str | None = None
     region_geometry_json: str | None = None
@@ -63,6 +64,8 @@ class MultilevelOTConfig:
     subregion_clustering_method: str = "pooled_subregion_latent"
     subregion_latent_embedding_mode: str = "mean_std_shrunk"
     subregion_latent_shrinkage_tau: float = 25.0
+    subregion_latent_heterogeneity_weight: float = 0.5
+    subregion_latent_sample_prior_weight: float = 0.5
     subregion_latent_codebook_size: int = 32
     subregion_latent_codebook_sample_size: int = 50000
     shape_diagnostics: bool = True
@@ -257,6 +260,10 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         )
     if config.ot.subregion_latent_shrinkage_tau < 0:
         raise ValueError("ot.subregion_latent_shrinkage_tau must be >= 0")
+    if config.ot.subregion_latent_heterogeneity_weight < 0:
+        raise ValueError("ot.subregion_latent_heterogeneity_weight must be >= 0")
+    if not 0 <= config.ot.subregion_latent_sample_prior_weight <= 1:
+        raise ValueError("ot.subregion_latent_sample_prior_weight must be in [0, 1]")
     if config.ot.subregion_latent_codebook_size < 2:
         raise ValueError("ot.subregion_latent_codebook_size must be at least 2")
     if config.ot.subregion_latent_codebook_sample_size < config.ot.subregion_latent_codebook_size:

@@ -4,6 +4,7 @@ output_dir = "../outputs/multilevel_deep_example"
 feature_obsm_key = "X"
 spatial_x_key = "cell_x"
 spatial_y_key = "cell_y"
+sample_obs_key = "sample_id"
 spatial_scale = 0.2737012522439323
 allow_umap_as_feature = false
 
@@ -32,6 +33,8 @@ subregion_construction_method = "deep_segmentation"
 subregion_clustering_method = "pooled_subregion_latent"
 subregion_latent_embedding_mode = "mean_std_shrunk"
 subregion_latent_shrinkage_tau = 25.0
+subregion_latent_heterogeneity_weight = 0.5
+subregion_latent_sample_prior_weight = 0.5
 subregion_latent_codebook_size = 32
 subregion_latent_codebook_sample_size = 50000
 deep_segmentation_knn = 12

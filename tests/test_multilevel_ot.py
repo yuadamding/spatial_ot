@@ -1356,6 +1356,17 @@ def test_subregion_latent_embedding_modes_are_distributional_and_uncertainty_awa
         mode="mean_std_shrunk",
         shrinkage_tau=100.0,
     )
+    sample_ids = np.asarray(["s1", "s1", "s1", "s2", "s2", "s2"], dtype=object)
+    sample_shrunk, diagnostics = _build_subregion_latent_embeddings_from_members(
+        features,
+        members,
+        mode="mean_std_shrunk",
+        shrinkage_tau=100.0,
+        heterogeneity_weight=2.0,
+        sample_ids=sample_ids,
+        sample_prior_weight=1.0,
+        return_diagnostics=True,
+    )
     skew_count = _build_subregion_latent_embeddings_from_members(
         features,
         members,
@@ -1383,6 +1394,12 @@ def test_subregion_latent_embedding_modes_are_distributional_and_uncertainty_awa
     assert mean_std.shape == (2, 4)
     assert shrunk.shape == mean_std.shape
     assert not np.allclose(shrunk, mean_std)
+    assert sample_shrunk.shape == mean_std.shape
+    assert bool(diagnostics["sample_aware_shrinkage"]) is True
+    assert np.allclose(diagnostics["shrinkage_alpha"], np.asarray([3 / 103, 3 / 103], dtype=np.float32))
+    assert list(diagnostics["sample_ids"]) == ["s1", "s2"]
+    assert float(np.max(diagnostics["raw_to_shrunk_distance"])) > 0.0
+    assert np.linalg.norm(sample_shrunk[:, 2:]) > np.linalg.norm(shrunk[:, 2:])
     assert skew_count.shape == (2, 8)
     assert quantile.shape == (2, 14)
     assert codebook.shape == (2, 3)

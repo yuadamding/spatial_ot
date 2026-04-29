@@ -1126,13 +1126,34 @@ def plot_sample_spot_latent_maps(
             else:
                 occurrence_subregion_ids = np.full(latent.shape[0], -1, dtype=np.int32)
 
-    latent_mode_metadata = spot_latent_mode_metadata(spot_latent_mode)
-    if not latent_projection_mode:
+    if latent_source == "subregion_table_embed_preview":
+        spot_latent_mode = "pooled_subregion_latent_embedding_preview"
+        latent_mode_metadata = {
+            "mode": spot_latent_mode,
+            "latent_projection_mode": "subregion_table_pooled_latent_embedding_preview",
+            "coordinate_scope": "pooled_subregion_feature_distribution_embedding_inherited_by_cells",
+            "chart_learning_mode": "unsupervised_pooled_subregion_latent_embedding_preview",
+            "validation_role": "diagnostic_preview_of_primary_subregion_clustering_not_ot_spot_latent",
+            "unsupervised_baseline_required_for_validation": False,
+            "label_permutation_control_recommended": False,
+            "includes_aligned_coordinates_in_chart_features": False,
+            "uses_forced_cluster_local_radius": False,
+        }
         latent_projection_mode = str(latent_mode_metadata["latent_projection_mode"])
-    if not chart_learning_mode:
         chart_learning_mode = str(latent_mode_metadata["chart_learning_mode"])
-    if not validation_role:
         validation_role = str(latent_mode_metadata["validation_role"])
+        cluster_anchor_distance_method = "not_applicable"
+        cluster_anchor_distance_effective_method = "not_applicable"
+        cluster_anchor_ot_fallback_fraction = None
+        cluster_anchor_mds_stress = None
+    else:
+        latent_mode_metadata = spot_latent_mode_metadata(spot_latent_mode)
+        if not latent_projection_mode:
+            latent_projection_mode = str(latent_mode_metadata["latent_projection_mode"])
+        if not chart_learning_mode:
+            chart_learning_mode = str(latent_mode_metadata["chart_learning_mode"])
+        if not validation_role:
+            validation_role = str(latent_mode_metadata["validation_role"])
     if cluster_anchor_mds_stress is None:
         mds_status = "missing"
     elif cluster_anchor_mds_stress < 0.10:
@@ -1277,7 +1298,16 @@ def plot_sample_spot_latent_maps(
             elif sources:
                 source_name = sources
 
-        title = f"Within-niche spot latent heterogeneity: {sample_id}\n{int(occurrence_idx.size)}/{total_occurrences} latent occurrences"
+        if latent_source == "subregion_table_embed_preview":
+            title = (
+                f"Pooled subregion latent preview: {sample_id}\n"
+                f"{int(occurrence_idx.size)}/{total_occurrences} cells inherit subregion latent coordinates"
+            )
+        else:
+            title = (
+                f"Within-niche spot latent heterogeneity: {sample_id}\n"
+                f"{int(occurrence_idx.size)}/{total_occurrences} latent occurrences"
+            )
         if cluster_anchor_mds_stress is not None:
             title = (
                 f"{title}\nanchor MDS stress={cluster_anchor_mds_stress:.3g} "
@@ -1301,7 +1331,7 @@ def plot_sample_spot_latent_maps(
             alpha=0.85,
             rasterized=display_latent_values.shape[0] > 20000,
         )
-        key_ax.set_title("global latent key")
+        key_ax.set_title("pooled latent key" if latent_source == "subregion_table_embed_preview" else "global latent key")
         key_ax.set_xlabel("latent 1")
         key_ax.set_ylabel("latent 2")
         key_ax.set_aspect("equal", adjustable="box")
@@ -1343,6 +1373,23 @@ def plot_sample_spot_latent_maps(
             }
         )
 
+    if latent_source == "subregion_table_embed_preview":
+        color_encoding = (
+            "Slide colors use the two-dimensional pooled subregion feature-distribution embedding "
+            "stored in subregions_multilevel_ot.parquet and inherited by cells through mutually "
+            "exclusive subregion membership. This is a diagnostic preview of the primary pooled "
+            "subregion clustering, not an occurrence-level OT atom-posterior spot latent."
+        )
+        rendering = "whole_sample_pooled_subregion_latent_rgb"
+    else:
+        color_encoding = (
+            "The side key uses the stored 2D spot-latent coordinates to show model-grounded between-cluster layout. "
+            "Slide colors use global latent color scaling by default so colors remain comparable across clusters "
+            "and samples; within-cluster rescaling is available only as an explicit diagnostic mode. Treat this as "
+            "diagnostic visualization, not independent validation."
+        )
+        rendering = "whole_sample_within_niche_latent_rgb"
+
     manifest: dict[str, object] = {
         "cells_h5ad": str(cells_h5ad),
         "output_dir": str(output_dir),
@@ -1369,9 +1416,9 @@ def plot_sample_spot_latent_maps(
         "cluster_anchor_ot_fallback_fraction": cluster_anchor_ot_fallback_fraction,
         "cluster_anchor_mds_stress": cluster_anchor_mds_stress,
         "cluster_anchor_mds_status": mds_status,
-        "rendering": "whole_sample_within_niche_latent_rgb",
+        "rendering": rendering,
         "color_scale_mode": color_scale_mode,
-        "color_encoding": "The side key uses the stored 2D spot-latent coordinates to show model-grounded between-cluster layout. Slide colors use global latent color scaling by default so colors remain comparable across clusters and samples; within-cluster rescaling is available only as an explicit diagnostic mode. Treat this as diagnostic visualization, not independent validation.",
+        "color_encoding": color_encoding,
         "includes_aligned_coordinates_in_chart_features": bool(
             latent_mode_metadata["includes_aligned_coordinates_in_chart_features"]
         ),

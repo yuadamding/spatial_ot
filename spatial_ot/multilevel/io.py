@@ -184,6 +184,14 @@ def _numeric_summary(values: object) -> dict[str, float | int | None]:
     }
 
 
+def _finite_mean_or_none(values: object) -> float | None:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    return float(np.mean(arr))
+
+
 def _mds_status(
     stress: float | None,
     *,
@@ -905,6 +913,7 @@ def _save_multilevel_outputs(
         "feature_source": summary.get("feature_source"),
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,
+        "sample_obs_key": summary.get("sample_obs_key"),
         "spatial_scale": float(spatial_scale),
         "radius_um": float(radius_um),
         "stride_um": float(stride_um),
@@ -973,11 +982,14 @@ def _save_multilevel_outputs(
             "normalizer_radius_p95": float(result.subregion_normalizer_radius_p95[idx]) if np.isfinite(result.subregion_normalizer_radius_p95[idx]) else np.nan,
             "normalizer_radius_max": float(result.subregion_normalizer_radius_max[idx]) if np.isfinite(result.subregion_normalizer_radius_max[idx]) else np.nan,
             "normalizer_interpolation_residual": float(result.subregion_normalizer_interpolation_residual[idx]) if np.isfinite(result.subregion_normalizer_interpolation_residual[idx]) else np.nan,
+            "sample_id": str(result.subregion_sample_ids[idx]) if idx < len(result.subregion_sample_ids) else "cohort",
             "cluster_id": f"C{int(result.subregion_cluster_labels[idx])}",
             "cluster_int": int(result.subregion_cluster_labels[idx]),
             "cluster_assignment_source": str(result.subregion_clustering_method),
             "cluster_assignment_uses_spatial": bool(result.subregion_clustering_uses_spatial),
             "subregion_latent_embedding_mode": str(result.subregion_latent_embedding_mode),
+            "subregion_latent_shrinkage_alpha": float(result.subregion_latent_shrinkage_alpha[idx]),
+            "subregion_latent_raw_to_shrunk_distance": float(result.subregion_latent_raw_to_shrunk_distance[idx]),
             "objective": float(result.subregion_cluster_costs[idx, result.subregion_cluster_labels[idx]]),
             "transport_objective": float(result.subregion_cluster_transport_costs[idx, result.subregion_cluster_labels[idx]]),
             "overlap_consistency_penalty": float(
@@ -1105,6 +1117,9 @@ def _save_multilevel_outputs(
         subregion_cluster_overlap_penalties=result.subregion_cluster_overlap_penalties.astype(np.float32),
         subregion_measure_summaries=result.subregion_measure_summaries.astype(np.float32),
         subregion_latent_embeddings=result.subregion_latent_embeddings.astype(np.float32),
+        subregion_latent_shrinkage_alpha=result.subregion_latent_shrinkage_alpha.astype(np.float32),
+        subregion_latent_raw_to_shrunk_distance=result.subregion_latent_raw_to_shrunk_distance.astype(np.float32),
+        subregion_sample_ids=np.asarray(result.subregion_sample_ids, dtype=str),
         subregion_clustering_method=np.array(result.subregion_clustering_method),
         subregion_clustering_uses_spatial=np.array(bool(result.subregion_clustering_uses_spatial)),
         subregion_latent_embedding_mode=np.array(result.subregion_latent_embedding_mode),
@@ -1224,6 +1239,7 @@ def run_multilevel_ot_on_h5ad(
     spatial_y_key: str,
     spatial_scale: float,
     *,
+    sample_obs_key: str | None = "sample_id",
     region_obs_key: str | None = None,
     region_geometry_json: str | Path | None = None,
     allow_umap_as_feature: bool = False,
@@ -1266,6 +1282,8 @@ def run_multilevel_ot_on_h5ad(
     subregion_clustering_method: str = "pooled_subregion_latent",
     subregion_latent_embedding_mode: str = "mean_std_shrunk",
     subregion_latent_shrinkage_tau: float = 25.0,
+    subregion_latent_heterogeneity_weight: float = 0.5,
+    subregion_latent_sample_prior_weight: float = 0.5,
     subregion_latent_codebook_size: int = 32,
     subregion_latent_codebook_sample_size: int = 50000,
     shape_diagnostics: bool = True,
@@ -1296,6 +1314,10 @@ def run_multilevel_ot_on_h5ad(
         allow_umap_as_feature=allow_umap_as_feature,
     )
     feature_embedding_warning = feature_source.get("feature_embedding_warning")
+    cell_sample_ids = None
+    if sample_obs_key is not None and str(sample_obs_key):
+        if str(sample_obs_key) in adata.obs:
+            cell_sample_ids = adata.obs[str(sample_obs_key)].astype(str).to_numpy()
     coords_um = np.stack(
         [
             np.asarray(adata.obs[spatial_x_key], dtype=np.float32) * spatial_scale,
@@ -1485,6 +1507,7 @@ def run_multilevel_ot_on_h5ad(
     result = fit_multilevel_ot(
         features=features,
         coords_um=coords_um,
+        sample_ids=cell_sample_ids,
         subregion_members=subregion_members,
         subregion_centers_um=subregion_centers_um,
         n_clusters=n_clusters,
@@ -1529,6 +1552,8 @@ def run_multilevel_ot_on_h5ad(
         subregion_clustering_method=subregion_clustering_method,
         subregion_latent_embedding_mode=subregion_latent_embedding_mode,
         subregion_latent_shrinkage_tau=subregion_latent_shrinkage_tau,
+        subregion_latent_heterogeneity_weight=subregion_latent_heterogeneity_weight,
+        subregion_latent_sample_prior_weight=subregion_latent_sample_prior_weight,
         subregion_latent_codebook_size=subregion_latent_codebook_size,
         subregion_latent_codebook_sample_size=subregion_latent_codebook_sample_size,
         auto_n_clusters=auto_n_clusters,
@@ -1721,6 +1746,7 @@ def run_multilevel_ot_on_h5ad(
         shape_leakage_diagnostics=shape_leakage_diagnostics,
         density_leakage_diagnostics=density_leakage_diagnostics,
         subregion_construction=subregion_construction,
+        subregion_latent_embedding_metadata=dict(result.subregion_latent_embedding_metadata),
         realized_subregion_statistics=realized_subregion_statistics,
         auto_k_enabled=bool(auto_n_clusters),
     )
@@ -1741,7 +1767,10 @@ def run_multilevel_ot_on_h5ad(
     )
     geometry_sources = set(geometry_source_counts)
     no_geometry_fallback = float(np.mean(result.subregion_geometry_used_fallback.astype(np.float32))) == 0.0
-    if no_geometry_fallback and geometry_sources == {"observed_point_cloud"}:
+    observed_geometry_sources = {
+        source for source in geometry_sources if str(source).startswith("observed_point_cloud")
+    }
+    if no_geometry_fallback and observed_geometry_sources:
         boundary_invariance_claim = "observed_geometry_normalized_not_full_shape_invariant"
     elif no_geometry_fallback:
         boundary_invariance_claim = "supported_with_explicit_geometry"
@@ -1797,6 +1826,8 @@ def run_multilevel_ot_on_h5ad(
         "allow_umap_as_feature": bool(allow_umap_as_feature),
         "spatial_x_key": spatial_x_key,
         "spatial_y_key": spatial_y_key,
+        "sample_obs_key": sample_obs_key,
+        "sample_aware_subregion_shrinkage_available": bool(cell_sample_ids is not None),
         "spatial_scale": float(spatial_scale),
         "region_obs_key": region_obs_key,
         "region_geometry_json": str(region_geometry_json) if region_geometry_json is not None else None,
@@ -1806,6 +1837,12 @@ def run_multilevel_ot_on_h5ad(
         "n_clusters": result_n_clusters,
         "requested_n_clusters": int(n_clusters),
         "auto_n_clusters": bool(auto_n_clusters),
+        "selected_n_clusters": result_n_clusters,
+        "candidate_n_clusters": (
+            list(result.auto_k_selection.get("candidate_n_clusters", []))
+            if isinstance(result.auto_k_selection, dict)
+            else None
+        ),
         "auto_k_selection": result.auto_k_selection,
         "auto_k_selection_role": "exploratory_shortlist_final_refit_requires_stability_confirmation",
         "atoms_per_cluster": int(atoms_per_cluster),
@@ -1827,6 +1864,10 @@ def run_multilevel_ot_on_h5ad(
         ),
         "subregion_latent_embedding_mode": str(result.subregion_latent_embedding_mode),
         "subregion_latent_embedding_metadata": dict(result.subregion_latent_embedding_metadata),
+        "subregion_latent_shrinkage_alpha_summary": _numeric_summary(result.subregion_latent_shrinkage_alpha),
+        "subregion_latent_raw_to_shrunk_distance_summary": _numeric_summary(
+            result.subregion_latent_raw_to_shrunk_distance
+        ),
         "radius_used_for_subregion_membership": bool(subregion_construction["radius_used_for_membership"]),
         "radius_um_semantics": str(subregion_construction["radius_um_semantics"]),
         "radius_um": float(radius_um),
@@ -1866,6 +1907,8 @@ def run_multilevel_ot_on_h5ad(
         "shape_leakage_permutations": int(shape_leakage_permutations),
         "compute_spot_latent": bool(compute_spot_latent),
         "subregion_latent_shrinkage_tau": float(subregion_latent_shrinkage_tau),
+        "subregion_latent_heterogeneity_weight": float(subregion_latent_heterogeneity_weight),
+        "subregion_latent_sample_prior_weight": float(subregion_latent_sample_prior_weight),
         "subregion_latent_codebook_size": int(subregion_latent_codebook_size),
         "subregion_latent_codebook_sample_size": int(subregion_latent_codebook_sample_size),
         "auto_k_max_score_subregions": int(auto_k_max_score_subregions),
@@ -1952,13 +1995,15 @@ def run_multilevel_ot_on_h5ad(
         "shape_descriptor_source_counts": shape_descriptor_source_counts,
         "forced_label_count": int(result.subregion_forced_label_mask.sum()),
         "forced_label_fraction": float(result.subregion_forced_label_mask.sum() / max(len(result.subregion_members), 1)),
-        "normalizer_radius_p95_mean": float(np.nanmean(result.subregion_normalizer_radius_p95)),
-        "normalizer_radius_max_mean": float(np.nanmean(result.subregion_normalizer_radius_max)),
-        "normalizer_interpolation_residual_mean": float(np.nanmean(result.subregion_normalizer_interpolation_residual)),
+        "normalizer_radius_p95_mean": _finite_mean_or_none(result.subregion_normalizer_radius_p95),
+        "normalizer_radius_max_mean": _finite_mean_or_none(result.subregion_normalizer_radius_max),
+        "normalizer_interpolation_residual_mean": _finite_mean_or_none(
+            result.subregion_normalizer_interpolation_residual
+        ),
         "normalizer_diagnostics": {
-            "radius_p95_mean": float(np.nanmean(result.subregion_normalizer_radius_p95)),
-            "radius_max_mean": float(np.nanmean(result.subregion_normalizer_radius_max)),
-            "interpolation_residual_mean": float(np.nanmean(result.subregion_normalizer_interpolation_residual)),
+            "radius_p95_mean": _finite_mean_or_none(result.subregion_normalizer_radius_p95),
+            "radius_max_mean": _finite_mean_or_none(result.subregion_normalizer_radius_max),
+            "interpolation_residual_mean": _finite_mean_or_none(result.subregion_normalizer_interpolation_residual),
         },
         "boundary_invariance_claim": boundary_invariance_claim,
         "qc_warnings": qc_warnings,
@@ -2035,6 +2080,7 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         feature_obsm_key=config.paths.feature_obsm_key,
         spatial_x_key=config.paths.spatial_x_key,
         spatial_y_key=config.paths.spatial_y_key,
+        sample_obs_key=config.paths.sample_obs_key,
         spatial_scale=config.paths.spatial_scale,
         region_obs_key=config.paths.region_obs_key,
         region_geometry_json=config.paths.region_geometry_json,
@@ -2078,6 +2124,8 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         subregion_clustering_method=config.ot.subregion_clustering_method,
         subregion_latent_embedding_mode=config.ot.subregion_latent_embedding_mode,
         subregion_latent_shrinkage_tau=config.ot.subregion_latent_shrinkage_tau,
+        subregion_latent_heterogeneity_weight=config.ot.subregion_latent_heterogeneity_weight,
+        subregion_latent_sample_prior_weight=config.ot.subregion_latent_sample_prior_weight,
         subregion_latent_codebook_size=config.ot.subregion_latent_codebook_size,
         subregion_latent_codebook_sample_size=config.ot.subregion_latent_codebook_sample_size,
         shape_diagnostics=config.ot.shape_diagnostics,

@@ -77,8 +77,11 @@ def _common_run_env(summary: dict[str, object], run_dir: Path, *, omit: set[str]
     deep_summary = deep_summary if isinstance(deep_summary, dict) else {}
     deep_segmentation = construction.get("deep_segmentation")
     deep_segmentation = deep_segmentation if isinstance(deep_segmentation, dict) else {}
+    latent_metadata = summary.get("subregion_latent_embedding_metadata")
+    latent_metadata = latent_metadata if isinstance(latent_metadata, dict) else {}
     min_cluster_size = summary.get("effective_min_subregions_per_cluster", summary.get("min_subregions_per_cluster"))
     env_items = [
+        ("SAMPLE_OBS_KEY", summary.get("sample_obs_key")),
         ("BASIC_NICHE_SIZE_UM", construction.get("basic_niche_size_um")),
         ("RADIUS_UM", construction.get("radius_um")),
         ("STRIDE_UM", construction.get("stride_um")),
@@ -97,6 +100,12 @@ def _common_run_env(summary: dict[str, object], run_dir: Path, *, omit: set[str]
         ("COMPUTE_SPOT_LATENT", 0),
         ("PLOT_SAMPLE_SPOT_LATENT", 0),
         ("SUBREGION_CLUSTERING_METHOD", summary.get("subregion_clustering_method")),
+        ("SUBREGION_LATENT_EMBEDDING_MODE", summary.get("subregion_latent_embedding_mode")),
+        ("SUBREGION_LATENT_SHRINKAGE_TAU", summary.get("subregion_latent_shrinkage_tau")),
+        ("SUBREGION_LATENT_HETEROGENEITY_WEIGHT", latent_metadata.get("heterogeneity_block_weight")),
+        ("SUBREGION_LATENT_SAMPLE_PRIOR_WEIGHT", latent_metadata.get("sample_prior_weight")),
+        ("SUBREGION_LATENT_CODEBOOK_SIZE", summary.get("subregion_latent_codebook_size")),
+        ("SUBREGION_LATENT_CODEBOOK_SAMPLE_SIZE", summary.get("subregion_latent_codebook_sample_size")),
     ]
     tokens = [_env_token(key, value) for key, value in env_items if key not in omit]
     deep_model = _deep_model_path(summary, run_dir)
@@ -457,6 +466,7 @@ def build_concern_resolution_report(
     primary = _read_summary(run_path)
     baseline = _read_summary(coordinate_baseline_run_dir) if coordinate_baseline_run_dir is not None else None
     warning_codes = _warning_codes(primary)
+    primary_is_coordinate_only = _is_coordinate_only_baseline(primary)
     baseline_ok = _is_coordinate_only_baseline(baseline)
     baseline_comparison = _baseline_comparison(primary, baseline)
     stability_dirs = [Path(item) for item in stability_run_dirs]
@@ -466,11 +476,18 @@ def build_concern_resolution_report(
     selected_k = _selected_k(primary)
 
     concerns: list[dict[str, object]] = []
+    coordinate_boundary_ok = primary_is_coordinate_only or baseline_ok
     concerns.append(
         {
             "code": "feature_boundary_circularity",
-            "status": "addressed_by_coordinate_only_baseline" if baseline_ok else "needs_coordinate_only_baseline",
-            "blocking_for_primary_claim": not baseline_ok,
+            "status": (
+                "not_applicable_primary_is_coordinate_only"
+                if primary_is_coordinate_only
+                else "addressed_by_coordinate_only_baseline"
+                if baseline_ok
+                else "needs_coordinate_only_baseline"
+            ),
+            "blocking_for_primary_claim": not coordinate_boundary_ok,
             "evidence": {
                 "warning_present": "feature_aware_boundary_circularity_risk" in warning_codes,
                 "subregion_construction": primary.get("subregion_construction"),
@@ -480,25 +497,33 @@ def build_concern_resolution_report(
                 "Run a coordinate-only boundary baseline using the same OT feature view and selected K, then compare "
                 "cluster enrichments, sample composition, subregion statistics, and biological conclusions."
             ),
-            "suggested_commands": [_suggest_coordinate_only_command(primary, run_path)] if not baseline_ok else [],
+            "suggested_commands": [_suggest_coordinate_only_command(primary, run_path)] if not coordinate_boundary_ok else [],
         }
     )
     concerns.append(
         {
             "code": "coordinate_only_boundary_baseline",
-            "status": "available" if baseline_ok else "missing",
-            "blocking_for_primary_claim": not baseline_ok,
+            "status": (
+                "not_required_primary_is_coordinate_only"
+                if primary_is_coordinate_only
+                else "available"
+                if baseline_ok
+                else "missing"
+            ),
+            "blocking_for_primary_claim": not coordinate_boundary_ok,
             "evidence": baseline_comparison,
             "required_fix": "Treat deep/feature-aware segmentation as exploratory until a coordinate-only boundary baseline is available.",
         }
     )
 
+    leakage_statuses: dict[str, str] = {}
     for kind in ("shape", "density"):
         status, blocking, evidence = _leakage_status(
             primary,
             kind,
             leakage_ablation_summaries=leakage_ablation_summaries,
         )
+        leakage_statuses[kind] = status
         concerns.append(
             {
                 "code": f"{kind}_leakage",
@@ -513,6 +538,28 @@ def build_concern_resolution_report(
                     _suggest_leakage_ablation_commands(primary, run_path, kind)
                     if status == "needs_leakage_ablation"
                     else []
+                ),
+            }
+        )
+    latent_mode = str(primary.get("subregion_latent_embedding_mode") or "")
+    if latent_mode == "mean_std_skew_count":
+        density_ok = leakage_statuses.get("density") in {
+            "passed_current_thresholds",
+            "ablation_runs_passed_current_thresholds",
+        }
+        concerns.append(
+            {
+                "code": "density_aware_subregion_latent_mode",
+                "status": "accepted_density_controls_passed" if density_ok else "needs_density_leakage_controls",
+                "blocking_for_primary_claim": not density_ok,
+                "evidence": {
+                    "subregion_latent_embedding_mode": latent_mode,
+                    "density_leakage_status": leakage_statuses.get("density"),
+                    "warning_present": "density_aware_subregion_latent_mode" in warning_codes,
+                },
+                "required_fix": (
+                    "The mean_std_skew_count latent directly includes cell-count-derived features. "
+                    "Use it for diagnostics unless density leakage is insignificant or controlled by ablations."
                 ),
             }
         )
@@ -533,9 +580,14 @@ def build_concern_resolution_report(
 
     spot_status, spot_evidence = _spot_latent_visualization_status(primary)
     latent_claim_status, latent_claim_blocking, latent_claim_evidence = _within_niche_latent_claim_status(primary)
+    spot_concern_code = (
+        "spot_latent_supervised_visualization"
+        if "supervised" in spot_status
+        else "spot_latent_visualization_validation"
+    )
     concerns.append(
         {
-            "code": "spot_latent_supervised_visualization",
+            "code": spot_concern_code,
             "status": spot_status,
             "blocking_for_primary_claim": False,
             "blocking_for_within_niche_latent_claim": latent_claim_blocking,

@@ -52,7 +52,7 @@ Operational helpers live under `scripts/`; root-level shell wrappers were remove
 
 Prefer PCA, standardized marker expression, or another calibrated latent space. UMAP is exploratory only — its Euclidean geometry is not metric-preserving.
 
-The default subregion latent is `mean_std_shrunk`: per-feature distribution moments shrunk toward the cohort prior according to subregion cell count, which reduces variance noise for small subregions while preserving the guarantee that the primary clustering step does not use spatial coordinates. Alternative modes include `mean_std`, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`.
+The default subregion latent is `mean_std_shrunk`: per-feature distribution moments shrunk toward a hierarchical sample/cohort prior according to subregion cell count, which reduces variance noise for small subregions while preserving the guarantee that the primary clustering step does not use spatial coordinates. The sample prior is used when `--sample-obs-key` is available; otherwise the method falls back to the cohort prior. The heterogeneity block weight and sample-prior weight are explicit parameters. Alternative modes include `mean_std`, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`; codebook modes fit a whitened cell-state codebook and use soft assignment histograms.
 
 ### Three-layer method
 
@@ -84,12 +84,15 @@ cd spatial_ot
   --output-dir ../outputs/spatial_ot/cohort_multilevel_ot \
   --feature-obsm-key X_spatial_ot_x_svd_512 \
   --spatial-x-key pooled_cell_x --spatial-y-key pooled_cell_y \
+  --sample-obs-key sample_id \
   --spatial-scale 0.2737012522439323 \
   --compute-device cuda \
   --n-clusters 15 --atoms-per-cluster 8 \
   --radius-um 100 --stride-um 100 --basic-niche-size-um 50 \
   --min-cells 20 --max-subregions 5000 \
   --subregion-latent-embedding-mode mean_std_shrunk \
+  --subregion-latent-heterogeneity-weight 0.5 \
+  --subregion-latent-sample-prior-weight 0.5 \
   --lambda-x 0.5 --lambda-y 1.0 \
   --geometry-eps 0.03 --ot-eps 0.03 --rho 0.5 \
   --geometry-samples 192 --compressed-support-size 96 \

@@ -308,6 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--feature-obsm-key", help="Feature source used for the OT ground cost. Accepts an obsm key or 'X' for the full gene matrix. Prefer full-gene, PCA, or standardized marker features; avoid UMAP unless exploratory.")
     multilevel.add_argument("--spatial-x-key", default=None, help="obs key for the x coordinate.")
     multilevel.add_argument("--spatial-y-key", default=None, help="obs key for the y coordinate.")
+    multilevel.add_argument("--sample-obs-key", default=None, help="obs key storing sample identifiers used for sample-aware subregion latent shrinkage.")
     multilevel.add_argument("--region-obs-key", help="Optional obs column defining explicit mutually exclusive subregion membership. If set, spatial_ot clusters those regions instead of learning data-driven spatial subregions.")
     multilevel.add_argument("--region-geometry-json", help="Optional JSON file with explicit polygon/mask geometry keyed by --region-obs-key values.")
     multilevel.add_argument("--allow-umap-as-feature", action=argparse.BooleanOptionalAction, default=None, help="Allow UMAP coordinates as the OT feature space for exploratory runs.")
@@ -361,8 +362,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Raw member-cell distribution summary clustered by pooled_subregion_latent. The default shrinkage mode reduces low-cell-count variance noise without adding spatial information.",
     )
     multilevel.add_argument("--subregion-latent-shrinkage-tau", type=float, default=None, help="Pseudo-count strength for reliability shrinkage in subregion latent summaries.")
-    multilevel.add_argument("--subregion-latent-codebook-size", type=int, default=None, help="Hard cell-state codebook size for codebook subregion latent modes.")
-    multilevel.add_argument("--subregion-latent-codebook-sample-size", type=int, default=None, help="Maximum member cells sampled to fit the hard codebook.")
+    multilevel.add_argument("--subregion-latent-heterogeneity-weight", type=float, default=None, help="Weight applied to within-subregion heterogeneity blocks such as shrunk standard deviations.")
+    multilevel.add_argument("--subregion-latent-sample-prior-weight", type=float, default=None, help="Weight on the matched sample prior inside hierarchical sample/cohort shrinkage.")
+    multilevel.add_argument("--subregion-latent-codebook-size", type=int, default=None, help="Cell-state codebook size for soft codebook subregion latent modes.")
+    multilevel.add_argument("--subregion-latent-codebook-sample-size", type=int, default=None, help="Maximum member cells sampled to fit the whitened codebook.")
     multilevel.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     multilevel.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
     multilevel.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level OT atom-barycentric spot latent diagnostic charts.")
@@ -443,8 +446,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Raw member-cell distribution summary clustered by pooled_subregion_latent.",
     )
     optimal_search.add_argument("--subregion-latent-shrinkage-tau", type=float, default=None, help="Pseudo-count strength for reliability shrinkage in subregion latent summaries.")
-    optimal_search.add_argument("--subregion-latent-codebook-size", type=int, default=None, help="Hard cell-state codebook size for codebook subregion latent modes.")
-    optimal_search.add_argument("--subregion-latent-codebook-sample-size", type=int, default=None, help="Maximum member cells sampled to fit the hard codebook.")
+    optimal_search.add_argument("--subregion-latent-heterogeneity-weight", type=float, default=None, help="Weight applied to within-subregion heterogeneity blocks such as shrunk standard deviations.")
+    optimal_search.add_argument("--subregion-latent-sample-prior-weight", type=float, default=None, help="Weight on the matched sample prior inside hierarchical sample/cohort shrinkage.")
+    optimal_search.add_argument("--subregion-latent-codebook-size", type=int, default=None, help="Cell-state codebook size for soft codebook subregion latent modes.")
+    optimal_search.add_argument("--subregion-latent-codebook-sample-size", type=int, default=None, help="Maximum member cells sampled to fit the whitened codebook.")
     optimal_search.add_argument("--shape-diagnostics", action=argparse.BooleanOptionalAction, default=None, help="Run shape-leakage random-forest diagnostics after fitting.")
     optimal_search.add_argument("--shape-leakage-permutations", type=int, default=None, help="Number of permutations used for the shape-leakage baseline.")
     optimal_search.add_argument("--compute-spot-latent", action=argparse.BooleanOptionalAction, default=None, help="Compute and save occurrence-level OT atom-barycentric spot latent diagnostic charts.")
@@ -484,6 +489,7 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
     _set_if_not_none(config.paths, "feature_obsm_key", args.feature_obsm_key)
     _set_if_not_none(config.paths, "spatial_x_key", args.spatial_x_key)
     _set_if_not_none(config.paths, "spatial_y_key", args.spatial_y_key)
+    _set_if_not_none(config.paths, "sample_obs_key", getattr(args, "sample_obs_key", None))
     _set_if_not_none(config.paths, "spatial_scale", args.spatial_scale)
     _set_if_not_none(config.paths, "region_obs_key", args.region_obs_key)
     _set_if_not_none(config.paths, "region_geometry_json", args.region_geometry_json)
@@ -528,6 +534,8 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "subregion_clustering_method",
         "subregion_latent_embedding_mode",
         "subregion_latent_shrinkage_tau",
+        "subregion_latent_heterogeneity_weight",
+        "subregion_latent_sample_prior_weight",
         "subregion_latent_codebook_size",
         "subregion_latent_codebook_sample_size",
         "shape_diagnostics",
