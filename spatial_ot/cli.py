@@ -1126,6 +1126,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum member cells sampled to fit the whitened codebook.",
     )
     multilevel.add_argument(
+        "--heterogeneity-composition-weight",
+        type=float,
+        default=None,
+        help="Descriptor block weight for soft cell-state composition.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-diversity-weight",
+        type=float,
+        default=None,
+        help="Descriptor block weight for diversity and multimodality statistics.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-spatial-field-weight",
+        type=float,
+        default=None,
+        help="Descriptor block weight for canonical spatial-state density fields.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-pair-cooccurrence-weight",
+        type=float,
+        default=None,
+        help="Descriptor block weight for state-pair co-occurrence enrichment.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-pair-distance-bins",
+        default=None,
+        help="Comma-separated canonical distance bin upper bounds for pair motifs.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-pair-graph-mode",
+        default=None,
+        choices=["all_pairs", "knn", "radius"],
+        help="Pairs used for co-occurrence motifs: all_pairs, local kNN, or radius graph.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-pair-graph-k",
+        type=int,
+        default=None,
+        help="k for heterogeneity pair_graph_mode=knn.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-pair-graph-radius",
+        type=float,
+        default=None,
+        help="Canonical-coordinate radius for heterogeneity pair_graph_mode=radius.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-pair-bin-normalization",
+        default=None,
+        choices=["per_bin", "global"],
+        help="Whether pair co-occurrence tensors are normalized per distance bin or globally.",
+    )
+    multilevel.add_argument(
         "--shape-diagnostics",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -1552,6 +1605,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum member cells sampled to fit the whitened codebook.",
     )
     optimal_search.add_argument(
+        "--heterogeneity-composition-weight",
+        type=float,
+        default=None,
+        help="Descriptor block weight for soft cell-state composition.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-diversity-weight",
+        type=float,
+        default=None,
+        help="Descriptor block weight for diversity and multimodality statistics.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-spatial-field-weight",
+        type=float,
+        default=None,
+        help="Descriptor block weight for canonical spatial-state density fields.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-pair-cooccurrence-weight",
+        type=float,
+        default=None,
+        help="Descriptor block weight for state-pair co-occurrence enrichment.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-pair-distance-bins",
+        default=None,
+        help="Comma-separated canonical distance bin upper bounds for pair motifs.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-pair-graph-mode",
+        default=None,
+        choices=["all_pairs", "knn", "radius"],
+        help="Pairs used for co-occurrence motifs: all_pairs, local kNN, or radius graph.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-pair-graph-k",
+        type=int,
+        default=None,
+        help="k for heterogeneity pair_graph_mode=knn.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-pair-graph-radius",
+        type=float,
+        default=None,
+        help="Canonical-coordinate radius for heterogeneity pair_graph_mode=radius.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-pair-bin-normalization",
+        default=None,
+        choices=["per_bin", "global"],
+        help="Whether pair co-occurrence tensors are normalized per distance bin or globally.",
+    )
+    optimal_search.add_argument(
         "--shape-diagnostics",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -1757,6 +1863,15 @@ def _resolve_multilevel_config_from_args(
         "subregion_latent_sample_prior_weight",
         "subregion_latent_codebook_size",
         "subregion_latent_codebook_sample_size",
+        "heterogeneity_composition_weight",
+        "heterogeneity_diversity_weight",
+        "heterogeneity_spatial_field_weight",
+        "heterogeneity_pair_cooccurrence_weight",
+        "heterogeneity_pair_distance_bins",
+        "heterogeneity_pair_graph_mode",
+        "heterogeneity_pair_graph_k",
+        "heterogeneity_pair_graph_radius",
+        "heterogeneity_pair_bin_normalization",
         "shape_diagnostics",
         "shape_leakage_permutations",
         "compute_spot_latent",

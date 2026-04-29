@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3
+
+- Expose heterogeneity descriptor block weights as reproducible config, CLI, and script parameters instead of hidden environment-only controls.
+- Add local pair-motif graph controls for the heterogeneity descriptor: `all_pairs`, `knn`, or canonical-radius pairs, plus explicit pair-distance bins and per-bin/global normalization.
+- Store codebook assignment entropy and subregion effective-code summaries in heterogeneity descriptor metadata.
+- Add targeted synthetic tests for block-weight behavior and local pair-contact motif detection.
+- Align package metadata with the local `0.2.3` state.
+
 ## 0.2.2
 
 - Rename the current heterogeneity target implementation to `subregion_clustering_method="heterogeneity_descriptor_niche"` and keep `heterogeneity_ot_niche` only as a legacy alias until true fused-OT / FGW distances are implemented.

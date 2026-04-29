@@ -688,6 +688,22 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
         str(config.ot.subregion_latent_codebook_size),
         "--subregion-latent-codebook-sample-size",
         str(config.ot.subregion_latent_codebook_sample_size),
+        "--heterogeneity-composition-weight",
+        str(config.ot.heterogeneity_composition_weight),
+        "--heterogeneity-diversity-weight",
+        str(config.ot.heterogeneity_diversity_weight),
+        "--heterogeneity-spatial-field-weight",
+        str(config.ot.heterogeneity_spatial_field_weight),
+        "--heterogeneity-pair-cooccurrence-weight",
+        str(config.ot.heterogeneity_pair_cooccurrence_weight),
+        "--heterogeneity-pair-distance-bins",
+        str(config.ot.heterogeneity_pair_distance_bins),
+        "--heterogeneity-pair-graph-mode",
+        str(config.ot.heterogeneity_pair_graph_mode),
+        "--heterogeneity-pair-graph-k",
+        str(config.ot.heterogeneity_pair_graph_k),
+        "--heterogeneity-pair-bin-normalization",
+        str(config.ot.heterogeneity_pair_bin_normalization),
         "--shape-leakage-permutations",
         str(config.ot.shape_leakage_permutations),
         "--candidate-n-clusters",
@@ -719,6 +735,13 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
         )
     )
     cmd.extend(_bool_flag("shape-diagnostics", bool(config.ot.shape_diagnostics)))
+    if config.ot.heterogeneity_pair_graph_radius is not None:
+        cmd.extend(
+            [
+                "--heterogeneity-pair-graph-radius",
+                str(config.ot.heterogeneity_pair_graph_radius),
+            ]
+        )
     cmd.extend(_bool_flag("compute-spot-latent", bool(config.ot.compute_spot_latent)))
     cmd.extend(_bool_flag("auto-n-clusters", bool(config.ot.auto_n_clusters)))
     cmd.extend(

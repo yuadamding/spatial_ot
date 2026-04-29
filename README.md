@@ -48,11 +48,11 @@ Operational helpers live under `scripts/`; root-level shell wrappers were remove
 
 ## Multilevel OT — primary path
 
-`spatial_ot multilevel-ot` forms spatial subregions, converts every subregion to a raw member-cell feature-distribution latent embedding, pools all subregion embeddings across the cohort, and clusters that pooled latent matrix.
+`spatial_ot multilevel-ot` forms spatial subregions, converts every subregion to a cohort-comparable heterogeneity descriptor or baseline feature-distribution embedding, pools all subregion embeddings across the cohort, and clusters that pooled matrix.
 
 Prefer PCA, standardized marker expression, or another calibrated latent space. UMAP is exploratory only — its Euclidean geometry is not metric-preserving.
 
-The target subregion clustering mode is now `heterogeneity_descriptor_niche`: each subregion is represented as a block-normalized internal heterogeneity motif over compressed canonical coordinates and soft cell-state codebook posteriors. The clustered blocks are soft state composition, diversity/multimodality, a canonical spatial-state density field, and within-subregion state-pair co-occurrence enrichment. This mode uses internal shape-normalized arrangement, but not raw tissue position, subregion centers, sample labels, or shape/density descriptors. The older `pooled_subregion_latent` path remains as a composition/distribution-summary baseline; its default latent is `mean_std_shrunk`, with alternatives `mean_std`, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`. The legacy name `heterogeneity_ot_niche` is still accepted as an alias, but true fused-OT / FGW modes are reserved for future `heterogeneity_fused_ot_niche` and `heterogeneity_fgw_niche` implementations.
+The target subregion clustering mode is now `heterogeneity_descriptor_niche`: each subregion is represented as a block-normalized internal heterogeneity motif over compressed canonical coordinates and soft cell-state codebook posteriors. The clustered blocks are soft state composition, diversity/multimodality, a canonical spatial-state density field, and within-subregion state-pair co-occurrence enrichment. Block weights are exposed through CLI/config settings, and pair motifs can use all support pairs, local kNN pairs, or canonical-radius pairs with explicit distance bins. This mode uses internal shape-normalized arrangement, but not raw tissue position, subregion centers, sample labels, or shape/density descriptors. The older `pooled_subregion_latent` path remains as a composition/distribution-summary baseline; its default latent is `mean_std_shrunk`, with alternatives `mean_std`, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`. The legacy name `heterogeneity_ot_niche` is still accepted as an alias, but true fused-OT / FGW modes are reserved for future `heterogeneity_fused_ot_niche` and `heterogeneity_fgw_niche` implementations.
 
 ### Three-layer method
 
@@ -92,6 +92,11 @@ cd spatial_ot
   --radius-um 100 --stride-um 100 --basic-niche-size-um 50 \
   --min-cells 20 --max-subregions 5000 \
   --subregion-clustering-method heterogeneity_descriptor_niche \
+  --heterogeneity-composition-weight 0.20 \
+  --heterogeneity-diversity-weight 0.15 \
+  --heterogeneity-spatial-field-weight 0.35 \
+  --heterogeneity-pair-cooccurrence-weight 0.30 \
+  --heterogeneity-pair-graph-mode all_pairs \
   --subregion-latent-embedding-mode mean_std_shrunk \
   --subregion-latent-heterogeneity-weight 0.5 \
   --subregion-latent-sample-prior-weight 0.5 \

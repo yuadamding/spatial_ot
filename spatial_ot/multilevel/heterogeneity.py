@@ -19,6 +19,7 @@ DEFAULT_BLOCK_WEIGHTS = {
     "spatial_field": 0.35,
     "pair_cooccurrence": 0.30,
 }
+VALID_PAIR_GRAPH_MODES = {"all_pairs", "knn", "radius"}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -41,8 +42,24 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _normalize_block_weights(
+    block_weights: dict[str, float] | None = None,
+) -> dict[str, float]:
+    incoming = dict(DEFAULT_BLOCK_WEIGHTS)
+    if block_weights:
+        for key, value in block_weights.items():
+            if key in incoming:
+                incoming[key] = float(value)
+    weights = {key: max(float(value), 0.0) for key, value in incoming.items()}
+    total = float(sum(weights.values()))
+    if total <= 1e-12:
+        return dict(DEFAULT_BLOCK_WEIGHTS)
+    return {key: float(value / total) for key, value in weights.items()}
+
+
 def _env_block_weights() -> dict[str, float]:
-    weights = {
+    return _normalize_block_weights(
+        {
         "composition": max(
             0.0,
             _env_float(
@@ -71,17 +88,67 @@ def _env_block_weights() -> dict[str, float]:
                 DEFAULT_BLOCK_WEIGHTS["pair_cooccurrence"],
             ),
         ),
-    }
-    total = float(sum(weights.values()))
-    if total <= 1e-12:
-        return dict(DEFAULT_BLOCK_WEIGHTS)
-    return {key: float(value / total) for key, value in weights.items()}
+        }
+    )
+
+
+def _resolve_pair_graph_mode(mode: str | None) -> str:
+    resolved = str(mode or "all_pairs").strip().lower().replace("-", "_")
+    if resolved not in VALID_PAIR_GRAPH_MODES:
+        raise ValueError(
+            "heterogeneity pair_graph_mode must be one of "
+            f"{sorted(VALID_PAIR_GRAPH_MODES)}, got '{mode}'."
+        )
+    return resolved
+
+
+def _resolve_pair_bins(
+    value: tuple[float, ...] | list[float] | np.ndarray | str | None,
+) -> np.ndarray:
+    if value is None:
+        raw = os.environ.get(
+            "SPATIAL_OT_HETEROGENEITY_PAIR_BINS",
+            "0.25,0.5,1.0,2.0",
+        )
+        parts = [part.strip() for part in raw.split(",") if part.strip()]
+        parsed = [float(part) for part in parts]
+    elif isinstance(value, str):
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        parsed = [float(part) for part in parts]
+    else:
+        parsed = [float(part) for part in value]
+    bins = np.asarray(parsed, dtype=np.float32)
+    if bins.size == 0:
+        bins = np.asarray([0.25, 0.5, 1.0, 2.0], dtype=np.float32)
+    bins = np.sort(np.unique(bins[bins > 0])).astype(np.float32)
+    if bins.size == 0:
+        bins = np.asarray([1.0], dtype=np.float32)
+    return bins
 
 
 def _normalize_rows(values: np.ndarray) -> np.ndarray:
     x = np.asarray(values, dtype=np.float64)
     denom = np.maximum(x.sum(axis=1, keepdims=True), 1e-12)
     return (x / denom).astype(np.float32)
+
+
+def _numeric_summary(values: list[float] | np.ndarray) -> dict[str, float | int | None]:
+    x = np.asarray(values, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return {"count": 0}
+    return {
+        "count": int(x.size),
+        "mean": float(np.mean(x)),
+        "std": float(np.std(x)),
+        "min": float(np.min(x)),
+        "q10": float(np.quantile(x, 0.10)),
+        "q25": float(np.quantile(x, 0.25)),
+        "median": float(np.median(x)),
+        "q75": float(np.quantile(x, 0.75)),
+        "q90": float(np.quantile(x, 0.90)),
+        "max": float(np.max(x)),
+    }
 
 
 def _softmax_negative_sqdist(
@@ -193,6 +260,62 @@ def _spatial_state_field(
     return (field / total).reshape(-1).astype(np.float32)
 
 
+def _pair_edges(
+    coords: np.ndarray,
+    *,
+    graph_mode: str,
+    graph_k: int,
+    graph_radius: float | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    u = np.asarray(coords, dtype=np.float32)
+    n = int(u.shape[0])
+    if n < 2:
+        return (
+            np.zeros(0, dtype=np.int64),
+            np.zeros(0, dtype=np.int64),
+            np.zeros(0, dtype=np.float32),
+        )
+    rows, cols = np.triu_indices(n, k=1)
+    all_dist = np.sqrt(np.sum((u[rows] - u[cols]) ** 2, axis=1)).astype(np.float32)
+    mode = _resolve_pair_graph_mode(graph_mode)
+    if mode == "all_pairs":
+        return rows.astype(np.int64), cols.astype(np.int64), all_dist
+    dist_matrix = np.sqrt(
+        np.sum((u[:, None, :] - u[None, :, :]) ** 2, axis=2)
+    ).astype(np.float32)
+    np.fill_diagonal(dist_matrix, np.inf)
+    if mode == "radius":
+        radius = (
+            float(graph_radius)
+            if graph_radius is not None and float(graph_radius) > 0
+            else float(np.inf)
+        )
+        mask = all_dist <= radius
+        return rows[mask].astype(np.int64), cols[mask].astype(np.int64), all_dist[mask]
+    k = min(max(int(graph_k), 1), n - 1)
+    edge_set: set[tuple[int, int]] = set()
+    for row_idx in range(n):
+        neighbors = np.argpartition(dist_matrix[row_idx], kth=k - 1)[:k]
+        for col_idx in neighbors.tolist():
+            if row_idx == col_idx:
+                continue
+            left, right = sorted((int(row_idx), int(col_idx)))
+            edge_set.add((left, right))
+    if not edge_set:
+        return (
+            np.zeros(0, dtype=np.int64),
+            np.zeros(0, dtype=np.int64),
+            np.zeros(0, dtype=np.float32),
+        )
+    edge_arr = np.asarray(sorted(edge_set), dtype=np.int64)
+    edge_rows = edge_arr[:, 0]
+    edge_cols = edge_arr[:, 1]
+    edge_dist = np.sqrt(np.sum((u[edge_rows] - u[edge_cols]) ** 2, axis=1)).astype(
+        np.float32
+    )
+    return edge_rows, edge_cols, edge_dist
+
+
 def _pair_cooccurrence(
     coords: np.ndarray,
     probs: np.ndarray,
@@ -200,6 +323,10 @@ def _pair_cooccurrence(
     *,
     distance_bins: np.ndarray,
     normalization: str = "observed_over_expected",
+    graph_mode: str = "all_pairs",
+    graph_k: int = 8,
+    graph_radius: float | None = None,
+    bin_normalization: str = "per_bin",
 ) -> np.ndarray:
     u = np.asarray(coords, dtype=np.float32)
     q = np.asarray(probs, dtype=np.float32)
@@ -209,8 +336,14 @@ def _pair_cooccurrence(
     bins = np.asarray(distance_bins, dtype=np.float32)
     if n < 2:
         return np.zeros((int(bins.shape[0]), k, k), dtype=np.float32).reshape(-1)
-    rows, cols = np.triu_indices(n, k=1)
-    d = np.sqrt(np.sum((u[rows] - u[cols]) ** 2, axis=1))
+    rows, cols, d = _pair_edges(
+        u,
+        graph_mode=graph_mode,
+        graph_k=int(graph_k),
+        graph_radius=graph_radius,
+    )
+    if rows.size == 0:
+        return np.zeros((int(bins.shape[0]), k, k), dtype=np.float32).reshape(-1)
     pair_w = (w[rows] * w[cols]).astype(np.float64)
     out = np.zeros((int(bins.shape[0]), k, k), dtype=np.float64)
     lower = 0.0
@@ -230,6 +363,16 @@ def _pair_cooccurrence(
         composition = composition / max(float(np.sum(composition)), 1e-12)
         expected = composition[:, None] * composition[None, :]
         out = np.log1p(out / np.maximum(expected[None, :, :], 1e-8))
+    bin_requested = str(bin_normalization or "per_bin").strip().lower()
+    if bin_requested in {"per_bin", "bin", "distance_bin"}:
+        bin_sums = np.sum(out, axis=(1, 2), keepdims=True)
+        normalized = np.zeros_like(out)
+        out = np.divide(
+            out,
+            np.maximum(bin_sums, 1e-12),
+            out=normalized,
+            where=bin_sums > 0,
+        )
     total = max(float(np.sum(out)), 1e-12)
     return (out / total).reshape(-1).astype(np.float32)
 
@@ -279,7 +422,12 @@ def build_internal_heterogeneity_embeddings(
     codebook_sample_size: int = 50000,
     grid_size: int | None = None,
     grid_radius: float | None = None,
-    pair_distance_bins: tuple[float, ...] | None = None,
+    pair_distance_bins: tuple[float, ...] | list[float] | str | None = None,
+    pair_graph_mode: str | None = None,
+    pair_graph_k: int | None = None,
+    pair_graph_radius: float | None = None,
+    pair_bin_normalization: str | None = None,
+    block_weights: dict[str, float] | None = None,
     random_state: int = 1337,
     mode: str = HETEROGENEITY_DESCRIPTOR_MODE,
 ) -> tuple[np.ndarray, dict[str, object]]:
@@ -306,23 +454,36 @@ def build_internal_heterogeneity_embeddings(
         }
     grid = max(int(grid_size or _env_int("SPATIAL_OT_HETEROGENEITY_GRID_SIZE", 6)), 2)
     radius = float(grid_radius or _env_float("SPATIAL_OT_HETEROGENEITY_GRID_RADIUS", 1.5))
-    if pair_distance_bins is None:
-        raw_bins = os.environ.get(
-            "SPATIAL_OT_HETEROGENEITY_PAIR_BINS",
-            "0.25,0.5,1.0,2.0",
-        )
-        pair_distance_bins = tuple(
-            float(part.strip()) for part in raw_bins.split(",") if part.strip()
-        )
-    bins = np.asarray(pair_distance_bins, dtype=np.float32)
-    if bins.size == 0:
-        bins = np.asarray([0.25, 0.5, 1.0, 2.0], dtype=np.float32)
-    bins = np.sort(np.unique(bins[bins > 0])).astype(np.float32)
-    if bins.size == 0:
-        bins = np.asarray([1.0], dtype=np.float32)
+    bins = _resolve_pair_bins(pair_distance_bins)
     pair_normalization = os.environ.get(
         "SPATIAL_OT_HETEROGENEITY_PAIR_NORMALIZATION",
         "observed_over_expected",
+    ).strip().lower()
+    graph_mode = _resolve_pair_graph_mode(
+        pair_graph_mode
+        or os.environ.get("SPATIAL_OT_HETEROGENEITY_PAIR_GRAPH_MODE", "all_pairs")
+    )
+    graph_k = max(
+        int(
+            pair_graph_k
+            if pair_graph_k is not None
+            else _env_int("SPATIAL_OT_HETEROGENEITY_PAIR_GRAPH_K", 8)
+        ),
+        1,
+    )
+    graph_radius = (
+        float(pair_graph_radius)
+        if pair_graph_radius is not None
+        else _env_float("SPATIAL_OT_HETEROGENEITY_PAIR_GRAPH_RADIUS", 0.0)
+    )
+    if graph_radius <= 0:
+        graph_radius = None
+    bin_normalization = str(
+        pair_bin_normalization
+        or os.environ.get(
+            "SPATIAL_OT_HETEROGENEITY_PAIR_BIN_NORMALIZATION",
+            "per_bin",
+        )
     ).strip().lower()
 
     all_features = np.vstack([np.asarray(m.features, dtype=np.float32) for m in measures])
@@ -335,11 +496,17 @@ def build_internal_heterogeneity_embeddings(
         random_state=int(random_state),
     )
 
-    block_weights = _env_block_weights()
+    resolved_block_weights = (
+        _normalize_block_weights(block_weights)
+        if block_weights is not None
+        else _env_block_weights()
+    )
     composition_blocks: list[np.ndarray] = []
     diversity_blocks: list[np.ndarray] = []
     field_blocks: list[np.ndarray] = []
     pair_blocks: list[np.ndarray] = []
+    code_entropy_values: list[np.ndarray] = []
+    subregion_effective_codes: list[float] = []
     for measure in measures:
         features = np.asarray(measure.features, dtype=np.float32)
         coords = np.asarray(measure.canonical_coords, dtype=np.float32)
@@ -349,8 +516,22 @@ def build_internal_heterogeneity_embeddings(
             np.float32
         )
         probs = _softmax_negative_sqdist(z, centers, temperature=temperature)
+        entropy = -np.sum(
+            probs.astype(np.float64) * np.log(np.maximum(probs, 1e-12)),
+            axis=1,
+        ) / max(float(np.log(max(n_codes, 2))), 1e-8)
+        code_entropy_values.append(entropy.astype(np.float32))
         composition = np.sum(probs * weights[:, None], axis=0).astype(np.float32)
         composition = _normalize_rows(composition[None, :])[0]
+        subregion_entropy = -float(
+            np.sum(
+                composition.astype(np.float64)
+                * np.log(np.maximum(composition.astype(np.float64), 1e-12))
+            )
+        )
+        subregion_effective_codes.append(
+            float(np.exp(subregion_entropy) / max(int(n_codes), 1))
+        )
         diversity = _weighted_state_diversity(composition)
         field = _spatial_state_field(
             coords,
@@ -365,6 +546,10 @@ def build_internal_heterogeneity_embeddings(
             weights,
             distance_bins=bins,
             normalization=pair_normalization,
+            graph_mode=graph_mode,
+            graph_k=graph_k,
+            graph_radius=graph_radius,
+            bin_normalization=bin_normalization,
         )
         composition_blocks.append(composition.astype(np.float32))
         diversity_blocks.append(diversity.astype(np.float32))
@@ -384,7 +569,7 @@ def build_internal_heterogeneity_embeddings(
     for block_name in ("composition", "diversity", "spatial_field", "pair_cooccurrence"):
         weighted, stats = _standardize_descriptor_block(
             raw_blocks[block_name],
-            weight=float(block_weights[block_name]),
+            weight=float(resolved_block_weights[block_name]),
         )
         weighted_blocks.append(weighted)
         block_diagnostics[block_name] = stats
@@ -419,18 +604,30 @@ def build_internal_heterogeneity_embeddings(
         "embedding_dim": int(embeddings.shape[1]),
         "cell_state_codebook_size": int(n_codes),
         "cell_state_codebook_temperature": float(temperature),
+        "cell_state_codebook_assignment_entropy_summary": _numeric_summary(
+            np.concatenate(code_entropy_values) if code_entropy_values else []
+        ),
+        "subregion_effective_code_fraction_summary": _numeric_summary(
+            subregion_effective_codes
+        ),
         "codebook_feature_standardization": "mean_std_whitening_fit_on_compressed_support_sample",
         "canonical_grid_size": int(grid),
         "canonical_grid_radius": float(radius),
         "pair_distance_bins_canonical": [float(x) for x in bins.tolist()],
         "pair_cooccurrence_normalization": str(pair_normalization),
+        "pair_graph_mode": str(graph_mode),
+        "pair_graph_k": int(graph_k),
+        "pair_graph_radius_canonical": float(graph_radius)
+        if graph_radius is not None
+        else None,
+        "pair_bin_normalization": str(bin_normalization),
         "blocks": [
             "soft_cell_state_composition",
             "state_diversity_multimodality",
             "canonical_spatial_state_density_field",
             "within_subregion_state_pair_cooccurrence",
         ],
-        "block_weights": dict(block_weights),
+        "block_weights": dict(resolved_block_weights),
         "block_slices": block_slices,
         "block_diagnostics": block_diagnostics,
         "block_scaling": "each block is mean/std standardized across subregions, multiplied by block_weight/sqrt(block_dimension), then concatenated",

@@ -33,7 +33,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "write_concern_resolution_report": ("multilevel", "write_concern_resolution_report"),
 }
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 __all__ = list(_LAZY_EXPORTS)
 
 

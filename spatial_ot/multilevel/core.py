@@ -4027,6 +4027,15 @@ def fit_multilevel_ot(
     subregion_latent_sample_prior_weight: float = 0.5,
     subregion_latent_codebook_size: int = 32,
     subregion_latent_codebook_sample_size: int = 50000,
+    heterogeneity_composition_weight: float = 0.20,
+    heterogeneity_diversity_weight: float = 0.15,
+    heterogeneity_spatial_field_weight: float = 0.35,
+    heterogeneity_pair_cooccurrence_weight: float = 0.30,
+    heterogeneity_pair_distance_bins: str | tuple[float, ...] | None = None,
+    heterogeneity_pair_graph_mode: str = "all_pairs",
+    heterogeneity_pair_graph_k: int = 8,
+    heterogeneity_pair_graph_radius: float | None = None,
+    heterogeneity_pair_bin_normalization: str = "per_bin",
     auto_n_clusters: bool = False,
     candidate_n_clusters: tuple[int, ...] | list[int] | str | None = None,
     auto_k_max_score_subregions: int = 2500,
@@ -4109,6 +4118,27 @@ def fit_multilevel_ot(
     subregion_latent_codebook_sample_size = max(
         int(subregion_latent_codebook_sample_size), subregion_latent_codebook_size
     )
+    heterogeneity_block_weights = {
+        "composition": max(float(heterogeneity_composition_weight), 0.0),
+        "diversity": max(float(heterogeneity_diversity_weight), 0.0),
+        "spatial_field": max(float(heterogeneity_spatial_field_weight), 0.0),
+        "pair_cooccurrence": max(float(heterogeneity_pair_cooccurrence_weight), 0.0),
+    }
+    if sum(heterogeneity_block_weights.values()) <= 1e-12:
+        raise ValueError("at least one heterogeneity descriptor block weight must be positive")
+    heterogeneity_pair_graph_mode = (
+        str(heterogeneity_pair_graph_mode).strip().lower().replace("-", "_")
+    )
+    if heterogeneity_pair_graph_mode not in {"all_pairs", "knn", "radius"}:
+        raise ValueError(
+            "heterogeneity_pair_graph_mode must be one of all_pairs, knn, radius"
+        )
+    heterogeneity_pair_graph_k = max(int(heterogeneity_pair_graph_k), 1)
+    if (
+        heterogeneity_pair_graph_radius is not None
+        and float(heterogeneity_pair_graph_radius) <= 0
+    ):
+        heterogeneity_pair_graph_radius = None
     if clustering_method not in {
         "pooled_subregion_latent",
         HETEROGENEITY_DESCRIPTOR_MODE,
@@ -4614,6 +4644,12 @@ def fit_multilevel_ot(
                 measures,
                 codebook_size=int(subregion_latent_codebook_size),
                 codebook_sample_size=int(subregion_latent_codebook_sample_size),
+                pair_distance_bins=heterogeneity_pair_distance_bins,
+                pair_graph_mode=heterogeneity_pair_graph_mode,
+                pair_graph_k=int(heterogeneity_pair_graph_k),
+                pair_graph_radius=heterogeneity_pair_graph_radius,
+                pair_bin_normalization=heterogeneity_pair_bin_normalization,
+                block_weights=heterogeneity_block_weights,
                 random_state=int(seed),
                 mode=str(requested_clustering_method),
             )

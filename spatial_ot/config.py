@@ -75,6 +75,15 @@ class MultilevelOTConfig:
     subregion_latent_sample_prior_weight: float = 0.5
     subregion_latent_codebook_size: int = 32
     subregion_latent_codebook_sample_size: int = 50000
+    heterogeneity_composition_weight: float = 0.20
+    heterogeneity_diversity_weight: float = 0.15
+    heterogeneity_spatial_field_weight: float = 0.35
+    heterogeneity_pair_cooccurrence_weight: float = 0.30
+    heterogeneity_pair_distance_bins: str = "0.25,0.5,1.0,2.0"
+    heterogeneity_pair_graph_mode: str = "all_pairs"
+    heterogeneity_pair_graph_k: int = 8
+    heterogeneity_pair_graph_radius: float | None = None
+    heterogeneity_pair_bin_normalization: str = "per_bin"
     shape_diagnostics: bool = True
     shape_leakage_permutations: int = 64
     compute_spot_latent: bool = True
@@ -322,6 +331,40 @@ def _validate_multilevel_experiment(
     ):
         raise ValueError(
             "ot.subregion_latent_codebook_sample_size must be >= ot.subregion_latent_codebook_size"
+        )
+    heterogeneity_weights = [
+        config.ot.heterogeneity_composition_weight,
+        config.ot.heterogeneity_diversity_weight,
+        config.ot.heterogeneity_spatial_field_weight,
+        config.ot.heterogeneity_pair_cooccurrence_weight,
+    ]
+    if any(float(weight) < 0 for weight in heterogeneity_weights):
+        raise ValueError("ot.heterogeneity_*_weight values must be >= 0")
+    if sum(float(weight) for weight in heterogeneity_weights) <= 1e-12:
+        raise ValueError("at least one ot.heterogeneity_*_weight must be positive")
+    config.ot.heterogeneity_pair_graph_mode = (
+        str(config.ot.heterogeneity_pair_graph_mode)
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+    if config.ot.heterogeneity_pair_graph_mode not in {"all_pairs", "knn", "radius"}:
+        raise ValueError(
+            "ot.heterogeneity_pair_graph_mode must be one of all_pairs, knn, radius"
+        )
+    if config.ot.heterogeneity_pair_graph_k < 1:
+        raise ValueError("ot.heterogeneity_pair_graph_k must be >= 1")
+    if (
+        config.ot.heterogeneity_pair_graph_radius is not None
+        and config.ot.heterogeneity_pair_graph_radius <= 0
+    ):
+        config.ot.heterogeneity_pair_graph_radius = None
+    config.ot.heterogeneity_pair_bin_normalization = (
+        str(config.ot.heterogeneity_pair_bin_normalization).strip().lower()
+    )
+    if config.ot.heterogeneity_pair_bin_normalization not in {"per_bin", "global"}:
+        raise ValueError(
+            "ot.heterogeneity_pair_bin_normalization must be 'per_bin' or 'global'"
         )
     if config.ot.geometry_eps <= 0 or config.ot.ot_eps <= 0:
         raise ValueError("ot.geometry_eps and ot.ot_eps must be > 0")

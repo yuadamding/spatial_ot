@@ -1636,6 +1636,15 @@ def run_multilevel_ot_on_h5ad(
     subregion_latent_sample_prior_weight: float = 0.5,
     subregion_latent_codebook_size: int = 32,
     subregion_latent_codebook_sample_size: int = 50000,
+    heterogeneity_composition_weight: float = 0.20,
+    heterogeneity_diversity_weight: float = 0.15,
+    heterogeneity_spatial_field_weight: float = 0.35,
+    heterogeneity_pair_cooccurrence_weight: float = 0.30,
+    heterogeneity_pair_distance_bins: str | tuple[float, ...] | None = None,
+    heterogeneity_pair_graph_mode: str = "all_pairs",
+    heterogeneity_pair_graph_k: int = 8,
+    heterogeneity_pair_graph_radius: float | None = None,
+    heterogeneity_pair_bin_normalization: str = "per_bin",
     shape_diagnostics: bool = True,
     shape_leakage_permutations: int = 64,
     compute_spot_latent: bool = True,
@@ -1967,6 +1976,15 @@ def run_multilevel_ot_on_h5ad(
         subregion_latent_sample_prior_weight=subregion_latent_sample_prior_weight,
         subregion_latent_codebook_size=subregion_latent_codebook_size,
         subregion_latent_codebook_sample_size=subregion_latent_codebook_sample_size,
+        heterogeneity_composition_weight=heterogeneity_composition_weight,
+        heterogeneity_diversity_weight=heterogeneity_diversity_weight,
+        heterogeneity_spatial_field_weight=heterogeneity_spatial_field_weight,
+        heterogeneity_pair_cooccurrence_weight=heterogeneity_pair_cooccurrence_weight,
+        heterogeneity_pair_distance_bins=heterogeneity_pair_distance_bins,
+        heterogeneity_pair_graph_mode=heterogeneity_pair_graph_mode,
+        heterogeneity_pair_graph_k=heterogeneity_pair_graph_k,
+        heterogeneity_pair_graph_radius=heterogeneity_pair_graph_radius,
+        heterogeneity_pair_bin_normalization=heterogeneity_pair_bin_normalization,
         auto_n_clusters=auto_n_clusters,
         candidate_n_clusters=candidate_n_clusters,
         auto_k_max_score_subregions=auto_k_max_score_subregions,
@@ -2429,6 +2447,23 @@ def run_multilevel_ot_on_h5ad(
         "subregion_latent_codebook_sample_size": int(
             subregion_latent_codebook_sample_size
         ),
+        "heterogeneity_composition_weight": float(heterogeneity_composition_weight),
+        "heterogeneity_diversity_weight": float(heterogeneity_diversity_weight),
+        "heterogeneity_spatial_field_weight": float(heterogeneity_spatial_field_weight),
+        "heterogeneity_pair_cooccurrence_weight": float(
+            heterogeneity_pair_cooccurrence_weight
+        ),
+        "heterogeneity_pair_distance_bins": str(heterogeneity_pair_distance_bins)
+        if heterogeneity_pair_distance_bins is not None
+        else None,
+        "heterogeneity_pair_graph_mode": str(heterogeneity_pair_graph_mode),
+        "heterogeneity_pair_graph_k": int(heterogeneity_pair_graph_k),
+        "heterogeneity_pair_graph_radius": float(heterogeneity_pair_graph_radius)
+        if heterogeneity_pair_graph_radius is not None
+        else None,
+        "heterogeneity_pair_bin_normalization": str(
+            heterogeneity_pair_bin_normalization
+        ),
         "auto_k_max_score_subregions": int(auto_k_max_score_subregions),
         "auto_k_gap_references": int(auto_k_gap_references),
         "auto_k_mds_components": int(auto_k_mds_components),
@@ -2688,6 +2723,15 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         subregion_latent_sample_prior_weight=config.ot.subregion_latent_sample_prior_weight,
         subregion_latent_codebook_size=config.ot.subregion_latent_codebook_size,
         subregion_latent_codebook_sample_size=config.ot.subregion_latent_codebook_sample_size,
+        heterogeneity_composition_weight=config.ot.heterogeneity_composition_weight,
+        heterogeneity_diversity_weight=config.ot.heterogeneity_diversity_weight,
+        heterogeneity_spatial_field_weight=config.ot.heterogeneity_spatial_field_weight,
+        heterogeneity_pair_cooccurrence_weight=config.ot.heterogeneity_pair_cooccurrence_weight,
+        heterogeneity_pair_distance_bins=config.ot.heterogeneity_pair_distance_bins,
+        heterogeneity_pair_graph_mode=config.ot.heterogeneity_pair_graph_mode,
+        heterogeneity_pair_graph_k=config.ot.heterogeneity_pair_graph_k,
+        heterogeneity_pair_graph_radius=config.ot.heterogeneity_pair_graph_radius,
+        heterogeneity_pair_bin_normalization=config.ot.heterogeneity_pair_bin_normalization,
         shape_diagnostics=config.ot.shape_diagnostics,
         shape_leakage_permutations=config.ot.shape_leakage_permutations,
         compute_spot_latent=config.ot.compute_spot_latent,

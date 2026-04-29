@@ -1551,10 +1551,7 @@ def test_default_subregion_clustering_pools_feature_latents_without_spatial_labe
 
 
 def test_internal_heterogeneity_embedding_separates_arrangement_not_composition(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_GRID_SIZE", "4")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_MAX_CODEBOOK_SIZE", "2")
     rng = np.random.default_rng(2028)
 
     def make_measure(subregion_id: int, arrangement: str) -> SubregionMeasure:
@@ -1626,6 +1623,7 @@ def test_internal_heterogeneity_embedding_separates_arrangement_not_composition(
         measures,
         codebook_size=2,
         codebook_sample_size=64,
+        grid_size=4,
         random_state=2028,
     )
     assert metadata["mode"] == "heterogeneity_descriptor_niche"
@@ -1654,14 +1652,7 @@ def test_internal_heterogeneity_embedding_separates_arrangement_not_composition(
 
 
 def test_internal_heterogeneity_composition_only_loses_arrangement(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_GRID_SIZE", "4")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_MAX_CODEBOOK_SIZE", "2")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_COMPOSITION_WEIGHT", "1")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_DIVERSITY_WEIGHT", "0")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_FIELD_WEIGHT", "0")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_PAIR_WEIGHT", "0")
     rng = np.random.default_rng(2029)
 
     def make_measure(subregion_id: int, arrangement: str) -> SubregionMeasure:
@@ -1732,6 +1723,13 @@ def test_internal_heterogeneity_composition_only_loses_arrangement(
         ],
         codebook_size=2,
         codebook_sample_size=64,
+        grid_size=4,
+        block_weights={
+            "composition": 1.0,
+            "diversity": 0.0,
+            "spatial_field": 0.0,
+            "pair_cooccurrence": 0.0,
+        },
         random_state=2029,
         mode="heterogeneity_ot_niche",
     )
@@ -1750,16 +1748,7 @@ def test_internal_heterogeneity_composition_only_loses_arrangement(
 
 
 def test_internal_heterogeneity_pair_block_detects_contact_motif(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_GRID_SIZE", "4")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_MAX_CODEBOOK_SIZE", "2")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_PAIR_BINS", "0.25,0.5,1.0,2.0")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_COMPOSITION_WEIGHT", "0")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_DIVERSITY_WEIGHT", "0")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_FIELD_WEIGHT", "0")
-    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_PAIR_WEIGHT", "1")
-
     def make_measure(subregion_id: int, motif: str) -> SubregionMeasure:
         ys = np.linspace(-0.35, 0.35, 8, dtype=np.float32)
         if motif == "intermixed":
@@ -1809,11 +1798,25 @@ def test_internal_heterogeneity_pair_block_detects_contact_motif(
         ],
         codebook_size=2,
         codebook_sample_size=64,
+        grid_size=4,
+        pair_distance_bins=(0.25, 0.5, 1.0, 2.0),
+        pair_graph_mode="radius",
+        pair_graph_radius=0.25,
+        block_weights={
+            "composition": 0.0,
+            "diversity": 0.0,
+            "spatial_field": 0.0,
+            "pair_cooccurrence": 1.0,
+        },
         random_state=2030,
     )
 
     assert metadata["block_weights"]["pair_cooccurrence"] == pytest.approx(1.0)
+    assert metadata["pair_graph_mode"] == "radius"
+    assert metadata["pair_graph_radius_canonical"] == pytest.approx(0.25)
     assert metadata["pair_cooccurrence_normalization"] == "observed_over_expected"
+    assert metadata["pair_bin_normalization"] == "per_bin"
+    assert metadata["cell_state_codebook_assignment_entropy_summary"]["count"] == 64
     dist = np.linalg.norm(embeddings[:, None, :] - embeddings[None, :, :], axis=2)
     assert dist[0, 2] < 1e-6
     assert dist[1, 3] < 1e-6
