@@ -12,14 +12,21 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 
+def _pyproject_version() -> str | None:
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    payload = tomllib.loads(pyproject.read_text())
+    return str(payload.get("project", {}).get("version", "unknown"))
+
+
 def package_version() -> str:
+    local_version = _pyproject_version()
+    if local_version is not None:
+        return local_version
     try:
         return version("spatial-ot")
     except PackageNotFoundError:
-        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
-        if pyproject.exists():
-            payload = tomllib.loads(pyproject.read_text())
-            return str(payload.get("project", {}).get("version", "unknown"))
         return "unknown"
 
 

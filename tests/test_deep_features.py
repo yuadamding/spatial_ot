@@ -1088,7 +1088,10 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert "subregion_measure_summaries" in diag.files
     saved_cells = ad.read_h5ad(output_dir / "cells_multilevel_ot.h5ad")
     assert "mlot_projected_cluster_int" in saved_cells.obs
+    assert "mlot_subregion_id" in saved_cells.obs
+    assert "mlot_subregion_int" in saved_cells.obs
     assert "mlot_subregion_cluster_int" in saved_cells.obs
+    assert saved_cells.obs["mlot_subregion_id"].to_numpy(dtype=np.int32).min() >= 0
     assert np.array_equal(
         saved_cells.obs["mlot_cluster_int"].to_numpy(dtype=np.int32),
         saved_cells.obs["mlot_subregion_cluster_int"].to_numpy(dtype=np.int32),
@@ -1175,8 +1178,11 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert summary["boundary_invariance_claim"] == "supported_with_explicit_geometry"
     assert summary["shape_diagnostics_enabled"] is False
     assert summary["shape_leakage_balanced_accuracy"] is None
+    assert "subregion" in summary["method_layers"]["layer_1_subregion_formation"]
+    assert "heterogeneous measures" in summary["method_layers"]["layer_2_subregion_heterogeneity_clustering"]
+    assert "downstream projections" in summary["method_layers"]["layer_3_projection_and_visualization"]
     assert summary["capabilities"]["spot_level_latent_charts_implemented"] is True
-    assert summary["method_stack"]["spot_level_latent_projection"] == "cluster_local_pca_over_ot_atom_posteriors_aligned_coords_and_local_context"
+    assert summary["method_stack"]["spot_level_latent_projection"] == "global_fisher_discriminative_chart_over_ot_atom_posteriors_aligned_coords_and_local_context"
     assert "spot_level_latent" in summary["outputs"]
     spot_latent_path = Path(summary["outputs"]["spot_level_latent"])
     assert spot_latent_path.exists()
@@ -1184,11 +1190,15 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert spot_latent["latent_coords"].shape[1] == 2
     assert spot_latent["aligned_coords"].shape[1] == 2
     assert np.allclose(spot_latent["atom_posteriors"].sum(axis=1), 1.0, atol=1e-5)
-    assert summary["spot_level_latent"]["coordinate_scope"] == "cluster_local"
+    assert summary["spot_level_latent"]["coordinate_scope"] == "global_fisher_discriminative_with_cluster_local_residual"
+    assert summary["spot_level_latent"]["latent_refinement"] == "local_pca_residual_plus_weighted_fisher_discriminant"
     saved = ad.read_h5ad(summary["outputs"]["h5ad"])
     assert "mlot_spot_latent_coords" in saved.obsm
     assert saved.obsm["mlot_spot_latent_coords"].shape == (adata.n_obs, 2)
     assert "mlot_spot_latent_cluster_int" in saved.obs
+    assert saved.uns["multilevel_ot"]["method_layers"] == summary["method_layers"]
+    assert spot_latent["latent_projection_mode"].item() == "global_fisher_discriminative_chart_over_ot_atom_posteriors_aligned_coords_and_local_context"
+    assert "latent_anchor_repulsion_min_distance" not in spot_latent.files
 
 
 def test_region_geometry_json_rejects_unknown_units_and_bad_affine(tmp_path) -> None:

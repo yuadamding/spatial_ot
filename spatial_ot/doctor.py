@@ -30,6 +30,8 @@ _SHELL_DEFAULT_CHECKS: tuple[tuple[str, str, str], ...] = (
     ("AUTO_K_PILOT_MAX_ITER", "ot.auto_k_pilot_max_iter", "int"),
     ("MIN_SUBREGIONS_PER_CLUSTER", "ot.min_subregions_per_cluster", "int"),
     ("SUBREGION_CONSTRUCTION_METHOD", "ot.subregion_construction_method", "str"),
+    ("SUBREGION_FEATURE_WEIGHT", "ot.subregion_feature_weight", "float"),
+    ("SUBREGION_FEATURE_DIMS", "ot.subregion_feature_dims", "int"),
     ("DEEP_SEGMENTATION_KNN", "ot.deep_segmentation_knn", "int"),
     ("DEEP_SEGMENTATION_FEATURE_DIMS", "ot.deep_segmentation_feature_dims", "int"),
     ("DEEP_SEGMENTATION_FEATURE_WEIGHT", "ot.deep_segmentation_feature_weight", "float"),
@@ -79,9 +81,9 @@ def _getattr_path(obj, dotted: str):
 
 def _package_version() -> str:
     try:
-        from importlib.metadata import version
+        from .multilevel.metadata import package_version
 
-        return version("spatial-ot")
+        return package_version()
     except Exception:
         return "unknown"
 

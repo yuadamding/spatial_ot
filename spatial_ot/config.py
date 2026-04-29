@@ -149,6 +149,8 @@ class MultilevelOTConfig:
     overlap_contrast_scale: float = 1.0
     allow_convex_hull_fallback: bool = False
     subregion_construction_method: str = "data_driven"
+    subregion_feature_weight: float = 0.0
+    subregion_feature_dims: int = 16
     deep_segmentation_knn: int = 12
     deep_segmentation_feature_dims: int = 32
     deep_segmentation_feature_weight: float = 1.0
@@ -334,6 +336,10 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
             "ot.subregion_construction_method must be one of "
             f"{sorted(valid_subregion_construction)}, got '{config.ot.subregion_construction_method}'"
         )
+    if config.ot.subregion_feature_weight < 0:
+        raise ValueError("ot.subregion_feature_weight must be >= 0")
+    if config.ot.subregion_feature_dims < 0:
+        raise ValueError("ot.subregion_feature_dims must be >= 0")
     if config.ot.deep_segmentation_knn < 2:
         raise ValueError("ot.deep_segmentation_knn must be at least 2")
     if config.ot.deep_segmentation_feature_dims < 1:

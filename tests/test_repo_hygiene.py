@@ -103,6 +103,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-32768}"' in run_sh
     assert 'DEEP_PRETRAINED_MODEL="${DEEP_PRETRAINED_MODEL:-}"' in run_sh
     assert 'DEEP_SEGMENTATION_REFINEMENT_ITERS="${DEEP_SEGMENTATION_REFINEMENT_ITERS:-6}"' in run_sh
+    assert 'SUBREGION_FEATURE_WEIGHT="${SUBREGION_FEATURE_WEIGHT:-0}"' in run_sh
+    assert 'SUBREGION_FEATURE_DIMS="${SUBREGION_FEATURE_DIMS:-16}"' in run_sh
     assert 'LAMBDA_X="${LAMBDA_X:-0.5}"' in run_sh
     assert 'LAMBDA_Y="${LAMBDA_Y:-1.0}"' in run_sh
     assert 'OT_EPS="${OT_EPS:-0.03}"' in run_sh
@@ -156,6 +158,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert '--radius-um "$RADIUS_UM"' in run_sh
     assert '--stride-um "$STRIDE_UM"' in run_sh
     assert '--subregion-construction-method "$SUBREGION_CONSTRUCTION_METHOD"' in run_sh
+    assert '--subregion-feature-weight "$SUBREGION_FEATURE_WEIGHT"' in run_sh
+    assert '--subregion-feature-dims "$SUBREGION_FEATURE_DIMS"' in run_sh
     assert '--deep-segmentation-knn "$DEEP_SEGMENTATION_KNN"' in run_sh
     assert '--lambda-x "$LAMBDA_X"' in run_sh
     assert '--lambda-y "$LAMBDA_Y"' in run_sh
@@ -227,6 +231,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'TIME_BUDGET_HOURS="${TIME_BUDGET_HOURS:-20}"' in optimal_search_sh
     assert 'ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"' in optimal_search_sh
     assert 'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-data_driven}"' in optimal_search_sh
+    assert 'SUBREGION_FEATURE_WEIGHT="${SUBREGION_FEATURE_WEIGHT:-0}"' in optimal_search_sh
+    assert '--subregion-feature-weight "$SUBREGION_FEATURE_WEIGHT"' in optimal_search_sh
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in optimal_search_sh
     assert 'DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-context}"' in optimal_search_sh
     assert '--min-subregions-per-cluster "$MIN_SUBREGIONS_PER_CLUSTER"' in optimal_search_sh

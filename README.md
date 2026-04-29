@@ -52,13 +52,22 @@ The packaged path expects cohort H5AD inputs under the sibling directory `../spa
 
 Prefer PCA, standardized marker expression, or another calibrated latent space. UMAP is exploratory only — its Euclidean geometry is not metric-preserving.
 
-Two modes:
+### Three-layer method
 
-- **data-driven subregion discovery** (default): mutually exclusive spatial subregions learned from observed coordinates plus the OT feature view, with sparse connected pieces merged to satisfy `min_cells`; the fitted boundary/shape geometry is taken from the observed member-cell point cloud rather than a hand-coded template
+The active method should be interpreted as three linked layers:
+
+- **Layer 1: subregion formation.** The biological unit is a mutually exclusive subregion: a small tissue region containing many cells, not a single cell or spot. Subregion boundaries can be coordinate-only, feature-aware, deep-graph refined, or supplied explicitly; realized size, shape, density, and minimum-size constraints are part of the method.
+- **Layer 2: subregion heterogeneity clustering.** Each subregion is represented as a compressed empirical measure over canonical within-subregion coordinates and cell-level features. Clustering compares the internal heterogeneity of these subregion measures with semi-relaxed OT against shared cluster atoms. This is the primary niche-clustering layer.
+- **Layer 3: projection and visualization.** Cell labels, spot-level latent fields, and sample maps are downstream projections from fitted subregion clusters. They are for interpretation and QC; they do not redefine the fitted subregion labels.
+
+Supported modes:
+
+- **coordinate-only data-driven subregion discovery** (default): mutually exclusive spatial subregions learned from observed coordinates, with sparse connected pieces merged to satisfy `min_cells`; the fitted boundary/shape geometry is taken from the observed member-cell point cloud rather than a hand-coded template
+- **feature-aware data-driven subregion discovery**: set `--subregion-feature-weight > 0` to let the OT feature view influence generated boundaries; this is useful for sensitivity analysis but should be compared against the coordinate-only baseline because the same feature signal may later enter OT clustering
 - **deep graph segmentation**: set `--subregion-construction-method deep_segmentation` and provide a learned feature view, typically `--deep-feature-method autoencoder --deep-output-embedding context`; many coordinate seeds give full tissue coverage, then a spatial kNN boundary-refinement pass moves boundaries using learned embedding affinity before minimum-size merging
 - **explicit-region clustering**: pass `--region-obs-key` and ideally explicit geometry objects so boundary shape can be treated as nuisance
 
-For generated subregions, membership and boundary shape are data-driven from the observed member cells. `--radius-um` is not a fixed ball/window membership radius in this mode; it is retained for compatibility and graph diagnostics. The realized subregion scale comes from `--basic-niche-size-um` or `--stride-um`, `--min-cells`, `--max-subregions`, spatial connectivity, and either feature-aware boundary refinement or deep graph segmentation. For explicit-region runs without masks or polygons, boundary-shape invariance is not guaranteed unless you intentionally opt into the observed-coordinate convex-hull fallback via `--allow-observed-hull-geometry`.
+For generated subregions, membership and boundary shape are data-driven from the observed member cells. `--radius-um` is not a fixed ball/window membership radius in this mode; it is retained for compatibility and graph diagnostics. The realized subregion scale comes from `--basic-niche-size-um` or `--stride-um`, `--min-cells`, `--max-subregions`, spatial connectivity, and optionally feature-aware boundary refinement or deep graph segmentation. For explicit-region runs without masks or polygons, boundary-shape invariance is not guaranteed unless you intentionally opt into the observed-coordinate convex-hull fallback via `--allow-observed-hull-geometry`.
 
 For CLI explicit-region runs, pass `--region-geometry-json` with a JSON object containing `regions`, each with `region_id` plus `polygon_vertices`, `polygon_components`, or `mask`. Polygon coordinates are interpreted in scaled microns by default; set `"coordinate_units": "obs"` to multiply them by `--spatial-scale`.
 
@@ -218,7 +227,7 @@ REFRESH_POOLED_INPUT=1 bash run.sh                                       # rebui
 REFRESH_PREPARED_FEATURES=1 bash run.sh                                  # rebuild prepared cache
 ```
 
-`run.sh` reuses `../spatial_ot_input/spatial_ot_input_pooled.h5ad` and the prepared full-gene cache when present; only recomputes when missing or explicitly refreshed. After OT it writes one spatial niche PNG per sample under `../outputs/spatial_ot/cohort_multilevel_ot/sample_niche_plots/` using each sample's native within-sample coordinates.
+`run.sh` reuses `../spatial_ot_input/spatial_ot_input_pooled.h5ad` and the prepared full-gene cache when present; only recomputes when missing or explicitly refreshed. After OT it writes one spatial niche PNG per sample under `../outputs/spatial_ot/cohort_multilevel_ot/sample_niche_plots/` using each sample's native within-sample coordinates. These niche maps show both fitted mutually exclusive subregion polygons and cell-wise inherited labels with the same cluster colors.
 
 Defaults relevant to safety / cost (override with the matching env var):
 
@@ -226,8 +235,8 @@ Defaults relevant to safety / cost (override with the matching env var):
 - `BASIC_NICHE_SIZE_UM=50`, `MIN_CELLS=25`, `MAX_SUBREGIONS=5000`, `STRIDE_UM=$RADIUS_UM`
 - `AUTO_N_CLUSTERS=0` by default. Set `AUTO_N_CLUSTERS=1` with `CANDIDATE_N_CLUSTERS=15-25` to run pilot-based model selection before the final fit.
 - `MIN_SUBREGIONS_PER_CLUSTER=50` constrains the number of subregions per selected cluster; it does not constrain projected cell or spot counts.
-- `SUBREGION_FEATURE_WEIGHT=0.75`, `SUBREGION_FEATURE_DIMS=16` make generated subregion boundaries use local feature contrast in addition to spatial adjacency. Set the weight to `0` for coordinate-only construction.
-- `SUBREGION_CONSTRUCTION_METHOD=deep_segmentation` switches generated subregion detection to learned-affinity graph segmentation. `DEEP_SEGMENTATION_KNN=12`, `DEEP_SEGMENTATION_FEATURE_DIMS=32`, `DEEP_SEGMENTATION_FEATURE_WEIGHT=1.0`, and `DEEP_SEGMENTATION_SPATIAL_WEIGHT=0.05` control the graph cut.
+- `SUBREGION_FEATURE_WEIGHT=0`, `SUBREGION_FEATURE_DIMS=16` keep generated data-driven boundaries coordinate-only by default. Set a positive weight only for feature-aware boundary sensitivity runs.
+- `SUBREGION_CONSTRUCTION_METHOD=deep_segmentation` switches generated subregion detection to learned-affinity graph segmentation. `DEEP_SEGMENTATION_KNN=12`, `DEEP_SEGMENTATION_FEATURE_DIMS=32`, `DEEP_SEGMENTATION_FEATURE_WEIGHT=1.0`, and `DEEP_SEGMENTATION_SPATIAL_WEIGHT=0.05` control the graph cut. Treat this as an opt-in boundary model and compare it against coordinate-only construction.
 - `N_INIT=2`, `MAX_ITER=5`, `ALIGN_ITERS=2`, `GEOMETRY_SAMPLES=64`, `COMPRESSED_SUPPORT_SIZE=48` for the packaged cohort runner; raise these for a final high-depth confirmation run.
 - `SINKHORN_MAX_ITER=256`, `SINKHORN_TOL=1e-4` for CUDA OT solves in the packaged runner.
 - `SHAPE_LEAKAGE_PERMUTATIONS=16` keeps the default diagnostic pass light; raise it for publication-quality QC.
@@ -275,7 +284,9 @@ The Python API and TOML config still accept `auto`, `cuda`, `cuda:0`, `cuda:1`, 
   --plot-spatial-x-key cell_x --plot-spatial-y-key cell_y
 ```
 
-Per-sample spot-latent fields are cluster-local, so they are rendered one sample and one cluster at a time:
+The niche-map command writes a paired figure for each sample: a subregion-wise filled polygon panel and a cell-wise inherited-label scatter panel. It reads `mlot_subregion_id` from `cells_multilevel_ot.h5ad` when available, otherwise recovers subregion membership from `spot_level_latent_multilevel_ot.npz`.
+
+Per-sample spot-latent fields are rendered as one whole-slide map per sample. The stored spot latent is a global Fisher/discriminative chart learned from OT atom-posterior/local-context features and the fitted OT subregion labels; cluster-local residuals preserve within-niche heterogeneity. No minimum-distance anchor repulsion or target-distance scaling is used, so weak between-cluster separation remains visible as a diagnostic limitation instead of being forced by the plotter. The slide map rescales colors within each niche/cluster before RGB conversion, overlays subregion outlines, and uses the side key to show the learned global latent separation.
 
 ```bash
 ../.venv/bin/python -m spatial_ot plot-sample-spot-latent \
@@ -285,7 +296,7 @@ Per-sample spot-latent fields are cluster-local, so they are rendered one sample
   --plot-spatial-x-key cell_x --plot-spatial-y-key cell_y
 ```
 
-For generated runs, `basic_niche_size_um` is only a target scale hint for data-driven atomic membership seeds (default `50 µm`). Fitted subregions are mutually exclusive by construction, seed boundaries are learned from spatial position plus the OT feature view, sparse connected pieces are merged to satisfy `min_cells`, and OT boundary geometry is learned from the observed coordinates of the cells inside each final subregion. The package reports realized size/shape/density statistics because those realized subregions, not a nominal radius, are the biological units being clustered.
+For generated runs, `basic_niche_size_um` is only a target scale hint for data-driven atomic membership seeds (default `50 µm`). Fitted subregions are mutually exclusive by construction. By default, seed boundaries are learned from spatial position only; feature-aware or deep boundaries are explicit opt-in modes and should be supported by coordinate-only, feature-weight, and held-out-sample ablations. Sparse connected pieces are merged to satisfy `min_cells`, and OT boundary geometry is learned from the observed coordinates of the cells inside each final subregion. The package reports realized size/shape/density statistics because those realized subregions, not a nominal radius, are the biological units being clustered.
 
 ## Output artifacts
 
@@ -294,7 +305,7 @@ Multilevel OT writes:
 - `cells_multilevel_ot.h5ad`
 - `subregions_multilevel_ot.parquet`
 - `cluster_supports_multilevel_ot.npz`
-- `spot_level_latent_multilevel_ot.npz` with occurrence-level `(subregion, spot)` cluster-local latent coordinates
+- `spot_level_latent_multilevel_ot.npz` with occurrence-level `(subregion, spot)` global Fisher/discriminative latent coordinates
 - `multilevel_ot_spatial_map.png`, `multilevel_ot_subregion_embedding.png`, `multilevel_ot_atom_layouts.png`
 - `summary.json`
 - `deep_feature_model.pt`, `deep_feature_history.csv`, `deep_feature_config.json` (when deep features are enabled)

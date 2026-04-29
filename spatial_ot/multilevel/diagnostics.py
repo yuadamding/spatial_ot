@@ -203,6 +203,26 @@ def build_qc_warnings(
                 "Generated subregion membership is a data-driven mutually exclusive partition; radius_um is not a fixed neighborhood membership radius.",
             )
         )
+    if subregion_construction and bool(subregion_construction.get("feature_boundary_circularity_risk", False)):
+        warnings_out.append(
+            _qc_warning(
+                "feature_aware_boundary_circularity_risk",
+                "warning",
+                "Subregion boundaries used the same or related feature view that is later used for OT clustering. Treat this as a feature-aware/deep boundary result until coordinate-only and feature-weight ablations agree.",
+            )
+        )
+    if (
+        subregion_construction
+        and bool(subregion_construction.get("requires_full_cell_coverage_for_generated_partitions", False))
+        and not bool(subregion_construction.get("coordinate_only_baseline", False))
+    ):
+        warnings_out.append(
+            _qc_warning(
+                "coordinate_only_boundary_baseline_required",
+                "info",
+                "Primary biological claims should be compared against a coordinate-only data-driven subregion baseline.",
+            )
+        )
     if bool(auto_k_enabled):
         warnings_out.append(
             _qc_warning(

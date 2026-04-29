@@ -107,7 +107,7 @@ def _subregion_boundary_refinement_knn() -> int:
 
 
 def _subregion_partition_feature_weight() -> float:
-    return max(0.0, _env_float("SPATIAL_OT_SUBREGION_FEATURE_WEIGHT", 0.75))
+    return max(0.0, _env_float("SPATIAL_OT_SUBREGION_FEATURE_WEIGHT", 0.0))
 
 
 def _subregion_partition_feature_dims() -> int:
@@ -723,6 +723,8 @@ def build_partition_subregions_from_grid_tiles(
     max_subregions: int,
     *,
     partition_features: np.ndarray | None = None,
+    partition_feature_weight: float | None = None,
+    partition_feature_dims: int | None = None,
     seed: int = 1337,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
     """Backward-compatible alias for data-driven subregion construction.
@@ -738,6 +740,8 @@ def build_partition_subregions_from_grid_tiles(
         max_subregions=max_subregions,
         target_scale_um=float(stride_um),
         partition_features=partition_features,
+        partition_feature_weight=partition_feature_weight,
+        partition_feature_dims=partition_feature_dims,
         seed=int(seed),
     )
 
@@ -749,6 +753,8 @@ def build_basic_niches(
     max_subregions: int,
     *,
     partition_features: np.ndarray | None = None,
+    partition_feature_weight: float | None = None,
+    partition_feature_dims: int | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
     """Build mutually exclusive data-driven atomic subregions.
 
@@ -763,6 +769,8 @@ def build_basic_niches(
         max_subregions=int(max_subregions),
         target_scale_um=float(niche_size_um),
         partition_features=partition_features,
+        partition_feature_weight=partition_feature_weight,
+        partition_feature_dims=partition_feature_dims,
     )
     return centers, members
 
@@ -776,6 +784,8 @@ def build_composite_subregions_from_basic_niches(
     basic_niche_size_um: float,
     *,
     partition_features: np.ndarray | None = None,
+    partition_feature_weight: float | None = None,
+    partition_feature_dims: int | None = None,
     seed: int = 1337,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, list[np.ndarray], list[np.ndarray]]:
     """Build data-driven subregions plus atomic seed provenance."""
@@ -787,6 +797,8 @@ def build_composite_subregions_from_basic_niches(
         max_subregions=max_subregions,
         target_scale_um=float(basic_niche_size_um),
         partition_features=partition_features,
+        partition_feature_weight=partition_feature_weight,
+        partition_feature_dims=partition_feature_dims,
         seed=int(seed),
     )
 

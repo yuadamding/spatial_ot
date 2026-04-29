@@ -57,6 +57,7 @@ from .plotting import (
     plot_sample_spatial_maps,
     plot_sample_spatial_maps_from_run_dir as plot_sample_spatial_maps_from_run_dir,
 )
+from .spot_latent import spot_latent_separation_diagnostics as _spot_latent_separation_diagnostics
 from .types import MultilevelOTResult, RegionGeometry
 
 
@@ -246,6 +247,8 @@ def _subregion_construction_summary(
     min_cells: int,
     max_subregions: int,
     subregion_construction_method: str,
+    subregion_feature_weight: float,
+    subregion_feature_dims: int,
     deep_segmentation_knn: int,
     deep_segmentation_feature_dims: int,
     deep_segmentation_feature_weight: float,
@@ -264,8 +267,12 @@ def _subregion_construction_summary(
                 else "observed_coordinates_plus_ot_feature_affinity_deep_segmentation_mode"
             )
         else:
-            mode = "generated_data_driven_spatial_feature_partition"
-            membership_source = "observed_coordinates_plus_ot_feature_view"
+            if float(subregion_feature_weight) > 0.0 and int(subregion_feature_dims) > 0:
+                mode = "generated_data_driven_spatial_feature_partition"
+                membership_source = "observed_coordinates_plus_ot_feature_view"
+            else:
+                mode = "generated_data_driven_coordinate_partition"
+                membership_source = "observed_coordinates_only"
         boundary_shape_source = "observed_member_point_cloud"
         radius_semantics = (
             "radius_um is retained for backward compatibility and graph diagnostics; it is not used as a fixed "
@@ -294,8 +301,20 @@ def _subregion_construction_summary(
         "min_cells": int(min_cells),
         "max_subregions": int(max_subregions),
         "construction_method": construction_method,
-        "partition_feature_weight": _env_float("SPATIAL_OT_SUBREGION_FEATURE_WEIGHT", 0.75),
-        "partition_feature_dims": _env_int("SPATIAL_OT_SUBREGION_FEATURE_DIMS", 16),
+        "partition_feature_weight": float(subregion_feature_weight),
+        "partition_feature_dims": int(subregion_feature_dims),
+        "coordinate_only_baseline": bool(
+            construction_method == "data_driven"
+            and float(subregion_feature_weight) == 0.0
+        ),
+        "feature_boundary_circularity_risk": bool(
+            generated
+            and (
+                (construction_method == "data_driven" and float(subregion_feature_weight) > 0.0 and int(subregion_feature_dims) > 0)
+                or construction_method == "deep_segmentation"
+            )
+        ),
+        "recommended_primary_claim_mode": "coordinate_only_data_driven",
         "boundary_refinement_iters": _env_int("SPATIAL_OT_SUBREGION_BOUNDARY_REFINEMENT_ITERS", 2),
         "boundary_refinement_knn": _env_int("SPATIAL_OT_SUBREGION_BOUNDARY_KNN", 12),
         "seed_partition_kmeans_max_iter": _env_int("SPATIAL_OT_SUBREGION_KMEANS_MAX_ITER", 25),
@@ -554,15 +573,19 @@ def _save_multilevel_outputs(
     spot_latent_computed = bool(summary.get("compute_spot_latent", True)) and result.spot_latent_coords.shape[0] > 0
     summary.setdefault("capabilities", {})["spot_level_latent_charts_implemented"] = bool(spot_latent_computed)
     summary.setdefault("method_stack", {})["spot_level_latent_projection"] = (
-        "cluster_local_pca_over_ot_atom_posteriors_aligned_coords_and_local_context"
+        "global_fisher_discriminative_chart_over_ot_atom_posteriors_aligned_coords_and_local_context"
         if spot_latent_computed
         else "disabled"
     )
     summary.setdefault("method_notes", {})["spot_level_latent"] = (
-        "Every row/spot occurrence inside every fitted regional niche is projected into its assigned cluster's shared "
-        "2D chart. The chart is cluster-local and is learned from aligned intrinsic coordinates, OT atom-posterior "
-        "composition, and local atom-posterior composition at multiple canonical radii. The H5AD stores a collapsed "
-        "per-row preview; the NPZ stores the full occurrence-level latent field for fitted mutually exclusive subregions."
+        "Every row/spot occurrence inside every fitted regional niche is projected into a shared 2D chart. The chart is "
+        "learned from aligned intrinsic coordinates, OT atom-posterior composition, and local atom-posterior composition "
+        "at multiple canonical radii. It first learns cluster-local PCA residuals for within-niche heterogeneity, then "
+        "learns a weighted Fisher/discriminative global chart from the fitted OT subregion labels. No minimum-distance "
+        "anchor repulsion or target-distance scaling is used: weak between-cluster separation is retained as a diagnostic "
+        "signal instead of being forced by the plotter. Primary OT subregion labels remain authoritative; the latent "
+        "projection changes the chart geometry, not the fitted subregion labels. The H5AD stores a collapsed per-row "
+        "preview; the NPZ stores the full occurrence-level latent field."
     )
     summary.setdefault("method_notes", {})["cell_cluster_labels"] = (
         "Primary H5AD labels mlot_cluster_int and mlot_subregion_cluster_int inherit each row's fitted mutually exclusive "
@@ -571,6 +594,12 @@ def _save_multilevel_outputs(
         "when the minimum-subregion-per-cluster constraint forces a label."
     )
     covered_spot_rows = int(np.sum(result.cell_spot_latent_cluster_labels >= 0))
+    spot_latent_diagnostics = _spot_latent_separation_diagnostics(
+        result.spot_latent_coords,
+        result.spot_latent_cluster_labels,
+        result.spot_latent_weights,
+        result.spot_latent_subregion_ids,
+    )
     summary["spot_level_latent"] = {
         "implemented": bool(spot_latent_computed),
         "projection": summary["method_stack"]["spot_level_latent_projection"],
@@ -592,14 +621,21 @@ def _save_multilevel_outputs(
             "atom_posteriors",
         ],
         "cell_preview_obsm_key": "mlot_spot_latent_coords",
-        "coordinate_scope": "cluster_local",
+        "coordinate_scope": "global_fisher_discriminative_with_cluster_local_residual",
+        "latent_refinement": "local_pca_residual_plus_weighted_fisher_discriminant",
         "local_context_radii_canonical": [0.25, 0.5, 1.0],
+        "honest_separation_diagnostics": spot_latent_diagnostics,
     }
 
     primary_cell_labels, primary_cell_probs, _ = _cell_subregion_cluster_projection(
         n_cells=int(adata.n_obs),
         result=result,
     )
+    primary_cell_subregion_ids = np.full(int(adata.n_obs), -1, dtype=np.int32)
+    for rid, members in enumerate(result.subregion_members):
+        member_arr = np.asarray(members, dtype=np.int64)
+        if member_arr.size:
+            primary_cell_subregion_ids[member_arr] = int(rid)
     palette = _cluster_palette(result.cluster_supports.shape[0])
     label_names = [f"C{int(x)}" if int(x) >= 0 else "uncovered" for x in primary_cell_labels]
     label_hex = [
@@ -626,6 +662,8 @@ def _save_multilevel_outputs(
     cells_out.obs["mlot_cluster_id"] = pd.Categorical(label_names)
     cells_out.obs["mlot_cluster_int"] = primary_cell_labels.astype(np.int32)
     cells_out.obs["mlot_cluster_hex"] = label_hex
+    cells_out.obs["mlot_subregion_id"] = primary_cell_subregion_ids.astype(np.int32)
+    cells_out.obs["mlot_subregion_int"] = primary_cell_subregion_ids.astype(np.int32)
     cells_out.obs["mlot_subregion_cluster_id"] = pd.Categorical(label_names)
     cells_out.obs["mlot_subregion_cluster_int"] = primary_cell_labels.astype(np.int32)
     cells_out.obs["mlot_projected_cluster_id"] = pd.Categorical(projected_label_names)
@@ -661,9 +699,10 @@ def _save_multilevel_outputs(
         "primary_cluster_obs_key": "mlot_cluster_int",
         "subregion_cluster_obs_key": "mlot_subregion_cluster_int",
         "projected_cluster_obs_key": "mlot_projected_cluster_int",
-        "spot_level_latent_mode": "occurrence_level_assigned_subregion_atom_posterior",
+        "spot_level_latent_mode": "occurrence_level_global_fisher_discriminative_chart",
         "spot_level_latent_npz": str(spot_latent_path),
         "deep_obsm_key": deep_obsm_key,
+        "method_layers": summary.get("method_layers"),
         "summary_json": json.dumps(summary),
     }
     cells_out.write_h5ad(h5ad_path, compression=h5ad_compression)
@@ -751,6 +790,10 @@ def _save_multilevel_outputs(
         cell_spot_latent_coords=result.cell_spot_latent_coords.astype(np.float32),
         cell_spot_latent_cluster_labels=result.cell_spot_latent_cluster_labels.astype(np.int32),
         cell_spot_latent_weights=result.cell_spot_latent_weights.astype(np.float32),
+        latent_projection_mode=np.array(
+            "global_fisher_discriminative_chart_over_ot_atom_posteriors_aligned_coords_and_local_context"
+        ),
+        latent_refinement=np.array("local_pca_residual_plus_weighted_fisher_discriminant"),
     )
     np.savez_compressed(
         candidate_diag_path,
@@ -904,6 +947,8 @@ def run_multilevel_ot_on_h5ad(
     overlap_contrast_scale: float = 1.0,
     basic_niche_size_um: float | None = 200.0,
     subregion_construction_method: str = "data_driven",
+    subregion_feature_weight: float = 0.0,
+    subregion_feature_dims: int = 16,
     deep_segmentation_knn: int = 12,
     deep_segmentation_feature_dims: int = 32,
     deep_segmentation_feature_weight: float = 1.0,
@@ -1156,6 +1201,8 @@ def run_multilevel_ot_on_h5ad(
         overlap_contrast_scale=overlap_contrast_scale,
         compute_spot_latent=compute_spot_latent,
         subregion_construction_method=subregion_construction_method,
+        subregion_feature_weight=subregion_feature_weight,
+        subregion_feature_dims=subregion_feature_dims,
         deep_segmentation_knn=deep_segmentation_knn,
         deep_segmentation_feature_dims=deep_segmentation_feature_dims,
         deep_segmentation_feature_weight=deep_segmentation_feature_weight,
@@ -1288,6 +1335,8 @@ def run_multilevel_ot_on_h5ad(
         min_cells=min_cells,
         max_subregions=max_subregions,
         subregion_construction_method=subregion_construction_method,
+        subregion_feature_weight=subregion_feature_weight,
+        subregion_feature_dims=subregion_feature_dims,
         deep_segmentation_knn=deep_segmentation_knn,
         deep_segmentation_feature_dims=deep_segmentation_feature_dims,
         deep_segmentation_feature_weight=deep_segmentation_feature_weight,
@@ -1406,6 +1455,8 @@ def run_multilevel_ot_on_h5ad(
         "subregion_construction_mode": str(subregion_construction["mode"]),
         "subregion_construction_method": str(subregion_construction_method),
         "deep_segmentation_knn": int(deep_segmentation_knn),
+        "subregion_feature_weight": float(subregion_feature_weight),
+        "subregion_feature_dims": int(subregion_feature_dims),
         "deep_segmentation_feature_dims": int(deep_segmentation_feature_dims),
         "deep_segmentation_feature_weight": float(deep_segmentation_feature_weight),
         "deep_segmentation_spatial_weight": float(deep_segmentation_spatial_weight),
@@ -1540,6 +1591,22 @@ def run_multilevel_ot_on_h5ad(
         "qc_warning_count": int(len(qc_warnings)),
         "qc_has_warnings": bool(any(item.get("severity") == "warning" for item in qc_warnings)),
         "runtime_memory": runtime_memory,
+        "method_layers": {
+            "layer_1_subregion_formation": (
+                "The clustered biological unit is a fitted mutually exclusive subregion containing many cells. "
+                "Generated boundaries are data-driven spatial components, optionally feature-aware or deep-graph refined; "
+                "explicit-region runs may supply external region geometry."
+            ),
+            "layer_2_subregion_heterogeneity_clustering": (
+                "Each subregion is converted into a compressed empirical measure over canonical within-subregion coordinates "
+                "and cell-level features. Niche clusters are learned by comparing those internal heterogeneous measures with "
+                "semi-relaxed OT against shared cluster atoms."
+            ),
+            "layer_3_projection_and_visualization": (
+                "Cell labels, spot-level latent fields, and sample maps are downstream projections of fitted subregion "
+                "clusters for interpretation and QC; they do not redefine the primary subregion labels."
+            ),
+        },
         "method_notes": {
             "core": "shape-normalized cluster-specific semi-relaxed Wasserstein dictionary clustering",
             "geometry_normalization": "data-driven geometry samples from each subregion are OT-mapped into a shared unit-disk reference domain before clustering; generated subregions use their observed cell point cloud, explicit regions use supplied mask/polygon geometry, and degenerate 1-2 point subregions fall back to centered-and-scaled local coordinates without OT interpolation",
@@ -1554,7 +1621,7 @@ def run_multilevel_ot_on_h5ad(
             "support_sharing": "subregions assigned to the same cluster reuse the same shared atom dictionary but keep subregion-specific mixture weights",
             "subregion_cluster_size": "cluster-size constraints are applied to the number of fitted subregions assigned to each subregion cluster, not to projected cell or spot labels",
             "cell_boundary_projection": "cell-level scores are an approximate projection from canonical-coordinate plus feature fit to assigned cluster atoms, modulated by fitted-subregion cluster evidence; they are not an exact posterior under the OT model",
-            "spot_level_latent": "spot-level latent charts are cluster-local coordinates learned after the regional OT fit from aligned intrinsic coordinates, OT atom-posterior composition, and local atom-posterior composition at multiple canonical radii; different clusters have separate coordinate systems",
+            "spot_level_latent": "spot-level latent charts are learned after the regional OT fit from aligned intrinsic coordinates, OT atom-posterior composition, and local atom-posterior composition at multiple canonical radii; local PCA residuals preserve within-niche heterogeneity, and a weighted Fisher/discriminative projection gives the chart a shared global coordinate system without forcing a minimum or target between-cluster distance",
             "auto_k_selection": "when enabled, a pilot OT fit at the largest candidate K builds a scalable OT-landmark subregion distance matrix from fused transport-cost profiles; Silhouette is scored on that precomputed distance and CH/DB/Gap on a classical MDS embedding before majority-vote K selection and final refit. Treat this as exploratory model selection until full stability and ablation checks are run around the selected K",
         },
         "deep_features": deep_summary,
@@ -1621,6 +1688,8 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         overlap_jaccard_min=config.ot.overlap_jaccard_min,
         overlap_contrast_scale=config.ot.overlap_contrast_scale,
         subregion_construction_method=config.ot.subregion_construction_method,
+        subregion_feature_weight=config.ot.subregion_feature_weight,
+        subregion_feature_dims=config.ot.subregion_feature_dims,
         deep_segmentation_knn=config.ot.deep_segmentation_knn,
         deep_segmentation_feature_dims=config.ot.deep_segmentation_feature_dims,
         deep_segmentation_feature_weight=config.ot.deep_segmentation_feature_weight,

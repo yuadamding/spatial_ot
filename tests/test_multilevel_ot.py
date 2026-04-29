@@ -23,6 +23,10 @@ from spatial_ot.multilevel.geometry import (
 )
 from spatial_ot.multilevel.io import _cluster_count_dict
 from spatial_ot.multilevel.model_selection import select_k_from_ot_landmark_costs
+from spatial_ot.multilevel.spot_latent import (
+    _global_discriminative_latent_chart,
+    spot_latent_separation_diagnostics,
+)
 from spatial_ot.multilevel_ot import (
     RegionGeometry,
     ShapeNormalizer,
@@ -141,6 +145,26 @@ def test_fit_multilevel_ot_auto_k_refits_with_selected_cluster_count() -> None:
     assert result.auto_k_selection["selected_k"] in {2, 3}
     assert result.cluster_supports.shape[0] == result.auto_k_selection["selected_k"]
     assert result.cell_cluster_probs.shape[1] == result.auto_k_selection["selected_k"]
+
+
+def test_spot_latent_chart_does_not_force_separation_without_signal() -> None:
+    labels = np.asarray([0, 0, 0, 1, 1, 1], dtype=np.int32)
+    features = np.zeros((labels.shape[0], 5), dtype=np.float32)
+    local = np.zeros((labels.shape[0], 2), dtype=np.float32)
+    weights = np.ones(labels.shape[0], dtype=np.float32)
+
+    latent = _global_discriminative_latent_chart(
+        features,
+        labels,
+        weights,
+        local,
+        n_clusters=2,
+    )
+    diagnostics = spot_latent_separation_diagnostics(latent, labels, weights)
+
+    assert np.allclose(latent, 0.0)
+    assert diagnostics["minimum_between_cluster_distance_forced"] is False
+    assert diagnostics["min_between_cluster_center_distance"] is None
 
 
 def test_build_subregions_respects_min_cells() -> None:
@@ -871,6 +895,18 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
         result.spot_latent_cluster_labels,
         result.subregion_cluster_labels[result.spot_latent_subregion_ids],
     )
+    latent_centers = []
+    within_radius = []
+    for cluster_id in np.unique(result.spot_latent_cluster_labels).tolist():
+        mask = result.spot_latent_cluster_labels == int(cluster_id)
+        coords = result.spot_latent_coords[mask]
+        center = coords.mean(axis=0)
+        latent_centers.append(center)
+        within_radius.append(float(np.mean(np.linalg.norm(coords - center[None, :], axis=1))))
+    latent_centers_arr = np.asarray(latent_centers, dtype=np.float32)
+    if latent_centers_arr.shape[0] >= 2:
+        between = float(np.linalg.norm(latent_centers_arr[0] - latent_centers_arr[1]))
+        assert between > float(np.mean(within_radius))
     assert result.cell_spot_latent_coords.shape == (features.shape[0], 2)
     assert result.cell_spot_latent_cluster_labels.shape == (features.shape[0],)
     assert result.cell_spot_latent_weights.shape == (features.shape[0],)

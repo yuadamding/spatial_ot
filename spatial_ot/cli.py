@@ -131,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     plot_sample_niches.add_argument("--cluster-obs-key", default="mlot_cluster_int", help="obs key storing integer niche labels.")
     plot_sample_niches.add_argument("--cluster-label-obs-key", default="mlot_cluster_id", help="obs key storing display niche labels.")
     plot_sample_niches.add_argument("--cluster-hex-obs-key", default="mlot_cluster_hex", help="obs key storing display colors.")
+    plot_sample_niches.add_argument("--spot-latent-npz", default=None, help="Optional occurrence-level NPZ with fitted subregion IDs. Defaults to spot_level_latent_multilevel_ot.npz under --run-dir.")
     plot_sample_niches.add_argument("--plot-spatial-x-key", default=None, help="Preferred obs key for x coordinates in per-sample plots.")
     plot_sample_niches.add_argument("--plot-spatial-y-key", default=None, help="Preferred obs key for y coordinates in per-sample plots.")
     plot_sample_niches.add_argument("--default-sample-id", default="all_cells", help="Sample label used if the requested sample obs key is absent.")
@@ -151,7 +152,14 @@ def build_parser() -> argparse.ArgumentParser:
     plot_sample_spot_latent.add_argument("--plot-spatial-y-key", default=None, help="Preferred obs key for y coordinates in per-sample plots.")
     plot_sample_spot_latent.add_argument("--default-sample-id", default="all_cells", help="Sample label used if the requested sample obs key is absent.")
     plot_sample_spot_latent.add_argument("--spatial-scale", type=float, default=None, help="Optional override for the coordinate scale applied before plotting.")
-    plot_sample_spot_latent.add_argument("--max-occurrences-per-cluster", type=int, default=150000, help="Maximum occurrence points drawn per sample/cluster panel. Use 0 for all.")
+    plot_sample_spot_latent.add_argument(
+        "--max-occurrences-per-sample",
+        "--max-occurrences-per-cluster",
+        dest="max_occurrences_per_sample",
+        type=int,
+        default=0,
+        help="Maximum occurrence points drawn in each whole-sample latent map. Use 0 for all.",
+    )
 
     pool_inputs = sub.add_parser(
         "pool-inputs",
@@ -256,7 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value to convert them into microns.")
     multilevel.add_argument("--n-clusters", type=int, default=None, help="Number of subregion clusters.")
     multilevel.add_argument("--atoms-per-cluster", type=int, default=None, help="Number of shared atoms per cluster.")
-    multilevel.add_argument("--radius-um", type=float, default=None, help="Subregion radius in microns.")
+    multilevel.add_argument("--radius-um", type=float, default=None, help="Legacy graph/diagnostic radius in microns; generated data-driven subregions do not use it as a fixed membership radius.")
     multilevel.add_argument("--stride-um", type=float, default=None, help="Subregion center stride in microns.")
     multilevel.add_argument("--basic-niche-size-um", type=float, default=None, help="Target scale in microns for data-driven atomic membership seeds. Set to 0 to disable this scale hint.")
     multilevel.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
@@ -280,7 +288,9 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--overlap-jaccard-min", type=float, default=None, help="Minimum subregion-overlap Jaccard retained by the overlap-consistency graph.")
     multilevel.add_argument("--overlap-contrast-scale", type=float, default=None, help="Contrast scale for gating the overlap-consistency penalty.")
     multilevel.add_argument("--allow-observed-hull-geometry", action=argparse.BooleanOptionalAction, default=None, help="Allow observed-coordinate convex hull fallback when explicit region geometry is unavailable.")
-    multilevel.add_argument("--subregion-construction-method", default=None, choices=["data_driven", "deep_segmentation"], help="Generated subregion construction mode. deep_segmentation cuts a spatial graph by learned/deep feature affinity before OT.")
+    multilevel.add_argument("--subregion-construction-method", default=None, choices=["data_driven", "deep_segmentation"], help="Generated subregion construction mode. data_driven is coordinate-only by default; deep_segmentation cuts a spatial graph by learned/deep feature affinity before OT.")
+    multilevel.add_argument("--subregion-feature-weight", type=float, default=None, help="Opt-in weight for using the OT feature view during data-driven boundary construction. Default 0 keeps coordinate-only boundaries.")
+    multilevel.add_argument("--subregion-feature-dims", type=int, default=None, help="Leading feature dimensions used for opt-in data-driven feature-aware boundary construction.")
     multilevel.add_argument("--deep-segmentation-knn", type=int, default=None, help="Spatial kNN degree used by deep graph subregion segmentation.")
     multilevel.add_argument("--deep-segmentation-feature-dims", type=int, default=None, help="Leading learned feature dimensions used for deep graph segmentation affinities.")
     multilevel.add_argument("--deep-segmentation-feature-weight", type=float, default=None, help="Weight on learned-feature edge contrast during deep graph segmentation.")
@@ -318,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--spatial-scale", type=float, default=None, help="Multiply spatial coordinates by this value to convert them into microns.")
     optimal_search.add_argument("--n-clusters", type=int, default=None, help="Baseline number of subregion clusters used to seed the search.")
     optimal_search.add_argument("--atoms-per-cluster", type=int, default=None, help="Number of shared atoms per cluster.")
-    optimal_search.add_argument("--radius-um", type=float, default=None, help="Baseline subregion radius in microns.")
+    optimal_search.add_argument("--radius-um", type=float, default=None, help="Legacy graph/diagnostic radius in microns; generated data-driven subregions do not use it as a fixed membership radius.")
     optimal_search.add_argument("--stride-um", type=float, default=None, help="Baseline subregion center stride in microns.")
     optimal_search.add_argument("--basic-niche-size-um", type=float, default=None, help="Target scale in microns for data-driven atomic membership seeds.")
     optimal_search.add_argument("--min-cells", type=int, default=None, help="Minimum cells required to keep a subregion.")
@@ -342,7 +352,9 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--overlap-jaccard-min", type=float, default=None, help="Minimum subregion-overlap Jaccard retained by the overlap-consistency graph.")
     optimal_search.add_argument("--overlap-contrast-scale", type=float, default=None, help="Contrast scale for gating the overlap-consistency penalty.")
     optimal_search.add_argument("--allow-observed-hull-geometry", action=argparse.BooleanOptionalAction, default=None, help="Allow observed-coordinate convex hull fallback when explicit region geometry is unavailable.")
-    optimal_search.add_argument("--subregion-construction-method", default=None, choices=["data_driven", "deep_segmentation"], help="Generated subregion construction mode. deep_segmentation cuts a spatial graph by learned/deep feature affinity before OT.")
+    optimal_search.add_argument("--subregion-construction-method", default=None, choices=["data_driven", "deep_segmentation"], help="Generated subregion construction mode. data_driven is coordinate-only by default; deep_segmentation cuts a spatial graph by learned/deep feature affinity before OT.")
+    optimal_search.add_argument("--subregion-feature-weight", type=float, default=None, help="Opt-in weight for using the OT feature view during data-driven boundary construction. Default 0 keeps coordinate-only boundaries.")
+    optimal_search.add_argument("--subregion-feature-dims", type=int, default=None, help="Leading feature dimensions used for opt-in data-driven feature-aware boundary construction.")
     optimal_search.add_argument("--deep-segmentation-knn", type=int, default=None, help="Spatial kNN degree used by deep graph subregion segmentation.")
     optimal_search.add_argument("--deep-segmentation-feature-dims", type=int, default=None, help="Leading learned feature dimensions used for deep graph segmentation affinities.")
     optimal_search.add_argument("--deep-segmentation-feature-weight", type=float, default=None, help="Weight on learned-feature edge contrast during deep graph segmentation.")
@@ -420,6 +432,8 @@ def _resolve_multilevel_config_from_args(args: argparse.Namespace) -> Multilevel
         "overlap_contrast_scale",
         "allow_observed_hull_geometry",
         "subregion_construction_method",
+        "subregion_feature_weight",
+        "subregion_feature_dims",
         "deep_segmentation_knn",
         "deep_segmentation_feature_dims",
         "deep_segmentation_feature_weight",
@@ -586,6 +600,7 @@ def main() -> None:
             plot_spatial_y_key=args.plot_spatial_y_key,
             default_sample_id=args.default_sample_id,
             spatial_scale=args.spatial_scale,
+            spot_latent_npz=args.spot_latent_npz,
         )
         print(json.dumps(manifest, indent=2))
     elif args.command == "plot-sample-spot-latent":
@@ -601,7 +616,7 @@ def main() -> None:
             plot_spatial_y_key=args.plot_spatial_y_key,
             default_sample_id=args.default_sample_id,
             spatial_scale=args.spatial_scale,
-            max_occurrences_per_cluster=args.max_occurrences_per_cluster,
+            max_occurrences_per_cluster=args.max_occurrences_per_sample,
         )
         print(json.dumps(manifest, indent=2))
     elif args.command == "pool-inputs":

@@ -96,6 +96,288 @@ def _cluster_local_pca_chart(
     return latent
 
 
+def _weighted_standardize(x: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    x_arr = np.asarray(x, dtype=np.float32)
+    if x_arr.ndim != 2 or x_arr.shape[0] == 0:
+        return x_arr.astype(np.float32, copy=True)
+    w = np.asarray(weights, dtype=np.float64)
+    if w.ndim != 1 or w.shape[0] != x_arr.shape[0] or not np.any(w > 0):
+        w = np.ones(x_arr.shape[0], dtype=np.float64)
+    w = np.clip(w, 0.0, None)
+    w_sum = max(float(w.sum()), 1e-12)
+    mean = (w[:, None] * x_arr.astype(np.float64)).sum(axis=0) / w_sum
+    centered = x_arr.astype(np.float64) - mean[None, :]
+    var = (w[:, None] * centered * centered).sum(axis=0) / w_sum
+    std = np.sqrt(np.maximum(var, 1e-8))
+    std[std < 1e-4] = 1.0
+    return ((x_arr - mean.astype(np.float32)[None, :]) / std.astype(np.float32)[None, :]).astype(np.float32)
+
+
+def _normalize_local_latent(
+    local_latent: np.ndarray,
+    labels: np.ndarray,
+    *,
+    n_clusters: int,
+    local_radius: float,
+) -> np.ndarray:
+    local = np.asarray(local_latent, dtype=np.float32)
+    label_arr = np.asarray(labels, dtype=np.int32)
+    normalized = np.zeros_like(local, dtype=np.float32)
+    for cluster_id in range(int(n_clusters)):
+        idx = np.flatnonzero(label_arr == cluster_id)
+        if idx.size == 0:
+            continue
+        values = local[idx].astype(np.float32)
+        center = np.nanmedian(values, axis=0).astype(np.float32)
+        centered = values - center[None, :]
+        radius = np.sqrt(np.sum(centered * centered, axis=1))
+        scale = float(np.nanpercentile(radius, 95.0)) if radius.size else 1.0
+        if not np.isfinite(scale) or scale < 1e-6:
+            scale = 1.0
+        normalized[idx] = (float(local_radius) * centered / scale).astype(np.float32)
+    return normalized
+
+
+def _cluster_centroids(
+    x: np.ndarray,
+    labels: np.ndarray,
+    weights: np.ndarray,
+    *,
+    n_clusters: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_arr = np.asarray(x, dtype=np.float32)
+    label_arr = np.asarray(labels, dtype=np.int32)
+    w = np.asarray(weights, dtype=np.float64)
+    if w.ndim != 1 or w.shape[0] != x_arr.shape[0] or not np.any(w > 0):
+        w = np.ones(x_arr.shape[0], dtype=np.float64)
+    w = np.clip(w, 0.0, None)
+    global_center = np.average(x_arr.astype(np.float64), axis=0, weights=np.maximum(w, 1e-8))
+    centroids = np.tile(global_center[None, :], (int(n_clusters), 1)).astype(np.float32)
+    masses = np.zeros(int(n_clusters), dtype=np.float64)
+    for cluster_id in range(int(n_clusters)):
+        idx = np.flatnonzero(label_arr == cluster_id)
+        if idx.size == 0:
+            continue
+        local_w = np.maximum(w[idx], 1e-8)
+        masses[cluster_id] = float(local_w.sum())
+        centroids[cluster_id] = np.average(x_arr[idx].astype(np.float64), axis=0, weights=local_w).astype(np.float32)
+    return centroids, masses.astype(np.float32)
+
+
+def _weighted_pca_scores(x: np.ndarray, weights: np.ndarray, *, n_components: int = 2) -> np.ndarray:
+    x_arr = np.asarray(x, dtype=np.float64)
+    if x_arr.ndim != 2 or x_arr.shape[0] == 0:
+        return np.zeros((x_arr.shape[0], int(n_components)), dtype=np.float32)
+    w = np.asarray(weights, dtype=np.float64)
+    if w.ndim != 1 or w.shape[0] != x_arr.shape[0] or not np.any(w > 0):
+        w = np.ones(x_arr.shape[0], dtype=np.float64)
+    w = np.maximum(w, 1e-8)
+    mean = np.average(x_arr, axis=0, weights=w)
+    centered = x_arr - mean[None, :]
+    cov = (centered.T * w[None, :]) @ centered / max(float(w.sum()), 1e-12)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    basis = eigvecs[:, order[: max(1, int(n_components))]]
+    scores = centered @ basis
+    if scores.shape[1] < int(n_components):
+        scores = np.column_stack([scores, np.zeros((scores.shape[0], int(n_components) - scores.shape[1]))])
+    for dim in range(int(n_components)):
+        anchor = int(np.argmax(np.abs(scores[:, dim]))) if scores.shape[0] else 0
+        if scores.shape[0] and scores[anchor, dim] < 0:
+            scores[:, dim] *= -1.0
+    return scores[:, : int(n_components)].astype(np.float32)
+
+
+def _weighted_fisher_scores(
+    x: np.ndarray,
+    labels: np.ndarray,
+    weights: np.ndarray,
+    *,
+    n_components: int = 2,
+) -> np.ndarray:
+    x_arr = np.asarray(x, dtype=np.float64)
+    label_arr = np.asarray(labels, dtype=np.int32)
+    if x_arr.ndim != 2 or x_arr.shape[0] == 0 or label_arr.shape[0] != x_arr.shape[0]:
+        return np.zeros((x_arr.shape[0], int(n_components)), dtype=np.float32)
+    w = np.asarray(weights, dtype=np.float64)
+    if w.ndim != 1 or w.shape[0] != x_arr.shape[0] or not np.any(w > 0):
+        w = np.ones(x_arr.shape[0], dtype=np.float64)
+    w = np.maximum(w, 1e-8)
+    valid_labels = np.unique(label_arr[label_arr >= 0])
+    if valid_labels.size < 2:
+        return _weighted_pca_scores(x_arr, w, n_components=int(n_components))
+
+    global_mean = np.average(x_arr, axis=0, weights=w)
+    dim = int(x_arr.shape[1])
+    sw = np.zeros((dim, dim), dtype=np.float64)
+    sb = np.zeros((dim, dim), dtype=np.float64)
+    total_mass = 0.0
+    for cluster_id in valid_labels.tolist():
+        idx = np.flatnonzero(label_arr == int(cluster_id))
+        if idx.size == 0:
+            continue
+        wk = w[idx]
+        mass = float(wk.sum())
+        if mass <= 0.0:
+            continue
+        mean_k = np.average(x_arr[idx], axis=0, weights=wk)
+        centered = x_arr[idx] - mean_k[None, :]
+        sw += (centered.T * wk[None, :]) @ centered
+        diff = (mean_k - global_mean)[:, None]
+        sb += mass * (diff @ diff.T)
+        total_mass += mass
+    if total_mass <= 0.0:
+        return _weighted_pca_scores(x_arr, w, n_components=int(n_components))
+    sw /= total_mass
+    sb /= total_mass
+    ridge = max(float(np.trace(sw)) / max(dim, 1), 1.0) * 1e-3
+    sw = sw + ridge * np.eye(dim, dtype=np.float64)
+    try:
+        eigvals_w, eigvecs_w = np.linalg.eigh(sw)
+        keep = eigvals_w > max(float(np.max(eigvals_w)) * 1e-8, 1e-10)
+        if not np.any(keep):
+            return _weighted_pca_scores(x_arr, w, n_components=int(n_components))
+        whitening = eigvecs_w[:, keep] @ np.diag(1.0 / np.sqrt(eigvals_w[keep])) @ eigvecs_w[:, keep].T
+        fisher = whitening @ sb @ whitening
+        eigvals_f, eigvecs_f = np.linalg.eigh((fisher + fisher.T) * 0.5)
+        order = np.argsort(eigvals_f)[::-1]
+        basis = whitening @ eigvecs_f[:, order[: max(1, int(n_components))]]
+        scores = (x_arr - global_mean[None, :]) @ basis
+    except np.linalg.LinAlgError:
+        return _weighted_pca_scores(x_arr, w, n_components=int(n_components))
+
+    if scores.shape[1] < int(n_components):
+        scores = np.column_stack([scores, np.zeros((scores.shape[0], int(n_components) - scores.shape[1]))])
+    if not np.all(np.isfinite(scores)) or float(np.nanmax(np.abs(scores))) < 1e-8:
+        return _weighted_pca_scores(x_arr, w, n_components=int(n_components))
+    for dim_idx in range(int(n_components)):
+        anchor = int(np.argmax(np.abs(scores[:, dim_idx]))) if scores.shape[0] else 0
+        if scores.shape[0] and scores[anchor, dim_idx] < 0:
+            scores[:, dim_idx] *= -1.0
+    return scores[:, : int(n_components)].astype(np.float32)
+
+
+def _global_discriminative_latent_chart(
+    chart_features: np.ndarray,
+    cluster_labels: np.ndarray,
+    weights: np.ndarray,
+    local_latent: np.ndarray,
+    *,
+    n_clusters: int,
+    local_radius: float = 0.85,
+) -> np.ndarray:
+    label_arr = np.asarray(cluster_labels, dtype=np.int32)
+    if chart_features.shape[0] == 0 or int(n_clusters) <= 0:
+        return np.zeros((chart_features.shape[0], 2), dtype=np.float32)
+    x = _weighted_standardize(chart_features, weights)
+    local = _normalize_local_latent(
+        local_latent,
+        label_arr,
+        n_clusters=int(n_clusters),
+        local_radius=float(local_radius),
+    )
+    valid = (label_arr >= 0) & (label_arr < int(n_clusters))
+    if not np.any(valid):
+        return local.astype(np.float32)
+    global_scores = np.zeros((label_arr.shape[0], 2), dtype=np.float32)
+    global_scores[valid] = _weighted_fisher_scores(
+        x[valid],
+        label_arr[valid],
+        np.asarray(weights, dtype=np.float32)[valid],
+        n_components=2,
+    )
+    anchors, masses = _cluster_centroids(
+        global_scores[valid],
+        label_arr[valid],
+        np.asarray(weights, dtype=np.float32)[valid],
+        n_clusters=int(n_clusters),
+    )
+    del masses
+    final = np.full((label_arr.shape[0], 2), np.nan, dtype=np.float32)
+    final[valid] = anchors[label_arr[valid]] + local[valid]
+    final[~np.all(np.isfinite(final), axis=1)] = 0.0
+    return final.astype(np.float32)
+
+
+def spot_latent_separation_diagnostics(
+    latent_coords: np.ndarray,
+    cluster_labels: np.ndarray,
+    weights: np.ndarray | None = None,
+    subregion_ids: np.ndarray | None = None,
+) -> dict[str, object]:
+    latent = np.asarray(latent_coords, dtype=np.float32)
+    labels = np.asarray(cluster_labels, dtype=np.int32)
+    if latent.ndim != 2 or latent.shape[1] != 2 or labels.ndim != 1 or labels.shape[0] != latent.shape[0]:
+        return {
+            "n_occurrences": int(latent.shape[0]) if latent.ndim >= 1 else 0,
+            "n_clusters": 0,
+            "n_present_clusters": 0,
+            "mean_within_cluster_radius": None,
+            "median_between_cluster_center_distance": None,
+            "min_between_cluster_center_distance": None,
+            "separation_ratio_median_between_over_mean_within": None,
+            "minimum_between_cluster_distance_forced": False,
+        }
+    if weights is None:
+        w = np.ones(labels.shape[0], dtype=np.float64)
+    else:
+        w = np.asarray(weights, dtype=np.float64)
+        if w.ndim != 1 or w.shape[0] != labels.shape[0] or not np.any(w > 0):
+            w = np.ones(labels.shape[0], dtype=np.float64)
+    w = np.maximum(w, 1e-8)
+    valid = (labels >= 0) & np.all(np.isfinite(latent), axis=1)
+    present_labels = np.unique(labels[valid])
+    n_clusters = int(labels[valid].max()) + 1 if np.any(valid) else 0
+    cluster_occurrence_counts = [
+        int(np.sum(labels[valid] == cluster_id))
+        for cluster_id in range(n_clusters)
+    ]
+    centers = []
+    within = []
+    for cluster_id in range(n_clusters):
+        idx = np.flatnonzero(valid & (labels == cluster_id))
+        if idx.size == 0:
+            centers.append(np.full(2, np.nan, dtype=np.float32))
+            continue
+        local_w = w[idx]
+        center = np.average(latent[idx].astype(np.float64), axis=0, weights=local_w)
+        centers.append(center.astype(np.float32))
+        radius = np.sqrt(np.sum((latent[idx].astype(np.float64) - center[None, :]) ** 2, axis=1))
+        within.append(float(np.average(radius, weights=local_w)))
+    center_arr = np.vstack(centers).astype(np.float32) if centers else np.zeros((0, 2), dtype=np.float32)
+    finite_centers = np.all(np.isfinite(center_arr), axis=1)
+    if int(np.sum(finite_centers)) >= 2:
+        distances = np.sqrt(
+            np.maximum(
+                ((center_arr[finite_centers, None, :] - center_arr[finite_centers][None, :, :]) ** 2).sum(axis=2),
+                0.0,
+            )
+        )
+        between = distances[distances > 1e-8]
+    else:
+        between = np.zeros(0, dtype=np.float32)
+    mean_within = float(np.mean(within)) if within else None
+    out: dict[str, object] = {
+        "n_occurrences": int(latent.shape[0]),
+        "n_clusters": int(n_clusters),
+        "n_present_clusters": int(present_labels.size),
+        "cluster_occurrence_counts": cluster_occurrence_counts,
+        "mean_within_cluster_radius": mean_within,
+        "median_between_cluster_center_distance": float(np.median(between)) if between.size else None,
+        "min_between_cluster_center_distance": float(np.min(between)) if between.size else None,
+        "separation_ratio_median_between_over_mean_within": (
+            float(np.median(between) / max(float(mean_within), 1e-8))
+            if between.size and mean_within is not None
+            else None
+        ),
+        "minimum_between_cluster_distance_forced": False,
+    }
+    if subregion_ids is not None:
+        subregion_arr = np.asarray(subregion_ids)
+        out["n_subregions"] = int(np.unique(subregion_arr).size) if subregion_arr.shape[0] == labels.shape[0] else None
+    return out
+
+
 def compute_spot_level_latent_charts(
     *,
     features: np.ndarray,
@@ -194,9 +476,16 @@ def compute_spot_level_latent_charts(
         atom_posteriors = atom_posteriors[:offset]
         chart_features = chart_features[:offset]
 
-    latent_coords = _cluster_local_pca_chart(
+    local_latent_coords = _cluster_local_pca_chart(
         chart_features,
         cluster_labels,
+        n_clusters=n_clusters,
+    )
+    latent_coords = _global_discriminative_latent_chart(
+        chart_features,
+        cluster_labels,
+        np.maximum(weights, 1e-6),
+        local_latent_coords,
         n_clusters=n_clusters,
     )
 

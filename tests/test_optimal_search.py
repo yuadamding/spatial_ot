@@ -85,6 +85,8 @@ def test_default_search_candidates_include_baseline_and_are_unique() -> None:
     candidates = build_default_search_candidates(config)
 
     assert any(candidate.name == "baseline" for candidate in candidates)
+    assert any(candidate.name == "coordinate_only_boundaries" for candidate in candidates)
+    assert any(candidate.name == "feature_boundaries_025" for candidate in candidates)
     assert len({candidate.name for candidate in candidates}) == len(candidates)
     assert len({tuple(sorted(candidate.overrides.items())) for candidate in candidates}) == len(candidates)
 
@@ -133,6 +135,8 @@ def test_candidate_command_preserves_pretrained_deep_model_and_regularization_fl
     assert "--compute-spot-latent" in command
     assert command[command.index("--min-subregions-per-cluster") + 1] == str(config.ot.min_subregions_per_cluster)
     assert command[command.index("--subregion-construction-method") + 1] == config.ot.subregion_construction_method
+    assert command[command.index("--subregion-feature-weight") + 1] == str(config.ot.subregion_feature_weight)
+    assert command[command.index("--subregion-feature-dims") + 1] == str(config.ot.subregion_feature_dims)
     assert command[command.index("--deep-segmentation-knn") + 1] == str(config.ot.deep_segmentation_knn)
 
 
