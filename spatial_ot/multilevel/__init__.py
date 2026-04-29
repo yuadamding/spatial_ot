@@ -28,8 +28,10 @@ from .geometry import (
     build_composite_subregions_from_basic_niches,
     fit_ot_shape_normalizer,
     make_reference_points_unit_disk,
+    refine_subregions_by_cluster_coherence,
     sample_geometry_points,
 )
+from .heterogeneity import build_internal_heterogeneity_embeddings
 from .io import (
     plot_sample_niche_maps,
     plot_sample_niche_maps_from_run_dir,
@@ -83,6 +85,7 @@ __all__ = [
     "apply_similarity",
     "build_deep_graph_segmentation_subregions",
     "build_data_driven_subregions",
+    "build_internal_heterogeneity_embeddings",
     "build_subregions",
     "comprehensive_select_k_from_latent_embeddings",
     "effective_min_cluster_size",
@@ -102,6 +105,7 @@ __all__ = [
     "parse_candidate_n_clusters",
     "prepare_latent_clustering_embedding",
     "repair_labels_to_minimum_size",
+    "refine_subregions_by_cluster_coherence",
     "run_multilevel_ot_on_h5ad",
     "run_multilevel_ot_with_config",
     "sample_geometry_points",

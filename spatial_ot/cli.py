@@ -871,7 +871,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-subregion-area-um2",
         type=float,
         default=None,
-        help="Optional maximum observed point-cloud area in square microns for generated subregions.",
+        help="Optional soft QC target for observed point-cloud area in square microns; generated subregions are not hard-split by this value.",
     )
     multilevel.add_argument(
         "--lambda-x",
@@ -990,8 +990,8 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument(
         "--subregion-construction-method",
         default=None,
-        choices=["data_driven", "deep_segmentation"],
-        help="Generated subregion construction mode. data_driven is coordinate-only by default; deep_segmentation cuts a spatial graph by learned/deep feature affinity before OT.",
+        choices=["data_driven", "deep_segmentation", "joint_refinement"],
+        help="Generated subregion construction mode. joint_refinement starts from deep segmentation and then performs constrained cluster-aware boundary refinement.",
     )
     multilevel.add_argument(
         "--subregion-feature-weight",
@@ -1030,10 +1030,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Weight on spatial edge length during deep graph segmentation.",
     )
     multilevel.add_argument(
+        "--joint-refinement-iters",
+        type=int,
+        default=None,
+        help="Outer boundary-refinement sweeps for joint segmentation-clustering mode.",
+    )
+    multilevel.add_argument(
+        "--joint-refinement-knn",
+        type=int,
+        default=None,
+        help="Spatial kNN degree used to propose adjacent boundary moves in joint refinement.",
+    )
+    multilevel.add_argument(
+        "--joint-refinement-feature-dims",
+        type=int,
+        default=None,
+        help="Leading feature dimensions used to score cluster-coherence boundary moves.",
+    )
+    multilevel.add_argument(
+        "--joint-refinement-cluster-weight",
+        type=float,
+        default=None,
+        help="Weight on pooled-latent cluster-prototype coherence during joint refinement.",
+    )
+    multilevel.add_argument(
+        "--joint-refinement-spatial-weight",
+        type=float,
+        default=None,
+        help="Weight discouraging boundary moves that worsen spatial compactness.",
+    )
+    multilevel.add_argument(
+        "--joint-refinement-cut-weight",
+        type=float,
+        default=None,
+        help="Weight discouraging boundary moves that increase local kNN label cuts.",
+    )
+    multilevel.add_argument(
+        "--joint-refinement-max-move-fraction",
+        type=float,
+        default=None,
+        help="Maximum fraction of cells that may move during each joint-refinement sweep.",
+    )
+    multilevel.add_argument(
         "--subregion-clustering-method",
         default=None,
-        choices=["pooled_subregion_latent", "ot_dictionary"],
-        help="How fitted subregions receive niche labels. pooled_subregion_latent clusters pooled raw-member feature-distribution subregion latent embeddings and does not use spatial coordinates in this label step; ot_dictionary keeps the historical OT-dictionary assignment.",
+        choices=["pooled_subregion_latent", "heterogeneity_ot_niche", "ot_dictionary"],
+        help="How fitted subregions receive niche labels. heterogeneity_ot_niche clusters recurring internal spatial-cell-state heterogeneity motifs; pooled_subregion_latent is the composition/distribution-summary baseline; ot_dictionary keeps the historical OT-dictionary assignment.",
     )
     multilevel.add_argument(
         "--subregion-latent-embedding-mode",
@@ -1250,7 +1292,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-subregion-area-um2",
         type=float,
         default=None,
-        help="Optional maximum observed point-cloud area in square microns for generated subregions.",
+        help="Optional soft QC target for observed point-cloud area in square microns; generated subregions are not hard-split by this value.",
     )
     optimal_search.add_argument(
         "--lambda-x",
@@ -1369,8 +1411,8 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument(
         "--subregion-construction-method",
         default=None,
-        choices=["data_driven", "deep_segmentation"],
-        help="Generated subregion construction mode. data_driven is coordinate-only by default; deep_segmentation cuts a spatial graph by learned/deep feature affinity before OT.",
+        choices=["data_driven", "deep_segmentation", "joint_refinement"],
+        help="Generated subregion construction mode. joint_refinement starts from deep segmentation and then performs constrained cluster-aware boundary refinement.",
     )
     optimal_search.add_argument(
         "--subregion-feature-weight",
@@ -1409,10 +1451,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Weight on spatial edge length during deep graph segmentation.",
     )
     optimal_search.add_argument(
+        "--joint-refinement-iters",
+        type=int,
+        default=None,
+        help="Outer boundary-refinement sweeps for joint segmentation-clustering mode.",
+    )
+    optimal_search.add_argument(
+        "--joint-refinement-knn",
+        type=int,
+        default=None,
+        help="Spatial kNN degree used to propose adjacent boundary moves in joint refinement.",
+    )
+    optimal_search.add_argument(
+        "--joint-refinement-feature-dims",
+        type=int,
+        default=None,
+        help="Leading feature dimensions used to score cluster-coherence boundary moves.",
+    )
+    optimal_search.add_argument(
+        "--joint-refinement-cluster-weight",
+        type=float,
+        default=None,
+        help="Weight on pooled-latent cluster-prototype coherence during joint refinement.",
+    )
+    optimal_search.add_argument(
+        "--joint-refinement-spatial-weight",
+        type=float,
+        default=None,
+        help="Weight discouraging boundary moves that worsen spatial compactness.",
+    )
+    optimal_search.add_argument(
+        "--joint-refinement-cut-weight",
+        type=float,
+        default=None,
+        help="Weight discouraging boundary moves that increase local kNN label cuts.",
+    )
+    optimal_search.add_argument(
+        "--joint-refinement-max-move-fraction",
+        type=float,
+        default=None,
+        help="Maximum fraction of cells that may move during each joint-refinement sweep.",
+    )
+    optimal_search.add_argument(
         "--subregion-clustering-method",
         default=None,
-        choices=["pooled_subregion_latent", "ot_dictionary"],
-        help="How fitted subregions receive niche labels. pooled_subregion_latent clusters pooled raw-member feature-distribution subregion latent embeddings and does not use spatial coordinates in this label step; ot_dictionary keeps the historical OT-dictionary assignment.",
+        choices=["pooled_subregion_latent", "heterogeneity_ot_niche", "ot_dictionary"],
+        help="How fitted subregions receive niche labels. heterogeneity_ot_niche clusters recurring internal spatial-cell-state heterogeneity motifs; pooled_subregion_latent is the composition/distribution-summary baseline; ot_dictionary keeps the historical OT-dictionary assignment.",
     )
     optimal_search.add_argument(
         "--subregion-latent-embedding-mode",
@@ -1649,6 +1733,13 @@ def _resolve_multilevel_config_from_args(
         "deep_segmentation_feature_dims",
         "deep_segmentation_feature_weight",
         "deep_segmentation_spatial_weight",
+        "joint_refinement_iters",
+        "joint_refinement_knn",
+        "joint_refinement_feature_dims",
+        "joint_refinement_cluster_weight",
+        "joint_refinement_spatial_weight",
+        "joint_refinement_cut_weight",
+        "joint_refinement_max_move_fraction",
         "subregion_clustering_method",
         "subregion_latent_embedding_mode",
         "subregion_latent_shrinkage_tau",

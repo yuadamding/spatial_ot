@@ -9,7 +9,13 @@ import subprocess
 import sys
 import time
 
-from .config import DeepFeatureConfig, MultilevelExperimentConfig, MultilevelOTConfig, MultilevelPathConfig, validate_multilevel_config
+from .config import (
+    DeepFeatureConfig,
+    MultilevelExperimentConfig,
+    MultilevelOTConfig,
+    MultilevelPathConfig,
+    validate_multilevel_config,
+)
 
 
 @dataclass(frozen=True)
@@ -35,80 +41,170 @@ def _summary_value(summary: dict, *path: str) -> object | None:
 
 
 def score_multilevel_summary(summary: dict[str, object]) -> dict[str, object]:
-    silhouette_native = _summary_value(summary, "subregion_embedding_compactness", "silhouette_native")
+    silhouette_native = _summary_value(
+        summary, "subregion_embedding_compactness", "silhouette_native"
+    )
     weight_silhouette = _summary_value(summary, "subregion_weight_silhouette")
     assignment_margin = _summary_value(summary, "mean_assignment_margin")
-    same_label_edge_fraction = _summary_value(summary, "boundary_separation", "same_label_edge_fraction")
-    high_overlap_same_label_fraction = _summary_value(summary, "boundary_separation", "high_overlap_same_label_fraction")
-    cell_adjacency_same_label_fraction = _summary_value(summary, "boundary_separation", "cell_adjacency_same_label_fraction")
-    compactness_ratio = _summary_value(summary, "subregion_embedding_compactness", "compactness_ratio")
-    isolated_subregion_fraction = _summary_value(summary, "boundary_separation", "isolated_subregion_fraction")
-    fallback_fraction_all_costs = _summary_value(summary, "cost_reliability", "fallback_fraction_all_costs")
-    mixed_candidate_effective_eps_fraction = _summary_value(summary, "cost_reliability", "mixed_candidate_effective_eps_fraction")
-    mixed_candidate_fallback_fraction = _summary_value(summary, "cost_reliability", "mixed_candidate_fallback_fraction")
-    convex_hull_fallback_fraction = _summary_value(summary, "convex_hull_fallback_fraction")
+    same_label_edge_fraction = _summary_value(
+        summary, "boundary_separation", "same_label_edge_fraction"
+    )
+    high_overlap_same_label_fraction = _summary_value(
+        summary, "boundary_separation", "high_overlap_same_label_fraction"
+    )
+    cell_adjacency_same_label_fraction = _summary_value(
+        summary, "boundary_separation", "cell_adjacency_same_label_fraction"
+    )
+    compactness_ratio = _summary_value(
+        summary, "subregion_embedding_compactness", "compactness_ratio"
+    )
+    isolated_subregion_fraction = _summary_value(
+        summary, "boundary_separation", "isolated_subregion_fraction"
+    )
+    fallback_fraction_all_costs = _summary_value(
+        summary, "cost_reliability", "fallback_fraction_all_costs"
+    )
+    mixed_candidate_effective_eps_fraction = _summary_value(
+        summary, "cost_reliability", "mixed_candidate_effective_eps_fraction"
+    )
+    mixed_candidate_fallback_fraction = _summary_value(
+        summary, "cost_reliability", "mixed_candidate_fallback_fraction"
+    )
+    convex_hull_fallback_fraction = _summary_value(
+        summary, "convex_hull_fallback_fraction"
+    )
     forced_label_fraction = _summary_value(summary, "forced_label_fraction")
-    geometry_transport_fraction = _summary_value(summary, "assigned_transport_cost_decomposition", "geometry_transport_fraction")
+    geometry_transport_fraction = _summary_value(
+        summary, "assigned_transport_cost_decomposition", "geometry_transport_fraction"
+    )
     qc_warning_count = _summary_value(summary, "qc_warning_count")
-    scale_deviation_p95 = _summary_value(summary, "transform_diagnostics", "scale_deviation_p95")
+    scale_deviation_p95 = _summary_value(
+        summary, "transform_diagnostics", "scale_deviation_p95"
+    )
     coverage_fraction = _summary_value(summary, "cell_subregion_coverage_fraction")
 
     positive_terms = {
-        "silhouette_native": 2.0 * _clamp01((float(silhouette_native) + 1.0) / 2.0 if silhouette_native is not None else None),
-        "subregion_weight_silhouette": 1.5 * _clamp01((float(weight_silhouette) + 1.0) / 2.0 if weight_silhouette is not None else None),
-        "assignment_margin": 1.5 * _clamp01(float(assignment_margin) / 0.25 if assignment_margin is not None else None),
-        "same_label_edge_fraction": 1.0 * _clamp01(float(same_label_edge_fraction) if same_label_edge_fraction is not None else None),
-        "high_overlap_same_label_fraction": 1.0 * _clamp01(
-            float(high_overlap_same_label_fraction) if high_overlap_same_label_fraction is not None else None
+        "silhouette_native": 2.0
+        * _clamp01(
+            (float(silhouette_native) + 1.0) / 2.0
+            if silhouette_native is not None
+            else None
         ),
-        "cell_adjacency_same_label_fraction": 0.75 * _clamp01(
-            float(cell_adjacency_same_label_fraction) if cell_adjacency_same_label_fraction is not None else None
+        "subregion_weight_silhouette": 1.5
+        * _clamp01(
+            (float(weight_silhouette) + 1.0) / 2.0
+            if weight_silhouette is not None
+            else None
+        ),
+        "assignment_margin": 1.5
+        * _clamp01(
+            float(assignment_margin) / 0.25 if assignment_margin is not None else None
+        ),
+        "same_label_edge_fraction": 1.0
+        * _clamp01(
+            float(same_label_edge_fraction)
+            if same_label_edge_fraction is not None
+            else None
+        ),
+        "high_overlap_same_label_fraction": 1.0
+        * _clamp01(
+            float(high_overlap_same_label_fraction)
+            if high_overlap_same_label_fraction is not None
+            else None
+        ),
+        "cell_adjacency_same_label_fraction": 0.75
+        * _clamp01(
+            float(cell_adjacency_same_label_fraction)
+            if cell_adjacency_same_label_fraction is not None
+            else None
         ),
     }
     geometry_penalty = 0.0
-    if geometry_transport_fraction is not None and math.isfinite(float(geometry_transport_fraction)):
+    if geometry_transport_fraction is not None and math.isfinite(
+        float(geometry_transport_fraction)
+    ):
         geometry_penalty = max(float(geometry_transport_fraction) - 0.6, 0.0) / 0.4
     negative_terms = {
-        "compactness_ratio": 0.75 * _clamp01(float(compactness_ratio) if compactness_ratio is not None else None),
-        "isolated_subregion_fraction": 0.5 * _clamp01(
-            float(isolated_subregion_fraction) if isolated_subregion_fraction is not None else None
+        "compactness_ratio": 0.75
+        * _clamp01(float(compactness_ratio) if compactness_ratio is not None else None),
+        "isolated_subregion_fraction": 0.5
+        * _clamp01(
+            float(isolated_subregion_fraction)
+            if isolated_subregion_fraction is not None
+            else None
         ),
-        "fallback_fraction_all_costs": 1.5 * _clamp01(
-            float(fallback_fraction_all_costs) if fallback_fraction_all_costs is not None else None
+        "fallback_fraction_all_costs": 1.5
+        * _clamp01(
+            float(fallback_fraction_all_costs)
+            if fallback_fraction_all_costs is not None
+            else None
         ),
-        "mixed_candidate_effective_eps_fraction": 1.25 * _clamp01(
-            float(mixed_candidate_effective_eps_fraction) if mixed_candidate_effective_eps_fraction is not None else None
+        "mixed_candidate_effective_eps_fraction": 1.25
+        * _clamp01(
+            float(mixed_candidate_effective_eps_fraction)
+            if mixed_candidate_effective_eps_fraction is not None
+            else None
         ),
-        "mixed_candidate_fallback_fraction": 1.0 * _clamp01(
-            float(mixed_candidate_fallback_fraction) if mixed_candidate_fallback_fraction is not None else None
+        "mixed_candidate_fallback_fraction": 1.0
+        * _clamp01(
+            float(mixed_candidate_fallback_fraction)
+            if mixed_candidate_fallback_fraction is not None
+            else None
         ),
-        "convex_hull_fallback_fraction": 2.0 * _clamp01(
-            float(convex_hull_fallback_fraction) if convex_hull_fallback_fraction is not None else None
+        "convex_hull_fallback_fraction": 2.0
+        * _clamp01(
+            float(convex_hull_fallback_fraction)
+            if convex_hull_fallback_fraction is not None
+            else None
         ),
-        "forced_label_fraction": 2.0 * _clamp01(
-            min(float(forced_label_fraction) * 10.0, 1.0) if forced_label_fraction is not None else None
+        "forced_label_fraction": 2.0
+        * _clamp01(
+            min(float(forced_label_fraction) * 10.0, 1.0)
+            if forced_label_fraction is not None
+            else None
         ),
         "geometry_transport_fraction": 0.75 * _clamp01(geometry_penalty),
-        "scale_deviation_p95": 0.5 * _clamp01(
-            float(scale_deviation_p95) / 0.25 if scale_deviation_p95 is not None else None
+        "scale_deviation_p95": 0.5
+        * _clamp01(
+            float(scale_deviation_p95) / 0.25
+            if scale_deviation_p95 is not None
+            else None
         ),
-        "qc_warning_count": 0.1 * _clamp01(
-            min(float(qc_warning_count) / 10.0, 1.0) if qc_warning_count is not None else None
+        "qc_warning_count": 0.1
+        * _clamp01(
+            min(float(qc_warning_count) / 10.0, 1.0)
+            if qc_warning_count is not None
+            else None
         ),
     }
     rank_blockers: list[str] = []
-    if coverage_fraction is not None and math.isfinite(float(coverage_fraction)) and float(coverage_fraction) < 0.999:
+    if (
+        coverage_fraction is not None
+        and math.isfinite(float(coverage_fraction))
+        and float(coverage_fraction) < 0.999
+    ):
         rank_blockers.append("incomplete_cell_subregion_coverage")
-    if mixed_candidate_effective_eps_fraction is not None and float(mixed_candidate_effective_eps_fraction) > 0.0:
+    if (
+        mixed_candidate_effective_eps_fraction is not None
+        and float(mixed_candidate_effective_eps_fraction) > 0.0
+    ):
         rank_blockers.append("mixed_candidate_effective_eps")
-    if mixed_candidate_fallback_fraction is not None and float(mixed_candidate_fallback_fraction) > 0.0:
+    if (
+        mixed_candidate_fallback_fraction is not None
+        and float(mixed_candidate_fallback_fraction) > 0.0
+    ):
         rank_blockers.append("mixed_candidate_fallback")
-    if convex_hull_fallback_fraction is not None and float(convex_hull_fallback_fraction) > 0.0:
+    if (
+        convex_hull_fallback_fraction is not None
+        and float(convex_hull_fallback_fraction) > 0.0
+    ):
         rank_blockers.append("convex_hull_fallback")
     if forced_label_fraction is not None and float(forced_label_fraction) > 0.0:
         rank_blockers.append("forced_subregion_cluster_size_repair")
     blocker_penalty = 3.0 * float(len(rank_blockers))
-    total_score = float(sum(positive_terms.values()) - sum(negative_terms.values()) - blocker_penalty)
+    total_score = float(
+        sum(positive_terms.values()) - sum(negative_terms.values()) - blocker_penalty
+    )
     return {
         "total_score": total_score,
         "positive_terms": positive_terms,
@@ -161,7 +257,9 @@ def _dedupe_candidates(candidates: list[SearchCandidate]) -> list[SearchCandidat
     return deduped
 
 
-def build_default_search_candidates(config: MultilevelExperimentConfig) -> list[SearchCandidate]:
+def build_default_search_candidates(
+    config: MultilevelExperimentConfig,
+) -> list[SearchCandidate]:
     base = config.ot
     base_radius = float(base.radius_um)
     base_stride = float(base.stride_um)
@@ -172,7 +270,11 @@ def build_default_search_candidates(config: MultilevelExperimentConfig) -> list[
     base_ot_eps = float(base.ot_eps)
     base_rho = float(base.rho)
     base_overlap = float(base.overlap_consistency_weight)
-    base_basic_niche = float(base.basic_niche_size_um) if base.basic_niche_size_um is not None else None
+    base_basic_niche = (
+        float(base.basic_niche_size_um)
+        if base.basic_niche_size_um is not None
+        else None
+    )
 
     radius_low = max(50.0, base_radius - 20.0)
     radius_high = base_radius + 20.0
@@ -191,31 +293,83 @@ def build_default_search_candidates(config: MultilevelExperimentConfig) -> list[
     min_cells_high = max(min_cells_low + 1, base_min_cells + 5)
     support_low = max(48, base_support - 32)
     support_high = max(support_low + 8, base_support + 32)
-    basic_low = max(25.0, round(base_basic_niche - 25.0, 3)) if base_basic_niche is not None else None
-    basic_high = round(base_basic_niche + 25.0, 3) if base_basic_niche is not None else None
+    basic_low = (
+        max(25.0, round(base_basic_niche - 25.0, 3))
+        if base_basic_niche is not None
+        else None
+    )
+    basic_high = (
+        round(base_basic_niche + 25.0, 3) if base_basic_niche is not None else None
+    )
 
     candidates = [
         SearchCandidate("baseline", "coarse", {}),
         SearchCandidate("cluster_low", "coarse", {"n_clusters": cluster_low}),
         SearchCandidate("cluster_high", "coarse", {"n_clusters": cluster_high}),
-        SearchCandidate("radius_low", "coarse", {"radius_um": radius_low, "stride_um": min(radius_low, stride_tighter)}),
-        SearchCandidate("radius_high", "coarse", {"radius_um": radius_high, "stride_um": min(radius_high, base_stride)}),
-        SearchCandidate("tighter_overlap_grid", "coarse", {"stride_um": min(base_radius, stride_tighter)}),
+        SearchCandidate(
+            "radius_low",
+            "coarse",
+            {"radius_um": radius_low, "stride_um": min(radius_low, stride_tighter)},
+        ),
+        SearchCandidate(
+            "radius_high",
+            "coarse",
+            {"radius_um": radius_high, "stride_um": min(radius_high, base_stride)},
+        ),
+        SearchCandidate(
+            "tighter_overlap_grid",
+            "coarse",
+            {"stride_um": min(base_radius, stride_tighter)},
+        ),
         SearchCandidate("lambda_x_low", "coarse", {"lambda_x": lambda_low}),
         SearchCandidate("lambda_x_high", "coarse", {"lambda_x": lambda_high}),
-        SearchCandidate("coordinate_only_boundaries", "coarse", {"subregion_feature_weight": 0.0}),
-        SearchCandidate("feature_boundaries_025", "coarse", {"subregion_feature_weight": 0.25}),
-        SearchCandidate("feature_boundaries_075", "coarse", {"subregion_feature_weight": 0.75}),
-        SearchCandidate("ot_eps_low_rho_low", "coarse", {"ot_eps": ot_eps_low, "rho": rho_low}),
-        SearchCandidate("ot_eps_high_rho_high", "coarse", {"ot_eps": ot_eps_high, "rho": rho_high}),
-        SearchCandidate("overlap_low", "coarse", {"overlap_consistency_weight": overlap_low}),
-        SearchCandidate("overlap_high", "coarse", {"overlap_consistency_weight": overlap_high}),
+        SearchCandidate(
+            "coordinate_only_boundaries", "coarse", {"subregion_feature_weight": 0.0}
+        ),
+        SearchCandidate(
+            "feature_boundaries_025", "coarse", {"subregion_feature_weight": 0.25}
+        ),
+        SearchCandidate(
+            "feature_boundaries_075", "coarse", {"subregion_feature_weight": 0.75}
+        ),
+        SearchCandidate(
+            "ot_eps_low_rho_low", "coarse", {"ot_eps": ot_eps_low, "rho": rho_low}
+        ),
+        SearchCandidate(
+            "ot_eps_high_rho_high", "coarse", {"ot_eps": ot_eps_high, "rho": rho_high}
+        ),
+        SearchCandidate(
+            "overlap_low", "coarse", {"overlap_consistency_weight": overlap_low}
+        ),
+        SearchCandidate(
+            "overlap_high", "coarse", {"overlap_consistency_weight": overlap_high}
+        ),
         SearchCandidate("min_cells_low", "coarse", {"min_cells": min_cells_low}),
         SearchCandidate("min_cells_high", "coarse", {"min_cells": min_cells_high}),
-        SearchCandidate("support_low", "coarse", {"compressed_support_size": support_low}),
-        SearchCandidate("support_high", "coarse", {"compressed_support_size": support_high}),
-        SearchCandidate("cluster_high_radius_low", "coarse", {"n_clusters": cluster_high, "radius_um": radius_low, "stride_um": min(radius_low, stride_tighter)}),
-        SearchCandidate("cluster_low_radius_high", "coarse", {"n_clusters": cluster_low, "radius_um": radius_high, "stride_um": min(radius_high, base_stride)}),
+        SearchCandidate(
+            "support_low", "coarse", {"compressed_support_size": support_low}
+        ),
+        SearchCandidate(
+            "support_high", "coarse", {"compressed_support_size": support_high}
+        ),
+        SearchCandidate(
+            "cluster_high_radius_low",
+            "coarse",
+            {
+                "n_clusters": cluster_high,
+                "radius_um": radius_low,
+                "stride_um": min(radius_low, stride_tighter),
+            },
+        ),
+        SearchCandidate(
+            "cluster_low_radius_high",
+            "coarse",
+            {
+                "n_clusters": cluster_low,
+                "radius_um": radius_high,
+                "stride_um": min(radius_high, base_stride),
+            },
+        ),
         SearchCandidate(
             "boundary_focused",
             "coarse",
@@ -240,78 +394,140 @@ def build_default_search_candidates(config: MultilevelExperimentConfig) -> list[
     if basic_low is not None and basic_high is not None:
         candidates.extend(
             [
-                SearchCandidate("basic_niche_smaller", "coarse", {"basic_niche_size_um": basic_low}),
-                SearchCandidate("basic_niche_larger", "coarse", {"basic_niche_size_um": basic_high}),
+                SearchCandidate(
+                    "basic_niche_smaller", "coarse", {"basic_niche_size_um": basic_low}
+                ),
+                SearchCandidate(
+                    "basic_niche_larger", "coarse", {"basic_niche_size_um": basic_high}
+                ),
             ]
         )
     return _dedupe_candidates(candidates)
 
 
-def build_refine_candidates(config: MultilevelExperimentConfig, top_rows: list[dict[str, object]]) -> list[SearchCandidate]:
+def build_refine_candidates(
+    config: MultilevelExperimentConfig, top_rows: list[dict[str, object]]
+) -> list[SearchCandidate]:
     candidates: list[SearchCandidate] = []
     for idx, row in enumerate(top_rows[:3]):
         params = dict(row.get("effective_params", {}))
         n_clusters = int(params.get("n_clusters", config.ot.n_clusters))
         radius_um = float(params.get("radius_um", config.ot.radius_um))
         stride_um = float(params.get("stride_um", config.ot.stride_um))
-        overlap_consistency_weight = float(params.get("overlap_consistency_weight", config.ot.overlap_consistency_weight))
+        overlap_consistency_weight = float(
+            params.get(
+                "overlap_consistency_weight", config.ot.overlap_consistency_weight
+            )
+        )
         lambda_x = float(params.get("lambda_x", config.ot.lambda_x))
         min_cells = int(params.get("min_cells", config.ot.min_cells))
-        support_size = int(params.get("compressed_support_size", config.ot.compressed_support_size))
-        basic_niche_size_um = params.get("basic_niche_size_um", config.ot.basic_niche_size_um)
-        basic_niche_size = float(basic_niche_size_um) if basic_niche_size_um is not None else None
+        support_size = int(
+            params.get("compressed_support_size", config.ot.compressed_support_size)
+        )
+        basic_niche_size_um = params.get(
+            "basic_niche_size_um", config.ot.basic_niche_size_um
+        )
+        basic_niche_size = (
+            float(basic_niche_size_um) if basic_niche_size_um is not None else None
+        )
 
         candidates.extend(
             [
                 SearchCandidate(
-                    f"refine_top{idx+1}_confirm",
+                    f"refine_top{idx + 1}_confirm",
                     "refine",
                     params,
                 ),
                 SearchCandidate(
-                    f"refine_top{idx+1}_clusters_down",
+                    f"refine_top{idx + 1}_clusters_down",
                     "refine",
                     {**params, "n_clusters": max(4, n_clusters - 1)},
                 ),
                 SearchCandidate(
-                    f"refine_top{idx+1}_clusters_up",
+                    f"refine_top{idx + 1}_clusters_up",
                     "refine",
                     {**params, "n_clusters": n_clusters + 1},
                 ),
                 SearchCandidate(
-                    f"refine_top{idx+1}_radius_down",
+                    f"refine_top{idx + 1}_radius_down",
                     "refine",
-                    {**params, "radius_um": max(50.0, radius_um - 10.0), "stride_um": min(max(50.0, radius_um - 10.0), stride_um)},
+                    {
+                        **params,
+                        "radius_um": max(50.0, radius_um - 10.0),
+                        "stride_um": min(max(50.0, radius_um - 10.0), stride_um),
+                    },
                 ),
                 SearchCandidate(
-                    f"refine_top{idx+1}_radius_up",
+                    f"refine_top{idx + 1}_radius_up",
                     "refine",
-                    {**params, "radius_um": radius_um + 10.0, "stride_um": min(radius_um + 10.0, stride_um)},
+                    {
+                        **params,
+                        "radius_um": radius_um + 10.0,
+                        "stride_um": min(radius_um + 10.0, stride_um),
+                    },
                 ),
                 SearchCandidate(
-                    f"refine_top{idx+1}_overlap_up",
+                    f"refine_top{idx + 1}_overlap_up",
                     "refine",
-                    {**params, "overlap_consistency_weight": round(overlap_consistency_weight + 0.02, 3)},
+                    {
+                        **params,
+                        "overlap_consistency_weight": round(
+                            overlap_consistency_weight + 0.02, 3
+                        ),
+                    },
                 ),
                 SearchCandidate(
-                    f"refine_top{idx+1}_overlap_down",
+                    f"refine_top{idx + 1}_overlap_down",
                     "refine",
-                    {**params, "overlap_consistency_weight": max(0.0, round(overlap_consistency_weight - 0.02, 3))},
+                    {
+                        **params,
+                        "overlap_consistency_weight": max(
+                            0.0, round(overlap_consistency_weight - 0.02, 3)
+                        ),
+                    },
                 ),
                 SearchCandidate(
-                    f"refine_top{idx+1}_lambda_x_mid",
+                    f"refine_top{idx + 1}_lambda_x_mid",
                     "refine",
-                    {**params, "lambda_x": max(0.2, min(1.0, round(lambda_x + (0.05 if lambda_x <= config.ot.lambda_x else -0.05), 3)))},
+                    {
+                        **params,
+                        "lambda_x": max(
+                            0.2,
+                            min(
+                                1.0,
+                                round(
+                                    lambda_x
+                                    + (
+                                        0.05
+                                        if lambda_x <= config.ot.lambda_x
+                                        else -0.05
+                                    ),
+                                    3,
+                                ),
+                            ),
+                        ),
+                    },
                 ),
                 SearchCandidate(
-                    f"refine_top{idx+1}_min_cells_up",
+                    f"refine_top{idx + 1}_min_cells_up",
                     "refine",
                     {**params, "min_cells": max(10, min_cells + 5)},
                 ),
                 SearchCandidate(
-                    f"refine_top{idx+1}_support_mid",
+                    f"refine_top{idx + 1}_support_mid",
                     "refine",
-                    {**params, "compressed_support_size": max(48, support_size + (16 if support_size <= config.ot.compressed_support_size else -16))},
+                    {
+                        **params,
+                        "compressed_support_size": max(
+                            48,
+                            support_size
+                            + (
+                                16
+                                if support_size <= config.ot.compressed_support_size
+                                else -16
+                            ),
+                        ),
+                    },
                 ),
             ]
         )
@@ -319,12 +535,15 @@ def build_refine_candidates(config: MultilevelExperimentConfig, top_rows: list[d
             candidates.extend(
                 [
                     SearchCandidate(
-                        f"refine_top{idx+1}_basic_niche_down",
+                        f"refine_top{idx + 1}_basic_niche_down",
                         "refine",
-                        {**params, "basic_niche_size_um": max(25.0, basic_niche_size - 10.0)},
+                        {
+                            **params,
+                            "basic_niche_size_um": max(25.0, basic_niche_size - 10.0),
+                        },
                     ),
                     SearchCandidate(
-                        f"refine_top{idx+1}_basic_niche_up",
+                        f"refine_top{idx + 1}_basic_niche_up",
                         "refine",
                         {**params, "basic_niche_size_um": basic_niche_size + 10.0},
                     ),
@@ -337,7 +556,12 @@ def _bool_flag(name: str, value: bool) -> list[str]:
     return [f"--{name}" if value else f"--no-{name}"]
 
 
-def _candidate_config(base_config: MultilevelExperimentConfig, candidate: SearchCandidate, *, final_stage: bool) -> MultilevelExperimentConfig:
+def _candidate_config(
+    base_config: MultilevelExperimentConfig,
+    candidate: SearchCandidate,
+    *,
+    final_stage: bool,
+) -> MultilevelExperimentConfig:
     payload = base_config.as_dict()
     payload["ot"].update(candidate.overrides)
     config = MultilevelExperimentConfig(
@@ -381,7 +605,9 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
         "--stride-um",
         str(config.ot.stride_um),
         "--basic-niche-size-um",
-        str(config.ot.basic_niche_size_um) if config.ot.basic_niche_size_um is not None else "0",
+        str(config.ot.basic_niche_size_um)
+        if config.ot.basic_niche_size_um is not None
+        else "0",
         "--min-cells",
         str(config.ot.min_cells),
         "--max-subregions",
@@ -434,6 +660,20 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
         str(config.ot.deep_segmentation_feature_weight),
         "--deep-segmentation-spatial-weight",
         str(config.ot.deep_segmentation_spatial_weight),
+        "--joint-refinement-iters",
+        str(config.ot.joint_refinement_iters),
+        "--joint-refinement-knn",
+        str(config.ot.joint_refinement_knn),
+        "--joint-refinement-feature-dims",
+        str(config.ot.joint_refinement_feature_dims),
+        "--joint-refinement-cluster-weight",
+        str(config.ot.joint_refinement_cluster_weight),
+        "--joint-refinement-spatial-weight",
+        str(config.ot.joint_refinement_spatial_weight),
+        "--joint-refinement-cut-weight",
+        str(config.ot.joint_refinement_cut_weight),
+        "--joint-refinement-max-move-fraction",
+        str(config.ot.joint_refinement_max_move_fraction),
         "--subregion-clustering-method",
         str(config.ot.subregion_clustering_method),
         "--subregion-latent-embedding-mode",
@@ -473,11 +713,17 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
     ]
     cmd.extend(_bool_flag("allow-reflection", bool(config.ot.allow_reflection)))
     cmd.extend(_bool_flag("allow-scale", bool(config.ot.allow_scale)))
-    cmd.extend(_bool_flag("allow-observed-hull-geometry", bool(config.ot.allow_convex_hull_fallback)))
+    cmd.extend(
+        _bool_flag(
+            "allow-observed-hull-geometry", bool(config.ot.allow_convex_hull_fallback)
+        )
+    )
     cmd.extend(_bool_flag("shape-diagnostics", bool(config.ot.shape_diagnostics)))
     cmd.extend(_bool_flag("compute-spot-latent", bool(config.ot.compute_spot_latent)))
     cmd.extend(_bool_flag("auto-n-clusters", bool(config.ot.auto_n_clusters)))
-    cmd.extend(_bool_flag("allow-umap-as-feature", bool(config.paths.allow_umap_as_feature)))
+    cmd.extend(
+        _bool_flag("allow-umap-as-feature", bool(config.paths.allow_umap_as_feature))
+    )
     if config.paths.region_obs_key:
         cmd.extend(["--region-obs-key", str(config.paths.region_obs_key)])
     if config.paths.region_geometry_json:
@@ -562,7 +808,12 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
             )
         if config.deep.pretrained_model is not None:
             cmd.extend(["--pretrained-deep-model", str(config.deep.pretrained_model)])
-        cmd.extend(_bool_flag("deep-allow-joint-ot-embedding", bool(config.deep.allow_joint_ot_embedding)))
+        cmd.extend(
+            _bool_flag(
+                "deep-allow-joint-ot-embedding",
+                bool(config.deep.allow_joint_ot_embedding),
+            )
+        )
         cmd.extend(_bool_flag("deep-restore-best", bool(config.deep.restore_best)))
         cmd.extend(_bool_flag("deep-save-model", bool(config.deep.save_model)))
     return cmd
@@ -580,7 +831,13 @@ def _reset_candidate_run_dir(run_dir: Path) -> None:
 
 
 def _prune_candidate_artifacts(run_dir: Path) -> None:
-    keep = {"summary.json", "search_candidate.json", "search_score.json", "stdout.log", "stderr.log"}
+    keep = {
+        "summary.json",
+        "search_candidate.json",
+        "search_score.json",
+        "stdout.log",
+        "stderr.log",
+    }
     for child in run_dir.iterdir():
         if child.name in keep:
             continue
@@ -594,7 +851,11 @@ def _rank_results(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     rankable = [row for row in rows if _search_row_is_rankable(row)]
     if rankable:
         return sorted(rankable, key=lambda row: float(row["score"]), reverse=True)
-    completed = [row for row in rows if row.get("status") == "completed" and row.get("score") is not None]
+    completed = [
+        row
+        for row in rows
+        if row.get("status") == "completed" and row.get("score") is not None
+    ]
     return sorted(completed, key=lambda row: float(row["score"]), reverse=True)
 
 
@@ -617,7 +878,9 @@ def run_multilevel_optimal_search(
     deadline = time.monotonic() + max(float(time_budget_hours), 0.01) * 3600.0
     rows: list[dict[str, object]] = []
 
-    def run_candidate(candidate: SearchCandidate, *, final_stage: bool) -> dict[str, object]:
+    def run_candidate(
+        candidate: SearchCandidate, *, final_stage: bool
+    ) -> dict[str, object]:
         remaining_seconds = max(deadline - time.monotonic(), 0.0)
         if remaining_seconds <= 0.0:
             return {
@@ -626,7 +889,9 @@ def run_multilevel_optimal_search(
                 "status": "skipped_budget_exhausted",
                 "returncode": None,
                 "runtime_seconds": 0.0,
-                "run_dir": str(search_root / "candidates" / f"{candidate.stage}_{candidate.name}"),
+                "run_dir": str(
+                    search_root / "candidates" / f"{candidate.stage}_{candidate.name}"
+                ),
                 "effective_params": dict(candidate.overrides),
                 "command": None,
                 "score": None,
@@ -652,7 +917,10 @@ def run_multilevel_optimal_search(
         started = time.time()
         timed_out = False
         completed: subprocess.CompletedProcess[str] | None = None
-        with stdout_path.open("w") as stdout_handle, stderr_path.open("w") as stderr_handle:
+        with (
+            stdout_path.open("w") as stdout_handle,
+            stderr_path.open("w") as stderr_handle,
+        ):
             try:
                 completed = subprocess.run(
                     command,
@@ -677,7 +945,9 @@ def run_multilevel_optimal_search(
                 "timed_out"
                 if timed_out
                 else "completed"
-                if completed is not None and completed.returncode == 0 and summary_path.exists()
+                if completed is not None
+                and completed.returncode == 0
+                and summary_path.exists()
                 else "failed"
             ),
             "returncode": None if completed is None else int(completed.returncode),
@@ -717,7 +987,9 @@ def run_multilevel_optimal_search(
         row = run_candidate(candidate, final_stage=False)
         rows.append(row)
         ranked = _rank_results(rows)
-        allowed_dirs = {Path(item["run_dir"]) for item in ranked[: max(int(keep_top_k), 1)]}
+        allowed_dirs = {
+            Path(item["run_dir"]) for item in ranked[: max(int(keep_top_k), 1)]
+        }
         for existing in rows:
             if existing.get("status") != "completed":
                 continue
@@ -727,7 +999,9 @@ def run_multilevel_optimal_search(
                 existing["artifacts_pruned"] = True
             else:
                 existing["artifacts_pruned"] = False
-        _write_json(search_root / "search_results.json", {"rows": rows, "ranked": ranked})
+        _write_json(
+            search_root / "search_results.json", {"rows": rows, "ranked": ranked}
+        )
 
     ranked_after_coarse = _rank_results(rows)
     refine_candidates = build_refine_candidates(config, ranked_after_coarse)
@@ -737,7 +1011,9 @@ def run_multilevel_optimal_search(
         row = run_candidate(candidate, final_stage=True)
         rows.append(row)
         ranked = _rank_results(rows)
-        allowed_dirs = {Path(item["run_dir"]) for item in ranked[: max(int(keep_top_k), 1)]}
+        allowed_dirs = {
+            Path(item["run_dir"]) for item in ranked[: max(int(keep_top_k), 1)]
+        }
         for existing in rows:
             if existing.get("status") != "completed":
                 continue
@@ -747,7 +1023,9 @@ def run_multilevel_optimal_search(
                 existing["artifacts_pruned"] = True
             else:
                 existing["artifacts_pruned"] = False
-        _write_json(search_root / "search_results.json", {"rows": rows, "ranked": ranked})
+        _write_json(
+            search_root / "search_results.json", {"rows": rows, "ranked": ranked}
+        )
 
     ranked = _rank_results(rows)
     best_row = ranked[0] if ranked else None
@@ -809,9 +1087,13 @@ def run_multilevel_optimal_search(
     summary = {
         "search_output_dir": str(search_root),
         "time_budget_hours": float(time_budget_hours),
-        "completed_candidates": int(sum(row.get("status") == "completed" for row in rows)),
+        "completed_candidates": int(
+            sum(row.get("status") == "completed" for row in rows)
+        ),
         "failed_candidates": int(sum(row.get("status") == "failed" for row in rows)),
-        "timed_out_candidates": int(sum(row.get("status") == "timed_out" for row in rows)),
+        "timed_out_candidates": int(
+            sum(row.get("status") == "timed_out" for row in rows)
+        ),
         "rankable_candidates": int(sum(_search_row_is_rankable(row) for row in rows)),
         "best_candidate": {
             "name": best_row["name"],
@@ -840,7 +1122,10 @@ def run_multilevel_optimal_search(
         "best_run_dir": str(best_run_dir) if best_run_dir is not None else None,
     }
     _write_json(search_root / "search_summary.json", summary)
-    _write_json(search_root / "search_results.json", {"rows": rows, "ranked": ranked, "summary": summary})
+    _write_json(
+        search_root / "search_results.json",
+        {"rows": rows, "ranked": ranked, "summary": summary},
+    )
     return summary
 
 

@@ -52,26 +52,27 @@ Operational helpers live under `scripts/`; root-level shell wrappers were remove
 
 Prefer PCA, standardized marker expression, or another calibrated latent space. UMAP is exploratory only — its Euclidean geometry is not metric-preserving.
 
-The default subregion latent is `mean_std_shrunk`: per-feature distribution moments shrunk toward a hierarchical sample/cohort prior according to subregion cell count, which reduces variance noise for small subregions while preserving the guarantee that the primary clustering step does not use spatial coordinates. The sample prior is used when `--sample-obs-key` is available; otherwise the method falls back to the cohort prior. The heterogeneity block weight and sample-prior weight are explicit parameters. Alternative modes include `mean_std`, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`; codebook modes fit a whitened cell-state codebook and use soft assignment histograms.
+The target subregion clustering mode is now `heterogeneity_ot_niche`: each subregion is represented as an internal heterogeneity motif over compressed canonical coordinates and soft cell-state codebook posteriors. The clustered blocks are soft state composition, diversity/multimodality, a canonical spatial-state density field, and within-subregion state-pair co-occurrence. This mode uses internal shape-normalized arrangement, but not raw tissue position, subregion centers, sample labels, or shape/density descriptors. The older `pooled_subregion_latent` path remains as a composition/distribution-summary baseline; its default latent is `mean_std_shrunk`, with alternatives `mean_std`, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`.
 
 ### Three-layer method
 
 The active method should be interpreted as three linked layers:
 
-- **Layer 1: subregion formation.** The biological unit is a mutually exclusive subregion: a small tissue region containing many cells, not a single cell or spot. Subregion boundaries can be coordinate-only, feature-aware, deep-graph refined, or supplied explicitly; realized size, shape, density, and minimum-size constraints are part of the method.
-- **Layer 2: subregion heterogeneity clustering.** Each subregion is represented by a raw member-cell feature-distribution latent embedding summarizing its internal cell-state distribution. The primary niche labels are learned by pooling all subregion embeddings across the cohort and clustering that matrix. This step does not use spatial coordinates, subregion centers, overlap edges, compressed OT supports, or OT candidate costs.
+- **Layer 1: subregion formation.** The biological unit is a mutually exclusive subregion: a small tissue region containing many cells, not a single cell or spot. Subregion boundaries can be coordinate-only, feature-aware, deep-graph refined, jointly refined after clustering, or supplied explicitly; realized size, shape, density, and minimum-size constraints are part of the method.
+- **Layer 2: subregion heterogeneity clustering.** Each subregion is represented by a heterogeneity object: soft cell-state composition, diversity, canonical spatial-state fields, and pairwise internal co-occurrence motifs. The primary niche labels are learned by pooling those motif embeddings across the cohort. Shape/density/sample metadata are used for QC, not as clustering features. The `pooled_subregion_latent` composition-summary path remains available as a baseline.
 - **Layer 3: projection and visualization.** Cell labels, spot-level latent fields, and sample maps are downstream projections from fitted subregion clusters. They are for interpretation and QC; they do not redefine the fitted subregion labels.
 
 Supported modes:
 
 - **coordinate-only data-driven subregion discovery** (default): mutually exclusive spatial subregions learned from observed coordinates, with sparse connected pieces merged to satisfy `min_cells`; the fitted boundary/shape geometry is taken from the observed member-cell point cloud rather than a hand-coded template
 - **feature-aware data-driven subregion discovery**: set `--subregion-feature-weight > 0` to let the feature view influence generated boundaries; this is useful for sensitivity analysis but should be compared against the coordinate-only baseline because the same feature signal may later enter pooled latent clustering and OT diagnostics
-- **deep graph segmentation**: set `--subregion-construction-method deep_segmentation` and provide a learned feature view, typically `--deep-feature-method autoencoder --deep-output-embedding context`; many coordinate seeds give full tissue coverage, then a spatial kNN boundary-refinement pass moves boundaries using learned embedding affinity before minimum-size merging
+- **deep graph segmentation**: set `--subregion-construction-method deep_segmentation` and provide a learned feature view, typically `--deep-feature-method autoencoder --deep-output-embedding context`; many coordinate seeds give full tissue coverage, then a spatial kNN boundary-refinement pass moves boundaries using learned embedding affinity before connected minimum-size merging
+- **joint segmentation-clustering refinement**: set `--subregion-construction-method joint_refinement`; the method initializes with deep graph segmentation, fits preliminary subregion clusters, then allows only adjacent boundary-cell moves that improve cluster-prototype coherence after spatial and kNN-cut penalties before reconnecting and merging to satisfy `min_cells`
 - **explicit-region clustering**: pass `--region-obs-key` and ideally explicit geometry objects so boundary shape can be treated as nuisance
 
-The historical OT-dictionary assignment is still available as `--subregion-clustering-method ot_dictionary`, but the packaged cohort workflow uses `pooled_subregion_latent`. In the default workflow, OT atoms and spot-latent charts are downstream diagnostics/projections conditioned on the pooled-latent subregion labels.
+The historical OT-dictionary assignment is still available as `--subregion-clustering-method ot_dictionary`, and the composition-summary baseline is available as `--subregion-clustering-method pooled_subregion_latent`. The packaged cohort workflow now defaults to `heterogeneity_ot_niche`. OT atoms and spot-latent charts remain downstream diagnostics/projections conditioned on the fitted subregion labels.
 
-For generated subregions, membership and boundary shape are data-driven from the observed member cells. `--radius-um` is not a fixed ball/window membership radius in this mode; it is retained for compatibility and graph diagnostics. The realized subregion scale comes from `--basic-niche-size-um` or `--stride-um`, `--min-cells`, `--max-subregions`, spatial connectivity, and optionally feature-aware boundary refinement or deep graph segmentation. For explicit-region runs without masks or polygons, boundary-shape invariance is not guaranteed unless you intentionally opt into the observed-coordinate convex-hull fallback via `--allow-observed-hull-geometry`.
+For generated subregions, membership and boundary shape are data-driven from the observed member cells. `--radius-um` is not a fixed ball/window membership radius in this mode; it is retained for compatibility and graph diagnostics. The realized subregion scale comes from `--basic-niche-size-um` or `--stride-um`, `--min-cells`, `--max-subregions`, spatial connectivity, and optionally feature-aware boundary refinement or deep graph segmentation. `--max-subregion-area-um2` is a soft QC target, not a hard splitter: generated subregions are allowed to exceed it when that preserves connected data-driven regions and the `min_cells` constraint. For explicit-region runs without masks or polygons, boundary-shape invariance is not guaranteed unless you intentionally opt into the observed-coordinate convex-hull fallback via `--allow-observed-hull-geometry`.
 
 For CLI explicit-region runs, pass `--region-geometry-json` with a JSON object containing `regions`, each with `region_id` plus `polygon_vertices`, `polygon_components`, or `mask`. Polygon coordinates are interpreted in scaled microns by default; set `"coordinate_units": "obs"` to multiply them by `--spatial-scale`.
 
@@ -90,6 +91,7 @@ cd spatial_ot
   --n-clusters 15 --atoms-per-cluster 8 \
   --radius-um 100 --stride-um 100 --basic-niche-size-um 50 \
   --min-cells 20 --max-subregions 5000 \
+  --subregion-clustering-method heterogeneity_ot_niche \
   --subregion-latent-embedding-mode mean_std_shrunk \
   --subregion-latent-heterogeneity-weight 0.5 \
   --subregion-latent-sample-prior-weight 0.5 \
@@ -113,7 +115,7 @@ cd spatial_ot
   --auto-n-clusters --candidate-n-clusters 15-25
 ```
 
-Under the default `pooled_subregion_latent` label path, the selector scores candidate `K` values directly on the pooled raw-member subregion latent embeddings using Silhouette, Gap, Calinski-Harabasz, Davies-Bouldin, seed stability, bootstrap stability, and forced-repair penalties. The historical OT-landmark selector is retained for `--subregion-clustering-method ot_dictionary`. Auto-K should still be treated as exploratory until full fixed-K stability, leakage, and boundary-mode checks are run around the selected `K`.
+Under `heterogeneity_ot_niche` and `pooled_subregion_latent`, the selector scores candidate `K` values directly on the corresponding subregion embedding using Silhouette, Gap, Calinski-Harabasz, Davies-Bouldin, seed stability, bootstrap stability, and forced-repair penalties. The historical OT-landmark selector is retained for `--subregion-clustering-method ot_dictionary`. Auto-K should still be treated as exploratory until full fixed-K stability, leakage, heterogeneity-block ablations, and boundary-mode checks are run around the selected `K`.
 
 The cluster-size constraint is defined on fitted subregions, not on cells or spots. Set `MIN_SUBREGIONS_PER_CLUSTER=50` or pass `--min-subregions-per-cluster 50` to require each subregion cluster to contain at least that many subregions when feasible; projected cell and spot labels remain downstream summaries.
 
@@ -205,14 +207,14 @@ WRITE_BACK_TO_SOURCE_INPUTS=1 bash scripts/prepare_all_spatial_ot_input.sh
                                         # opt in to copying the cohort cache back into source files
 bash scripts/run_prepared_cohort_gpu.sh         # verify the prepared pooled H5AD, then launch the remaining GPU OT run
 bash scripts/run_deep_segmentation_cohort_gpu.sh
-                                        # run the prepared cohort with autoencoder context features and deep graph segmentation
+                                        # run the prepared cohort with autoencoder context features and joint refinement
 ```
 
 Pooled coordinates place each sample on its own non-overlapping tile, so samples contribute jointly to latent/OT learning without being treated as one continuous tissue section.
 
 `scripts/run_prepared_cohort_gpu.sh` intentionally disables pooling and feature-cache refresh by default. It only accepts a pooled input that already has `X_spatial_ot_x_svd_512`, then delegates to `scripts/run.sh` with `COMPUTE_DEVICE=cuda` and `AUTO_N_CLUSTERS=1`.
 
-`scripts/run_deep_segmentation_cohort_gpu.sh` is the deep-boundary variant: it trains/uses an autoencoder context embedding, sets `SUBREGION_CONSTRUCTION_METHOD=deep_segmentation`, and then delegates to the same prepared-cohort runner.
+`scripts/run_deep_segmentation_cohort_gpu.sh` is the deep-boundary cohort profile: it trains/uses an autoencoder context embedding, sets `SUBREGION_CONSTRUCTION_METHOD=joint_refinement`, and then delegates to the same prepared-cohort runner. Use this profile for the current deep-learning segmentation plus constrained segmentation-clustering feedback path; use the coordinate-only prepared run as the baseline/ablation.
 
 `obs` columns written by pooling:
 
@@ -243,8 +245,9 @@ Defaults relevant to safety / cost (override with the matching env var):
 - `BASIC_NICHE_SIZE_UM=50`, `MIN_CELLS=25`, `MAX_SUBREGIONS=5000`, `STRIDE_UM=$RADIUS_UM`
 - `AUTO_N_CLUSTERS=0` by default. Set `AUTO_N_CLUSTERS=1` with `CANDIDATE_N_CLUSTERS=15-25` to run pilot-based model selection before the final fit.
 - `MIN_SUBREGIONS_PER_CLUSTER=50` constrains the number of subregions per selected cluster; it does not constrain projected cell or spot counts.
+- `MAX_SUBREGION_AREA_UM2`, when set, is reported as a soft area QC target. It does not force final connected regions to split and it does not override `MIN_CELLS`.
 - `SUBREGION_FEATURE_WEIGHT=0`, `SUBREGION_FEATURE_DIMS=16` keep generated data-driven boundaries coordinate-only by default. Set a positive weight only for feature-aware boundary sensitivity runs.
-- `SUBREGION_CONSTRUCTION_METHOD=deep_segmentation` switches generated subregion detection to learned-affinity graph segmentation. `DEEP_SEGMENTATION_KNN=12`, `DEEP_SEGMENTATION_FEATURE_DIMS=32`, `DEEP_SEGMENTATION_FEATURE_WEIGHT=1.0`, and `DEEP_SEGMENTATION_SPATIAL_WEIGHT=0.05` control the graph cut. Treat this as an opt-in boundary model and compare it against coordinate-only construction.
+- `SUBREGION_CONSTRUCTION_METHOD=joint_refinement` starts from learned-affinity deep graph segmentation, clusters pooled subregion latent embeddings, then runs bounded adjacent boundary moves with `JOINT_REFINEMENT_ITERS=2`, `JOINT_REFINEMENT_KNN=12`, and `JOINT_REFINEMENT_MAX_MOVE_FRACTION=0.05`. `SUBREGION_CONSTRUCTION_METHOD=deep_segmentation` remains available to disable the cluster-aware feedback step. Treat both as opt-in boundary models and compare them against coordinate-only construction.
 - `N_INIT=2`, `MAX_ITER=5`, `ALIGN_ITERS=2`, `GEOMETRY_SAMPLES=64`, `COMPRESSED_SUPPORT_SIZE=48` for the packaged cohort runner; raise these for a final high-depth confirmation run.
 - `SINKHORN_MAX_ITER=256`, `SINKHORN_TOL=1e-4` for CUDA OT solves in the packaged runner.
 - `SHAPE_LEAKAGE_PERMUTATIONS=16` keeps the default diagnostic pass light; raise it for publication-quality QC.

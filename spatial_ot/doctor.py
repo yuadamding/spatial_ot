@@ -34,8 +34,27 @@ _SHELL_DEFAULT_CHECKS: tuple[tuple[str, str, str], ...] = (
     ("SUBREGION_FEATURE_DIMS", "ot.subregion_feature_dims", "int"),
     ("DEEP_SEGMENTATION_KNN", "ot.deep_segmentation_knn", "int"),
     ("DEEP_SEGMENTATION_FEATURE_DIMS", "ot.deep_segmentation_feature_dims", "int"),
-    ("DEEP_SEGMENTATION_FEATURE_WEIGHT", "ot.deep_segmentation_feature_weight", "float"),
-    ("DEEP_SEGMENTATION_SPATIAL_WEIGHT", "ot.deep_segmentation_spatial_weight", "float"),
+    (
+        "DEEP_SEGMENTATION_FEATURE_WEIGHT",
+        "ot.deep_segmentation_feature_weight",
+        "float",
+    ),
+    (
+        "DEEP_SEGMENTATION_SPATIAL_WEIGHT",
+        "ot.deep_segmentation_spatial_weight",
+        "float",
+    ),
+    ("JOINT_REFINEMENT_ITERS", "ot.joint_refinement_iters", "int"),
+    ("JOINT_REFINEMENT_KNN", "ot.joint_refinement_knn", "int"),
+    ("JOINT_REFINEMENT_FEATURE_DIMS", "ot.joint_refinement_feature_dims", "int"),
+    ("JOINT_REFINEMENT_CLUSTER_WEIGHT", "ot.joint_refinement_cluster_weight", "float"),
+    ("JOINT_REFINEMENT_SPATIAL_WEIGHT", "ot.joint_refinement_spatial_weight", "float"),
+    ("JOINT_REFINEMENT_CUT_WEIGHT", "ot.joint_refinement_cut_weight", "float"),
+    (
+        "JOINT_REFINEMENT_MAX_MOVE_FRACTION",
+        "ot.joint_refinement_max_move_fraction",
+        "float",
+    ),
 )
 
 
@@ -95,10 +114,15 @@ def _torch_info() -> dict[str, object]:
         return {
             "torch_version": str(torch.__version__),
             "cuda_available": bool(torch.cuda.is_available()),
-            "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+            "cuda_device_count": int(torch.cuda.device_count())
+            if torch.cuda.is_available()
+            else 0,
             "cuda_device_names": [
-                str(torch.cuda.get_device_name(i)) for i in range(torch.cuda.device_count())
-            ] if torch.cuda.is_available() else [],
+                str(torch.cuda.get_device_name(i))
+                for i in range(torch.cuda.device_count())
+            ]
+            if torch.cuda.is_available()
+            else [],
         }
     except Exception as exc:
         return {"torch_version": None, "cuda_available": False, "error": str(exc)}
@@ -145,11 +169,17 @@ def run_doctor(*, verbose: bool = True) -> dict[str, object]:
                 }
             )
 
-    ot_defaults = {field.name: getattr(ot, field.name) for field in fields(MultilevelOTConfig)}
-    deep_defaults = {field.name: getattr(deep, field.name) for field in fields(DeepFeatureConfig)}
+    ot_defaults = {
+        field.name: getattr(ot, field.name) for field in fields(MultilevelOTConfig)
+    }
+    deep_defaults = {
+        field.name: getattr(deep, field.name) for field in fields(DeepFeatureConfig)
+    }
 
     input_dir = repo_root.parent / "spatial_ot_input"
-    input_files = sorted(p.name for p in input_dir.glob("*.h5ad")) if input_dir.exists() else []
+    input_files = (
+        sorted(p.name for p in input_dir.glob("*.h5ad")) if input_dir.exists() else []
+    )
     outputs_dir = repo_root.parent / "outputs"
     venv_dir = repo_root.parent / ".venv"
 

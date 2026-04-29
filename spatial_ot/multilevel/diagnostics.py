@@ -262,17 +262,10 @@ def build_qc_warnings(
         realized_min = None
         if isinstance(n_cell_stats, dict):
             realized_min = n_cell_stats.get("min")
-        area_cap = realized_subregion_statistics.get("maximum_area_constraint_um2")
-        if area_cap is not None:
-            message = (
-                "At least one subregion has fewer cells than min_cells because the maximum area cap takes precedence; "
-                "treat this as an area-constrained partition rather than a minimum-cell niche partition."
-            )
-        else:
-            message = (
-                "At least one subregion has fewer cells than min_cells; treat this run as violating the requested "
-                "minimum subregion size constraint."
-            )
+        message = (
+            "At least one subregion has fewer cells than min_cells; treat this run as violating the requested "
+            "minimum subregion size constraint."
+        )
         warnings_out.append(
             _qc_warning(
                 "minimum_cell_constraint_not_satisfied",
@@ -281,6 +274,20 @@ def build_qc_warnings(
                 value=float(realized_min) if realized_min is not None else min_cells,
             )
         )
+    if realized_subregion_statistics:
+        area_target = realized_subregion_statistics.get("maximum_area_qc_target_um2")
+        violation_count = int(realized_subregion_statistics.get("maximum_area_qc_target_violation_count", 0) or 0)
+        if area_target is not None and violation_count > 0:
+            warnings_out.append(
+                _qc_warning(
+                    "soft_max_subregion_area_target_exceeded",
+                    "info",
+                    "Some connected data-driven subregions exceed max_subregion_area_um2. This value is treated as a "
+                    "soft QC target, not a hard split constraint; min_cells and mutually exclusive connected regions "
+                    "remain the hard segmentation constraints.",
+                    value=float(violation_count),
+                )
+            )
     if feature_embedding_warning == "umap_exploratory":
         warnings_out.append(
             _qc_warning(

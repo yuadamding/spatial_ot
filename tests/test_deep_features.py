@@ -985,6 +985,7 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
         compressed_support_size=8,
         align_iters=1,
         n_init=1,
+        subregion_clustering_method="pooled_subregion_latent",
         allow_convex_hull_fallback=True,
         max_iter=2,
         tol=1e-4,

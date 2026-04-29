@@ -2,6 +2,12 @@
 
 ## 0.1.16
 
+- Add `subregion_clustering_method="heterogeneity_ot_niche"` as the target spatial-niche label mode. It clusters recurring internal heterogeneity motifs built from soft cell-state composition, diversity/multimodality, canonical spatial-state density fields, and within-subregion state-pair co-occurrence graphs.
+- Change packaged run defaults from `pooled_subregion_latent` to `heterogeneity_ot_niche`; the pooled summary path remains available as a composition/distribution baseline.
+- Add `subregion_construction_method="joint_refinement"` for constrained segmentation-clustering feedback: deep graph segmentation initializes full-coverage regions, pooled subregion latent clusters provide prototypes, adjacent boundary cells may move only when cluster coherence improves after spatial/cut penalties, and the final partition is reconnected/merged to satisfy `min_cells`.
+- Update the high-VRAM cohort profile to default to `SUBREGION_CONSTRUCTION_METHOD=joint_refinement`, while leaving plain `deep_segmentation` and coordinate-only construction available as ablations.
+- Treat `max_subregion_area_um2` as a soft QC target for generated subregions. It is now reported in summaries and warnings, but it no longer shrinks seed scale, blocks connected-region merging, hard-splits final regions, or takes precedence over `min_cells`.
+- Clarify that the current deep-boundary cohort path should use learned autoencoder context features and joint refinement, while coordinate-only construction remains the baseline/ablation.
 - Change the primary subregion clustering step to `pooled_subregion_latent`: each fitted subregion now gets a raw member-cell feature-distribution latent embedding, all cohort subregion embeddings are pooled, and KMeans/model selection clusters that pooled matrix without using spatial coordinates, subregion centers, overlap edges, compressed OT supports, or OT candidate costs.
 - Upgrade the pooled subregion latent from a fixed mean/std-only summary to configurable distributional modes: `mean_std_shrunk` default reliability shrinkage, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`.
 - Make `mean_std_shrunk` sample-aware by default when `sample_id` is available: low-cell-count subregions now shrink toward a configurable sample/cohort prior instead of only a cohort prior.

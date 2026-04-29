@@ -14,7 +14,10 @@ from spatial_ot.multilevel.core import (
     _gpu_assignment_subregion_batch_size,
     _stabilize_mixed_candidate_assignment_costs,
 )
-from spatial_ot.multilevel.embedding import compute_subregion_embedding, subregion_graph_metrics
+from spatial_ot.multilevel.embedding import (
+    compute_subregion_embedding,
+    subregion_graph_metrics,
+)
 from spatial_ot.multilevel.diagnostics import build_qc_warnings, cell_subregion_coverage
 from spatial_ot.multilevel.geometry import (
     _region_geometries_from_observed_points,
@@ -22,7 +25,9 @@ from spatial_ot.multilevel.geometry import (
     build_basic_niches,
     build_deep_graph_segmentation_subregions,
     build_partition_subregions_from_grid_tiles,
+    refine_subregions_by_cluster_coherence,
 )
+from spatial_ot.multilevel.heterogeneity import build_internal_heterogeneity_embeddings
 from spatial_ot.multilevel.io import _cluster_count_dict
 from spatial_ot.multilevel.model_selection import (
     comprehensive_select_k_from_latent_embeddings,
@@ -60,7 +65,9 @@ from spatial_ot.multilevel import (
 )
 
 
-def _cell_membership_counts(n_cells: int, subregion_members: list[np.ndarray]) -> np.ndarray:
+def _cell_membership_counts(
+    n_cells: int, subregion_members: list[np.ndarray]
+) -> np.ndarray:
     counts = np.zeros(int(n_cells), dtype=np.int32)
     for members in subregion_members:
         np.add.at(counts, np.asarray(members, dtype=np.int64), 1)
@@ -99,7 +106,10 @@ def test_auto_k_selector_uses_ot_landmark_scores() -> None:
     assert len(selection["scores"]) == 4
     assert selection["distance_source"] == "pilot_ot_landmark_transport_cost_profiles"
     assert all(row["passes_min_cluster_size"] for row in selection["scores"])
-    assert all(row["cluster_size_min"] >= row["effective_min_cluster_size"] for row in selection["scores"])
+    assert all(
+        row["cluster_size_min"] >= row["effective_min_cluster_size"]
+        for row in selection["scores"]
+    )
 
 
 def test_comprehensive_k_selector_scores_pooled_latent_without_spatial_inputs() -> None:
@@ -127,12 +137,17 @@ def test_comprehensive_k_selector_scores_pooled_latent_without_spatial_inputs() 
     )
 
     assert selection["uses_spatial"] is False
-    assert selection["distance_source"] == "pooled_raw_member_feature_distribution_subregion_latent_embeddings"
+    assert (
+        selection["distance_source"]
+        == "pooled_raw_member_feature_distribution_subregion_latent_embeddings"
+    )
     assert selection["selected_k"] == 3
     assert selection["criterion_votes"]
     assert len(selection["scores"]) == 3
     assert all(row["passes_min_cluster_size"] for row in selection["scores"])
-    assert all(row["cluster_size_scope"] == "all_subregions" for row in selection["scores"])
+    assert all(
+        row["cluster_size_scope"] == "all_subregions" for row in selection["scores"]
+    )
     assert any(row["bootstrap_ari_mean"] is not None for row in selection["scores"])
 
 
@@ -297,7 +312,10 @@ def test_spot_latent_anchor_distance_reports_balanced_ot_fallback(monkeypatch) -
 
     assert distances.shape == (2, 2)
     assert diagnostics["requested_method"] == "balanced_ot"
-    assert diagnostics["effective_method"] == "balanced_ot_with_expected_cross_cost_fallback"
+    assert (
+        diagnostics["effective_method"]
+        == "balanced_ot_with_expected_cross_cost_fallback"
+    )
     assert diagnostics["fallback_fraction"] == 1.0
     assert diagnostics["fallback_matrix"][0, 1]
     assert diagnostics["solver_status_matrix"][0, 1] == 3
@@ -320,7 +338,9 @@ def test_spot_latent_auto_entropy_temperature_hits_target_range() -> None:
         base_temperature=0.1,
         mode="auto_entropy",
     )
-    posterior = weighted_atom_posteriors(total_cost, prototype_weights, temperature=temperature)
+    posterior = weighted_atom_posteriors(
+        total_cost, prototype_weights, temperature=temperature
+    )
     _entropy, normalized = _posterior_entropy(posterior)
 
     assert temperature > 0.0
@@ -354,7 +374,9 @@ def test_build_subregions_respects_min_cells() -> None:
     assert np.all(counts == 1)
 
 
-def test_feature_informed_subregion_construction_keeps_boundaries_data_driven(monkeypatch) -> None:
+def test_feature_informed_subregion_construction_keeps_boundaries_data_driven(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("SPATIAL_OT_SUBREGION_FEATURE_WEIGHT", "10.0")
     monkeypatch.setenv("SPATIAL_OT_SUBREGION_FEATURE_DIMS", "2")
     monkeypatch.setenv("SPATIAL_OT_SUBREGION_BOUNDARY_REFINEMENT_ITERS", "5")
@@ -418,17 +440,19 @@ def test_deep_graph_segmentation_subregions_cut_learned_affinity_boundaries() ->
     ).astype(np.float32)
     truth = np.repeat(np.array([0, 1], dtype=np.int32), [left.shape[0], right.shape[0]])
 
-    centers, members, basic_centers, basic_members, basic_ids = build_deep_graph_segmentation_subregions(
-        coords_um=coords,
-        segmentation_features=deep_embedding,
-        target_scale_um=1.0,
-        min_cells=20,
-        max_subregions=2,
-        segmentation_knn=8,
-        segmentation_feature_dims=2,
-        segmentation_feature_weight=5.0,
-        segmentation_spatial_weight=0.01,
-        seed=312,
+    centers, members, basic_centers, basic_members, basic_ids = (
+        build_deep_graph_segmentation_subregions(
+            coords_um=coords,
+            segmentation_features=deep_embedding,
+            target_scale_um=1.0,
+            min_cells=20,
+            max_subregions=2,
+            segmentation_knn=8,
+            segmentation_feature_dims=2,
+            segmentation_feature_weight=5.0,
+            segmentation_spatial_weight=0.01,
+            seed=312,
+        )
     )
 
     assert centers.shape[0] == len(members) == 2
@@ -455,17 +479,19 @@ def test_deep_graph_segmentation_keeps_fine_min_size_subregions() -> None:
         ]
     ).astype(np.float32)
 
-    centers, members, _basic_centers, _basic_members, _basic_ids = build_deep_graph_segmentation_subregions(
-        coords_um=coords,
-        segmentation_features=deep_embedding,
-        target_scale_um=1.0,
-        min_cells=10,
-        max_subregions=30,
-        segmentation_knn=8,
-        segmentation_feature_dims=2,
-        segmentation_feature_weight=1.0,
-        segmentation_spatial_weight=0.05,
-        seed=314,
+    centers, members, _basic_centers, _basic_members, _basic_ids = (
+        build_deep_graph_segmentation_subregions(
+            coords_um=coords,
+            segmentation_features=deep_embedding,
+            target_scale_um=1.0,
+            min_cells=10,
+            max_subregions=30,
+            segmentation_knn=8,
+            segmentation_feature_dims=2,
+            segmentation_feature_weight=1.0,
+            segmentation_spatial_weight=0.05,
+            seed=314,
+        )
     )
 
     counts = _cell_membership_counts(coords.shape[0], members)
@@ -526,17 +552,142 @@ def test_fit_multilevel_ot_uses_deep_graph_segmentation_mode() -> None:
     counts = _cell_membership_counts(coords.shape[0], result.subregion_members)
     assert np.all(counts == 1)
     assert all(len(member) >= 12 for member in result.subregion_members)
-    assert result.subregion_geometry_sources == ["observed_point_cloud"] * len(result.subregion_members)
+    assert result.subregion_geometry_sources == ["observed_point_cloud"] * len(
+        result.subregion_members
+    )
 
 
-def test_batched_gpu_helpers_mark_nonconverged_finite_solves_as_fallback(monkeypatch) -> None:
+def test_joint_refinement_preserves_partition_and_records_metadata() -> None:
+    rng = np.random.default_rng(315)
+    left = np.column_stack(
+        [
+            rng.normal(loc=-0.4, scale=0.12, size=50),
+            rng.normal(loc=0.0, scale=0.35, size=50),
+        ]
+    )
+    right = np.column_stack(
+        [
+            rng.normal(loc=0.4, scale=0.12, size=50),
+            rng.normal(loc=0.0, scale=0.35, size=50),
+        ]
+    )
+    coords = np.vstack([left, right]).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[-2.0, 0.0], scale=0.15, size=(50, 2)),
+            rng.normal(loc=[2.0, 0.0], scale=0.15, size=(50, 2)),
+        ]
+    ).astype(np.float32)
+
+    result = fit_multilevel_ot(
+        features=features,
+        coords_um=coords,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=1.0,
+        stride_um=1.0,
+        min_cells=15,
+        max_subregions=4,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=8,
+        align_iters=1,
+        allow_reflection=False,
+        allow_scale=False,
+        allow_convex_hull_fallback=False,
+        max_iter=1,
+        tol=1e-4,
+        basic_niche_size_um=1.0,
+        subregion_construction_method="joint_refinement",
+        deep_segmentation_knn=8,
+        deep_segmentation_feature_dims=2,
+        deep_segmentation_feature_weight=5.0,
+        deep_segmentation_spatial_weight=0.01,
+        joint_refinement_iters=1,
+        joint_refinement_knn=8,
+        joint_refinement_feature_dims=2,
+        joint_refinement_max_move_fraction=0.10,
+        compute_spot_latent=False,
+        seed=315,
+        compute_device="cpu",
+    )
+
+    counts = _cell_membership_counts(coords.shape[0], result.subregion_members)
+    assert np.all(counts == 1)
+    assert all(len(member) >= 15 for member in result.subregion_members)
+    metadata = result.subregion_latent_embedding_metadata["joint_refinement"]
+    assert metadata["enabled"] is True
+    assert metadata["applied"] is True
+    assert metadata["requires_connected_output"] is True
+    assert metadata["requires_min_cells"] is True
+
+
+def test_cluster_coherence_refinement_keeps_mutually_exclusive_connected_min_cell_regions() -> (
+    None
+):
+    rng = np.random.default_rng(316)
+    coords = np.vstack(
+        [
+            rng.normal(loc=[-1.0, 0.0], scale=0.18, size=(24, 2)),
+            rng.normal(loc=[0.0, 0.0], scale=0.18, size=(24, 2)),
+            rng.normal(loc=[1.0, 0.0], scale=0.18, size=(24, 2)),
+        ]
+    ).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[-2.0, 0.0], scale=0.1, size=(24, 2)),
+            rng.normal(loc=[0.0, 0.0], scale=0.1, size=(24, 2)),
+            rng.normal(loc=[2.0, 0.0], scale=0.1, size=(24, 2)),
+        ]
+    ).astype(np.float32)
+    members = [
+        np.arange(0, 24, dtype=np.int32),
+        np.arange(24, 48, dtype=np.int32),
+        np.arange(48, 72, dtype=np.int32),
+    ]
+
+    centers, refined_members, _ids, history = refine_subregions_by_cluster_coherence(
+        coords,
+        features,
+        members,
+        np.asarray([0, 1, 0], dtype=np.int32),
+        min_cells=12,
+        max_subregions=4,
+        target_scale_um=1.0,
+        n_iters=1,
+        n_neighbors=8,
+        max_move_fraction=0.05,
+        feature_dims=2,
+        seed=316,
+    )
+
+    assert centers.shape[0] == len(refined_members)
+    counts = _cell_membership_counts(coords.shape[0], refined_members)
+    assert np.all(counts == 1)
+    assert all(len(member) >= 12 for member in refined_members)
+    _validate_mutually_exclusive_memberships(
+        coords.shape[0], refined_members, require_full_coverage=True
+    )
+    assert history
+
+
+def test_batched_gpu_helpers_mark_nonconverged_finite_solves_as_fallback(
+    monkeypatch,
+) -> None:
     def fake_sinkhorn(a, beta, cost, eps, rho, *, num_iter, tol):
         del eps, rho, num_iter, tol
         gamma = a.unsqueeze(-1) * beta.unsqueeze(-2)
         objective = (gamma * cost).sum(dim=(-1, -2))
         return gamma, objective, False, 1.0
 
-    monkeypatch.setattr("spatial_ot.multilevel.core.sinkhorn_semirelaxed_unbalanced_log_torch", fake_sinkhorn)
+    monkeypatch.setattr(
+        "spatial_ot.multilevel.core.sinkhorn_semirelaxed_unbalanced_log_torch",
+        fake_sinkhorn,
+    )
     normalizer = ShapeNormalizer(center=np.zeros((1, 2)), scale=1.0, interpolator=None)
     diagnostics = ShapeNormalizerDiagnostics(
         geometry_source="polygon",
@@ -561,7 +712,9 @@ def test_batched_gpu_helpers_mark_nonconverged_finite_solves_as_fallback(monkeyp
             normalizer_diagnostics=diagnostics,
         )
     ]
-    atom_coords = np.array([[[0.0, 0.0], [1.0, 0.0]], [[0.0, 0.0], [0.0, 1.0]]], dtype=np.float32)
+    atom_coords = np.array(
+        [[[0.0, 0.0], [1.0, 0.0]], [[0.0, 0.0], [0.0, 1.0]]], dtype=np.float32
+    )
     atom_features = np.array([[[0.0], [1.0]], [[1.0], [0.0]]], dtype=np.float32)
     betas = np.full((2, 2), 0.5, dtype=np.float32)
 
@@ -628,7 +781,9 @@ def test_gpu_assignment_subregion_batch_size_can_be_env_capped(monkeypatch) -> N
     assert batch_size == 2
 
 
-def test_gpu_assignment_subregion_batch_size_accounts_for_measure_size(monkeypatch) -> None:
+def test_gpu_assignment_subregion_batch_size_accounts_for_measure_size(
+    monkeypatch,
+) -> None:
     monkeypatch.delenv("SPATIAL_OT_GPU_ASSIGNMENT_SUBREGION_BATCH_SIZE", raising=False)
     monkeypatch.setenv("SPATIAL_OT_CUDA_TARGET_VRAM_GB", "1")
     small = _gpu_assignment_subregion_batch_size(
@@ -685,14 +840,18 @@ def test_cell_cluster_feature_costs_match_manual_softmin_scores() -> None:
 
     expected = np.zeros_like(observed)
     for k in range(support_features.shape[0]):
-        dist = ((features[:, None, :] - support_features[k][None, :, :]) ** 2).sum(axis=-1)
+        dist = ((features[:, None, :] - support_features[k][None, :, :]) ** 2).sum(
+            axis=-1
+        )
         scores = np.exp(-dist / temperature) * prototype_weights[k][None, :]
         expected[:, k] = -temperature * np.log(np.maximum(scores.sum(axis=1), 1e-8))
 
     assert np.allclose(observed, expected, atol=1e-6)
 
 
-def test_subregion_embedding_fallback_handles_one_dimensional_weights(monkeypatch) -> None:
+def test_subregion_embedding_fallback_handles_one_dimensional_weights(
+    monkeypatch,
+) -> None:
     import builtins
 
     original_import = builtins.__import__
@@ -716,28 +875,38 @@ def test_subregion_embedding_fallback_handles_one_dimensional_weights(monkeypatc
 def test_composite_subregions_are_unions_of_basic_niches() -> None:
     xs, ys = np.meshgrid(np.arange(0.0, 600.0, 20.0), np.arange(0.0, 600.0, 20.0))
     coords = np.column_stack([xs.reshape(-1), ys.reshape(-1)]).astype(np.float32)
-    subregion_centers, subregion_members, basic_centers, basic_members, subregion_basic_niche_ids = (
-        build_composite_subregions_from_basic_niches(
-            coords_um=coords,
-            radius_um=240.0,
-            stride_um=200.0,
-            min_cells=5,
-            max_subregions=32,
-            basic_niche_size_um=200.0,
-        )
+    (
+        subregion_centers,
+        subregion_members,
+        basic_centers,
+        basic_members,
+        subregion_basic_niche_ids,
+    ) = build_composite_subregions_from_basic_niches(
+        coords_um=coords,
+        radius_um=240.0,
+        stride_um=200.0,
+        min_cells=5,
+        max_subregions=32,
+        basic_niche_size_um=200.0,
     )
     assert basic_centers.shape[0] >= 4
     assert len(subregion_members) == len(subregion_basic_niche_ids)
     assert len(subregion_members) == subregion_centers.shape[0]
-    for members, niche_ids in zip(subregion_members, subregion_basic_niche_ids, strict=False):
-        expected = np.unique(np.concatenate([basic_members[int(niche_id)] for niche_id in niche_ids.tolist()]))
+    for members, niche_ids in zip(
+        subregion_members, subregion_basic_niche_ids, strict=False
+    ):
+        expected = np.unique(
+            np.concatenate(
+                [basic_members[int(niche_id)] for niche_id in niche_ids.tolist()]
+            )
+        )
         assert np.array_equal(np.sort(members), np.sort(expected))
         assert len(niche_ids) >= 1
     counts = _cell_membership_counts(coords.shape[0], subregion_members)
     assert np.all(counts == 1)
 
 
-def test_composite_subregions_respect_max_area_constraint() -> None:
+def test_composite_subregions_treat_max_area_as_soft_qc_target() -> None:
     xs, ys = np.meshgrid(np.arange(0.0, 120.0, 5.0), np.arange(0.0, 120.0, 5.0))
     coords = np.column_stack([xs.reshape(-1), ys.reshape(-1)]).astype(np.float32)
     max_area = 500.0
@@ -755,13 +924,13 @@ def test_composite_subregions_respect_max_area_constraint() -> None:
     )
 
     shape_df = _shape_descriptor_frame(members, coords)
-    assert float(shape_df["shape_area"].max()) <= max_area * (1.0 + 1e-6)
+    assert float(shape_df["shape_area"].max()) > max_area
     assert all(member.size >= 10 for member in members)
     counts = _cell_membership_counts(coords.shape[0], members)
     assert np.all(counts == 1)
 
 
-def test_qc_warns_when_area_cap_breaks_min_cell_constraint() -> None:
+def test_qc_warns_when_min_cell_constraint_is_not_satisfied() -> None:
     warnings = build_qc_warnings(
         feature_embedding_warning=None,
         fallback_fraction=0.0,
@@ -778,31 +947,75 @@ def test_qc_warns_when_area_cap_breaks_min_cell_constraint() -> None:
         realized_subregion_statistics={
             "minimum_cell_constraint": 25,
             "minimum_cell_constraint_satisfied": False,
-            "maximum_area_constraint_um2": 500.0,
+            "maximum_area_qc_target_um2": 500.0,
             "n_cells": {"min": 1.0},
         },
     )
 
-    min_cell_warnings = [item for item in warnings if item["code"] == "minimum_cell_constraint_not_satisfied"]
+    min_cell_warnings = [
+        item
+        for item in warnings
+        if item["code"] == "minimum_cell_constraint_not_satisfied"
+    ]
     assert len(min_cell_warnings) == 1
     assert min_cell_warnings[0]["severity"] == "warning"
-    assert "maximum area cap takes precedence" in min_cell_warnings[0]["message"]
+    assert "minimum subregion size constraint" in min_cell_warnings[0]["message"]
+
+
+def test_qc_reports_soft_area_target_violations_without_hard_failure() -> None:
+    warnings = build_qc_warnings(
+        feature_embedding_warning=None,
+        fallback_fraction=0.0,
+        assigned_ot_fallback_fraction=0.0,
+        assigned_effective_eps_values=[],
+        requested_ot_eps=0.03,
+        coverage_fraction=1.0,
+        mean_assignment_margin=0.5,
+        assigned_transport_cost_decomposition={"geometry_transport_fraction": 0.0},
+        cost_reliability={},
+        transform_diagnostics={},
+        forced_label_fraction=0.0,
+        deep_summary={},
+        realized_subregion_statistics={
+            "minimum_cell_constraint": 25,
+            "minimum_cell_constraint_satisfied": True,
+            "maximum_area_qc_target_um2": 500.0,
+            "maximum_area_qc_target_violation_count": 3,
+        },
+    )
+
+    area_warnings = [
+        item
+        for item in warnings
+        if item["code"] == "soft_max_subregion_area_target_exceeded"
+    ]
+    assert len(area_warnings) == 1
+    assert area_warnings[0]["severity"] == "info"
+    assert "soft QC target" in area_warnings[0]["message"]
 
 
 def test_basic_niche_subregions_still_respect_min_cells() -> None:
-    dense_xs, dense_ys = np.meshgrid(np.arange(0.0, 120.0, 20.0), np.arange(0.0, 120.0, 20.0))
+    dense_xs, dense_ys = np.meshgrid(
+        np.arange(0.0, 120.0, 20.0), np.arange(0.0, 120.0, 20.0)
+    )
     sparse = np.array([[260.0, 0.0], [280.0, 0.0]], dtype=np.float32)
-    coords = np.vstack([np.column_stack([dense_xs.reshape(-1), dense_ys.reshape(-1)]), sparse]).astype(np.float32)
+    coords = np.vstack(
+        [np.column_stack([dense_xs.reshape(-1), dense_ys.reshape(-1)]), sparse]
+    ).astype(np.float32)
 
-    subregion_centers, subregion_members, basic_centers, basic_members, subregion_basic_niche_ids = (
-        build_composite_subregions_from_basic_niches(
-            coords_um=coords,
-            radius_um=100.0,
-            stride_um=200.0,
-            min_cells=5,
-            max_subregions=16,
-            basic_niche_size_um=200.0,
-        )
+    (
+        subregion_centers,
+        subregion_members,
+        basic_centers,
+        basic_members,
+        subregion_basic_niche_ids,
+    ) = build_composite_subregions_from_basic_niches(
+        coords_um=coords,
+        radius_um=100.0,
+        stride_um=200.0,
+        min_cells=5,
+        max_subregions=16,
+        basic_niche_size_um=200.0,
     )
     assert basic_centers.shape[0] >= 2
     assert any(len(members) < 5 for members in basic_members)
@@ -816,15 +1029,19 @@ def test_basic_niches_cover_all_cells_without_circle_gaps() -> None:
     xs, ys = np.meshgrid(np.arange(0.0, 150.0, 10.0), np.arange(0.0, 150.0, 10.0))
     coords = np.column_stack([xs.reshape(-1), ys.reshape(-1)]).astype(np.float32)
 
-    subregion_centers, subregion_members, basic_centers, basic_members, subregion_basic_niche_ids = (
-        build_composite_subregions_from_basic_niches(
-            coords_um=coords,
-            radius_um=100.0,
-            stride_um=100.0,
-            min_cells=1,
-            max_subregions=32,
-            basic_niche_size_um=50.0,
-        )
+    (
+        subregion_centers,
+        subregion_members,
+        basic_centers,
+        basic_members,
+        subregion_basic_niche_ids,
+    ) = build_composite_subregions_from_basic_niches(
+        coords_um=coords,
+        radius_um=100.0,
+        stride_um=100.0,
+        min_cells=1,
+        max_subregions=32,
+        basic_niche_size_um=50.0,
     )
 
     basic_covered = np.zeros(coords.shape[0], dtype=bool)
@@ -994,8 +1211,12 @@ def test_subregion_graph_metrics_use_primary_subregion_cell_labels() -> None:
 
     coords = np.vstack(
         [
-            np.column_stack([np.arange(7, dtype=np.float32), np.zeros(7, dtype=np.float32)]),
-            np.column_stack([100.0 + np.arange(7, dtype=np.float32), np.zeros(7, dtype=np.float32)]),
+            np.column_stack(
+                [np.arange(7, dtype=np.float32), np.zeros(7, dtype=np.float32)]
+            ),
+            np.column_stack(
+                [100.0 + np.arange(7, dtype=np.float32), np.zeros(7, dtype=np.float32)]
+            ),
         ]
     ).astype(np.float32)
     result = Result()
@@ -1005,7 +1226,9 @@ def test_subregion_graph_metrics_use_primary_subregion_cell_labels() -> None:
     ]
     result.subregion_centers_um = np.array([[3.0, 0.0], [103.0, 0.0]], dtype=np.float32)
     result.subregion_cluster_labels = np.array([0, 1], dtype=np.int32)
-    result.subregion_cluster_probs = np.array([[0.95, 0.05], [0.05, 0.95]], dtype=np.float32)
+    result.subregion_cluster_probs = np.array(
+        [[0.95, 0.05], [0.05, 0.95]], dtype=np.float32
+    )
     result.cell_cluster_labels = np.tile(np.array([0, 1], dtype=np.int32), 7)
 
     metrics = subregion_graph_metrics(
@@ -1042,10 +1265,16 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     cell_truth = []
     for group_idx, center in enumerate(group_centers):
         atoms = feature_atoms[int(true_group[group_idx])]
-        mix = np.array([0.75, 0.25], dtype=np.float32) if true_group[group_idx] == 0 else np.array([0.2, 0.8], dtype=np.float32)
+        mix = (
+            np.array([0.75, 0.25], dtype=np.float32)
+            if true_group[group_idx] == 0
+            else np.array([0.2, 0.8], dtype=np.float32)
+        )
         n_cells = 36
         atom_ids = rng.choice(2, size=n_cells, p=mix)
-        feat = atoms[atom_ids] + rng.normal(scale=0.08, size=(n_cells, 3)).astype(np.float32)
+        feat = atoms[atom_ids] + rng.normal(scale=0.08, size=(n_cells, 3)).astype(
+            np.float32
+        )
         xy = center + rng.normal(scale=1.0, size=(n_cells, 2)).astype(np.float32)
         coords.append(xy)
         features.append(feat)
@@ -1101,22 +1330,54 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     )
     assert result.cluster_atom_coords.shape == (2, 2, 2)
     assert result.cluster_atom_features.shape == (2, 2, 3)
-    assert result.subregion_assigned_effective_eps.shape[0] == len(result.subregion_members)
+    assert result.subregion_assigned_effective_eps.shape[0] == len(
+        result.subregion_members
+    )
     assert np.all(result.subregion_assigned_effective_eps > 0)
-    assert result.subregion_candidate_effective_eps_matrix.shape == result.subregion_cluster_costs.shape
-    assert result.subregion_candidate_used_ot_fallback_matrix.shape == result.subregion_cluster_costs.shape
-    assert result.subregion_cluster_transport_costs.shape == result.subregion_cluster_costs.shape
-    assert result.subregion_cluster_overlap_penalties.shape == result.subregion_cluster_costs.shape
+    assert (
+        result.subregion_candidate_effective_eps_matrix.shape
+        == result.subregion_cluster_costs.shape
+    )
+    assert (
+        result.subregion_candidate_used_ot_fallback_matrix.shape
+        == result.subregion_cluster_costs.shape
+    )
+    assert (
+        result.subregion_cluster_transport_costs.shape
+        == result.subregion_cluster_costs.shape
+    )
+    assert (
+        result.subregion_cluster_overlap_penalties.shape
+        == result.subregion_cluster_costs.shape
+    )
     assert result.subregion_measure_summaries.shape[0] == len(result.subregion_members)
-    assert result.subregion_assigned_geometry_transport_costs.shape[0] == len(result.subregion_members)
-    assert result.subregion_assigned_feature_transport_costs.shape[0] == len(result.subregion_members)
-    assert result.subregion_assigned_transform_penalties.shape[0] == len(result.subregion_members)
-    assert result.subregion_assigned_overlap_consistency_penalties.shape[0] == len(result.subregion_members)
-    assert result.subregion_assigned_transform_rotation_deg.shape[0] == len(result.subregion_members)
-    assert result.subregion_assigned_transform_reflection.shape[0] == len(result.subregion_members)
-    assert result.subregion_assigned_transform_scale.shape[0] == len(result.subregion_members)
-    assert result.subregion_assigned_transform_translation_norm.shape[0] == len(result.subregion_members)
-    expected_spot_occurrences = sum(len(members) for members in result.subregion_members)
+    assert result.subregion_assigned_geometry_transport_costs.shape[0] == len(
+        result.subregion_members
+    )
+    assert result.subregion_assigned_feature_transport_costs.shape[0] == len(
+        result.subregion_members
+    )
+    assert result.subregion_assigned_transform_penalties.shape[0] == len(
+        result.subregion_members
+    )
+    assert result.subregion_assigned_overlap_consistency_penalties.shape[0] == len(
+        result.subregion_members
+    )
+    assert result.subregion_assigned_transform_rotation_deg.shape[0] == len(
+        result.subregion_members
+    )
+    assert result.subregion_assigned_transform_reflection.shape[0] == len(
+        result.subregion_members
+    )
+    assert result.subregion_assigned_transform_scale.shape[0] == len(
+        result.subregion_members
+    )
+    assert result.subregion_assigned_transform_translation_norm.shape[0] == len(
+        result.subregion_members
+    )
+    expected_spot_occurrences = sum(
+        len(members) for members in result.subregion_members
+    )
     assert expected_spot_occurrences == features.shape[0]
     counts = _cell_membership_counts(features.shape[0], result.subregion_members)
     assert np.all(counts == 1)
@@ -1131,7 +1392,9 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     assert result.spot_latent_atom_posteriors.shape == (expected_spot_occurrences, 2)
     assert np.allclose(result.spot_latent_atom_posteriors.sum(axis=1), 1.0, atol=1e-5)
     assert result.spot_latent_posterior_entropy.shape == (expected_spot_occurrences,)
-    assert result.spot_latent_normalized_posterior_entropy.shape == (expected_spot_occurrences,)
+    assert result.spot_latent_normalized_posterior_entropy.shape == (
+        expected_spot_occurrences,
+    )
     assert result.spot_latent_atom_argmax.shape == (expected_spot_occurrences,)
     assert result.spot_latent_temperature_used.shape == (expected_spot_occurrences,)
     assert result.spot_latent_temperature_cost_gap.shape == (expected_spot_occurrences,)
@@ -1139,8 +1402,14 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     assert np.all(result.spot_latent_posterior_entropy >= -1e-6)
     assert np.all(result.spot_latent_temperature_used > 0.0)
     assert result.spot_latent_mode == "atom_barycentric_mds"
-    assert result.spot_latent_chart_learning_mode == "model_grounded_atom_distance_mds_without_fisher_labels"
-    assert result.spot_latent_projection_mode == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    assert (
+        result.spot_latent_chart_learning_mode
+        == "model_grounded_atom_distance_mds_without_fisher_labels"
+    )
+    assert (
+        result.spot_latent_projection_mode
+        == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    )
     assert result.spot_latent_temperature_mode == "auto_entropy"
     assert result.spot_latent_cluster_anchor_distance_method == "balanced_ot"
     assert result.spot_latent_cluster_anchor_distance_requested_method == "balanced_ot"
@@ -1164,14 +1433,19 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
         coords = result.spot_latent_coords[mask]
         center = coords.mean(axis=0)
         latent_centers.append(center)
-        within_radius.append(float(np.mean(np.linalg.norm(coords - center[None, :], axis=1))))
+        within_radius.append(
+            float(np.mean(np.linalg.norm(coords - center[None, :], axis=1)))
+        )
     latent_centers_arr = np.asarray(latent_centers, dtype=np.float32)
     if latent_centers_arr.shape[0] >= 2:
         between = float(np.linalg.norm(latent_centers_arr[0] - latent_centers_arr[1]))
         assert between > float(np.mean(within_radius))
     assert result.cell_spot_latent_coords.shape == (features.shape[0], 2)
     assert result.cell_spot_latent_unweighted_coords.shape == (features.shape[0], 2)
-    assert result.cell_spot_latent_confidence_weighted_coords.shape == (features.shape[0], 2)
+    assert result.cell_spot_latent_confidence_weighted_coords.shape == (
+        features.shape[0],
+        2,
+    )
     assert result.cell_spot_latent_cluster_labels.shape == (features.shape[0],)
     assert result.cell_spot_latent_weights.shape == (features.shape[0],)
     assert result.cell_spot_latent_posterior_entropy.shape == (features.shape[0],)
@@ -1183,14 +1457,18 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
         + result.subregion_assigned_feature_transport_costs
         + result.subregion_assigned_transform_penalties
     )
-    assigned_cost = result.subregion_cluster_costs[np.arange(result.subregion_cluster_labels.shape[0]), result.subregion_cluster_labels]
+    assigned_cost = result.subregion_cluster_costs[
+        np.arange(result.subregion_cluster_labels.shape[0]),
+        result.subregion_cluster_labels,
+    ]
     assigned_transport_cost = result.subregion_cluster_transport_costs[
         np.arange(result.subregion_cluster_labels.shape[0]),
         result.subregion_cluster_labels,
     ]
     assert np.all(reconstructed_transport_cost > 0.0)
     assert np.allclose(
-        result.subregion_cluster_transport_costs + result.subregion_cluster_overlap_penalties,
+        result.subregion_cluster_transport_costs
+        + result.subregion_cluster_overlap_penalties,
         result.subregion_cluster_costs,
         atol=1e-5,
     )
@@ -1198,22 +1476,38 @@ def test_multilevel_ot_recovers_two_subregion_families() -> None:
     assert np.all(assigned_transport_cost <= assigned_cost + 1e-4)
 
 
-def test_default_subregion_clustering_pools_feature_latents_without_spatial_labels() -> None:
+def test_default_subregion_clustering_pools_feature_latents_without_spatial_labels() -> (
+    None
+):
     rng = np.random.default_rng(2026)
     coords_parts = []
     feature_parts = []
     subregion_members = []
     start = 0
-    spatial_centers = [np.array([0.0, 0.0]), np.array([2.0, 0.0]), np.array([100.0, 0.0]), np.array([102.0, 0.0])]
-    feature_centers = [np.array([-3.0, 0.0]), np.array([3.0, 0.0]), np.array([-3.0, 0.0]), np.array([3.0, 0.0])]
-    for spatial_center, feature_center in zip(spatial_centers, feature_centers, strict=True):
+    spatial_centers = [
+        np.array([0.0, 0.0]),
+        np.array([2.0, 0.0]),
+        np.array([100.0, 0.0]),
+        np.array([102.0, 0.0]),
+    ]
+    feature_centers = [
+        np.array([-3.0, 0.0]),
+        np.array([3.0, 0.0]),
+        np.array([-3.0, 0.0]),
+        np.array([3.0, 0.0]),
+    ]
+    for spatial_center, feature_center in zip(
+        spatial_centers, feature_centers, strict=True
+    ):
         coords_parts.append(spatial_center + rng.normal(scale=0.15, size=(24, 2)))
         feature_parts.append(feature_center + rng.normal(scale=0.05, size=(24, 2)))
         subregion_members.append(np.arange(start, start + 24, dtype=np.int32))
         start += 24
     coords = np.vstack(coords_parts).astype(np.float32)
     features = np.vstack(feature_parts).astype(np.float32)
-    centers = np.vstack([coords[members].mean(axis=0) for members in subregion_members]).astype(np.float32)
+    centers = np.vstack(
+        [coords[members].mean(axis=0) for members in subregion_members]
+    ).astype(np.float32)
 
     result = fit_multilevel_ot(
         features=features,
@@ -1242,6 +1536,7 @@ def test_default_subregion_clustering_pools_feature_latents_without_spatial_labe
         basic_niche_size_um=None,
         min_subregions_per_cluster=2,
         compute_spot_latent=False,
+        subregion_clustering_method="pooled_subregion_latent",
         seed=2026,
         compute_device="cpu",
     )
@@ -1255,7 +1550,97 @@ def test_default_subregion_clustering_pools_feature_latents_without_spatial_labe
     assert labels[0] != labels[1]
 
 
-def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution() -> None:
+def test_internal_heterogeneity_embedding_separates_arrangement_not_composition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_GRID_SIZE", "4")
+    monkeypatch.setenv("SPATIAL_OT_HETEROGENEITY_MAX_CODEBOOK_SIZE", "2")
+    rng = np.random.default_rng(2028)
+
+    def make_measure(subregion_id: int, arrangement: str) -> SubregionMeasure:
+        if arrangement == "left_right":
+            coords_a = np.column_stack(
+                [
+                    rng.normal(-0.6, 0.04, size=16),
+                    rng.normal(0.0, 0.20, size=16),
+                ]
+            )
+            coords_b = np.column_stack(
+                [
+                    rng.normal(0.6, 0.04, size=16),
+                    rng.normal(0.0, 0.20, size=16),
+                ]
+            )
+        else:
+            coords_a = np.column_stack(
+                [
+                    rng.normal(0.0, 0.20, size=16),
+                    rng.normal(-0.6, 0.04, size=16),
+                ]
+            )
+            coords_b = np.column_stack(
+                [
+                    rng.normal(0.0, 0.20, size=16),
+                    rng.normal(0.6, 0.04, size=16),
+                ]
+            )
+        coords = np.vstack([coords_a, coords_b]).astype(np.float32)
+        features = np.vstack(
+            [
+                np.tile(np.array([1.0, 0.0], dtype=np.float32), (16, 1)),
+                np.tile(np.array([0.0, 1.0], dtype=np.float32), (16, 1)),
+            ]
+        )
+        return SubregionMeasure(
+            subregion_id=int(subregion_id),
+            center_um=np.zeros(2, dtype=np.float32),
+            members=np.arange(32, dtype=np.int32),
+            canonical_coords=coords,
+            features=features,
+            weights=np.full(32, 1.0 / 32.0, dtype=np.float32),
+            geometry_point_count=32,
+            compressed_point_count=32,
+            normalizer=ShapeNormalizer(
+                center=np.zeros((1, 2), dtype=np.float32),
+                scale=1.0,
+                interpolator=None,
+            ),
+            normalizer_diagnostics=ShapeNormalizerDiagnostics(
+                geometry_source="test",
+                used_fallback=False,
+                ot_cost=None,
+                sinkhorn_converged=None,
+                mapped_radius_p95=None,
+                mapped_radius_max=None,
+                interpolation_residual=None,
+            ),
+        )
+
+    measures = [
+        make_measure(0, "left_right"),
+        make_measure(1, "bottom_top"),
+        make_measure(2, "left_right"),
+        make_measure(3, "bottom_top"),
+    ]
+    embeddings, metadata = build_internal_heterogeneity_embeddings(
+        measures,
+        codebook_size=2,
+        codebook_sample_size=64,
+        random_state=2028,
+    )
+    assert metadata["mode"] == "heterogeneity_ot_niche"
+    assert metadata["uses_internal_canonical_coordinates"] is True
+    assert metadata["uses_pairwise_internal_spatial_graph"] is True
+    assert embeddings.shape[0] == 4
+
+    dist = np.linalg.norm(embeddings[:, None, :] - embeddings[None, :, :], axis=2)
+    assert dist[0, 2] < dist[0, 1]
+    assert dist[1, 3] < dist[1, 0]
+
+
+def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution() -> (
+    None
+):
     rng = np.random.default_rng(2027)
     coords_parts = []
     feature_parts = []
@@ -1274,13 +1659,19 @@ def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution()
         np.tile(np.array([[-6.0], [6.0]], dtype=np.float32), (16, 1)),
     ]
     for spatial_center, pattern in zip(spatial_centers, feature_patterns, strict=True):
-        coords_parts.append(spatial_center + rng.normal(scale=0.1, size=(pattern.shape[0], 2)))
+        coords_parts.append(
+            spatial_center + rng.normal(scale=0.1, size=(pattern.shape[0], 2))
+        )
         feature_parts.append(pattern)
-        subregion_members.append(np.arange(start, start + pattern.shape[0], dtype=np.int32))
+        subregion_members.append(
+            np.arange(start, start + pattern.shape[0], dtype=np.int32)
+        )
         start += pattern.shape[0]
     coords = np.vstack(coords_parts).astype(np.float32)
     features = np.vstack(feature_parts).astype(np.float32)
-    centers = np.vstack([coords[members].mean(axis=0) for members in subregion_members]).astype(np.float32)
+    centers = np.vstack(
+        [coords[members].mean(axis=0) for members in subregion_members]
+    ).astype(np.float32)
 
     result = fit_multilevel_ot(
         features=features,
@@ -1309,6 +1700,7 @@ def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution()
         basic_niche_size_um=None,
         min_subregions_per_cluster=2,
         compute_spot_latent=False,
+        subregion_clustering_method="pooled_subregion_latent",
         subregion_latent_embedding_mode="mean_std",
         seed=2027,
         compute_device="cpu",
@@ -1318,21 +1710,31 @@ def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution()
     assert result.subregion_clustering_method == "pooled_subregion_latent"
     assert result.subregion_clustering_uses_spatial is False
     assert result.subregion_latent_embeddings.shape == (4, 2)
-    standardized_features = ((features - features.mean(axis=0, keepdims=True)) / features.std(axis=0, keepdims=True)).astype(
-        np.float32
-    )
+    standardized_features = (
+        (features - features.mean(axis=0, keepdims=True))
+        / features.std(axis=0, keepdims=True)
+    ).astype(np.float32)
     expected_latents = []
     for members in subregion_members:
         values = standardized_features[members]
         expected_latents.append([float(values.mean()), float(values.std())])
-    assert np.allclose(result.subregion_latent_embeddings, np.asarray(expected_latents, dtype=np.float32), atol=1e-5)
-    assert result.subregion_latent_embeddings[1, 1] > result.subregion_latent_embeddings[0, 1]
+    assert np.allclose(
+        result.subregion_latent_embeddings,
+        np.asarray(expected_latents, dtype=np.float32),
+        atol=1e-5,
+    )
+    assert (
+        result.subregion_latent_embeddings[1, 1]
+        > result.subregion_latent_embeddings[0, 1]
+    )
     assert labels[0] == labels[2]
     assert labels[1] == labels[3]
     assert labels[0] != labels[1]
 
 
-def test_subregion_latent_embedding_modes_are_distributional_and_uncertainty_aware() -> None:
+def test_subregion_latent_embedding_modes_are_distributional_and_uncertainty_aware() -> (
+    None
+):
     features = np.asarray(
         [
             [-2.0, 0.0],
@@ -1349,7 +1751,9 @@ def test_subregion_latent_embedding_modes_are_distributional_and_uncertainty_awa
         np.asarray([3, 4, 5], dtype=np.int32),
     ]
 
-    mean_std = _build_subregion_latent_embeddings_from_members(features, members, mode="mean_std")
+    mean_std = _build_subregion_latent_embeddings_from_members(
+        features, members, mode="mean_std"
+    )
     shrunk = _build_subregion_latent_embeddings_from_members(
         features,
         members,
@@ -1373,7 +1777,9 @@ def test_subregion_latent_embedding_modes_are_distributional_and_uncertainty_awa
         mode="mean_std_skew_count",
         shrinkage_tau=25.0,
     )
-    quantile = _build_subregion_latent_embeddings_from_members(features, members, mode="mean_std_quantile")
+    quantile = _build_subregion_latent_embeddings_from_members(
+        features, members, mode="mean_std_quantile"
+    )
     codebook = _build_subregion_latent_embeddings_from_members(
         features,
         members,
@@ -1396,7 +1802,9 @@ def test_subregion_latent_embedding_modes_are_distributional_and_uncertainty_awa
     assert not np.allclose(shrunk, mean_std)
     assert sample_shrunk.shape == mean_std.shape
     assert bool(diagnostics["sample_aware_shrinkage"]) is True
-    assert np.allclose(diagnostics["shrinkage_alpha"], np.asarray([3 / 103, 3 / 103], dtype=np.float32))
+    assert np.allclose(
+        diagnostics["shrinkage_alpha"], np.asarray([3 / 103, 3 / 103], dtype=np.float32)
+    )
     assert list(diagnostics["sample_ids"]) == ["s1", "s2"]
     assert float(np.max(diagnostics["raw_to_shrunk_distance"])) > 0.0
     assert np.linalg.norm(sample_shrunk[:, 2:]) > np.linalg.norm(shrunk[:, 2:])
@@ -1453,10 +1861,14 @@ def test_generated_subregions_use_data_driven_geometry_without_hull_fallback() -
     assert set(result.subregion_geometry_sources) == {"observed_point_cloud"}
 
 
-def test_basic_niche_subregions_use_data_driven_geometry_without_hull_fallback() -> None:
+def test_basic_niche_subregions_use_data_driven_geometry_without_hull_fallback() -> (
+    None
+):
     xs, ys = np.meshgrid(np.arange(0.0, 150.0, 10.0), np.arange(0.0, 150.0, 10.0))
     coords = np.column_stack([xs.reshape(-1), ys.reshape(-1)]).astype(np.float32)
-    features = np.column_stack([coords[:, 0] / 50.0, coords[:, 1] / 50.0]).astype(np.float32)
+    features = np.column_stack([coords[:, 0] / 50.0, coords[:, 1] / 50.0]).astype(
+        np.float32
+    )
 
     result = fit_multilevel_ot(
         features=features,
@@ -1545,9 +1957,13 @@ def test_shape_leakage_diagnostic_runs() -> None:
     coords = np.vstack(
         [
             np.random.default_rng(0).normal(loc=[0.0, 0.0], scale=0.2, size=(30, 2)),
-            np.random.default_rng(1).normal(loc=[3.0, 0.0], scale=[1.2, 0.1], size=(30, 2)),
+            np.random.default_rng(1).normal(
+                loc=[3.0, 0.0], scale=[1.2, 0.1], size=(30, 2)
+            ),
             np.random.default_rng(2).normal(loc=[0.0, 3.0], scale=0.2, size=(30, 2)),
-            np.random.default_rng(3).normal(loc=[3.0, 3.0], scale=[1.2, 0.1], size=(30, 2)),
+            np.random.default_rng(3).normal(
+                loc=[3.0, 3.0], scale=[1.2, 0.1], size=(30, 2)
+            ),
         ]
     ).astype(np.float32)
     members = [
@@ -1603,7 +2019,9 @@ def test_cell_projection_boundary_uses_latent_geometry_not_subregion_centers() -
             weights=np.array([0.5, 0.5], dtype=np.float32),
             geometry_point_count=2,
             compressed_point_count=2,
-            normalizer=ShapeNormalizer(center=np.zeros((1, 2)), scale=1.0, interpolator=None),
+            normalizer=ShapeNormalizer(
+                center=np.zeros((1, 2)), scale=1.0, interpolator=None
+            ),
             normalizer_diagnostics=ShapeNormalizerDiagnostics(
                 geometry_source="test",
                 used_fallback=False,
@@ -1623,7 +2041,9 @@ def test_cell_projection_boundary_uses_latent_geometry_not_subregion_centers() -
             weights=np.array([0.5, 0.5], dtype=np.float32),
             geometry_point_count=2,
             compressed_point_count=2,
-            normalizer=ShapeNormalizer(center=np.zeros((1, 2)), scale=1.0, interpolator=None),
+            normalizer=ShapeNormalizer(
+                center=np.zeros((1, 2)), scale=1.0, interpolator=None
+            ),
             normalizer_diagnostics=ShapeNormalizerDiagnostics(
                 geometry_source="test",
                 used_fallback=False,
@@ -1696,7 +2116,11 @@ def test_initialize_cluster_atoms_respects_lambda_scaling() -> None:
         dtype=np.float32,
     )
     centers = np.array([[0.0, 0.0]], dtype=np.float32)
-    regions = [RegionGeometry(region_id="r0", members=np.arange(coords.shape[0], dtype=np.int32))]
+    regions = [
+        RegionGeometry(
+            region_id="r0", members=np.arange(coords.shape[0], dtype=np.int32)
+        )
+    ]
     q, w = make_reference_points_unit_disk(64)
     measures = _build_subregion_measures(
         features=features,
@@ -1743,7 +2167,9 @@ def test_sample_geometry_points_prefers_explicit_polygon_geometry() -> None:
             dtype=np.float32,
         ),
     )
-    observed = np.column_stack([np.linspace(0.0, 0.5, 10), np.linspace(0.0, 0.5, 10)]).astype(np.float32)
+    observed = np.column_stack(
+        [np.linspace(0.0, 0.5, 10), np.linspace(0.0, 0.5, 10)]
+    ).astype(np.float32)
     pts, source, used_fallback = sample_geometry_points(
         region,
         observed_coords=observed,
@@ -1775,7 +2201,10 @@ def test_build_subregion_measures_handles_singleton_subregions() -> None:
         dtype=np.float32,
     )
     centers = coords.copy()
-    regions = [RegionGeometry(region_id=f"r{i}", members=np.array([i], dtype=np.int32)) for i in range(coords.shape[0])]
+    regions = [
+        RegionGeometry(region_id=f"r{i}", members=np.array([i], dtype=np.int32))
+        for i in range(coords.shape[0])
+    ]
     q, w = make_reference_points_unit_disk(64)
 
     measures = _build_subregion_measures(
@@ -1847,17 +2276,22 @@ def test_returned_costs_match_returned_atoms() -> None:
         compute_device="cpu",
     )
     q, w = make_reference_points_unit_disk(64)
-    rebuilt_centers, rebuilt_members, _, _, _ = build_partition_subregions_from_grid_tiles(
-        coords_um=coords,
-        radius_um=10.0,
-        stride_um=12.0,
-        min_cells=15,
-        max_subregions=20,
-        partition_features=_standardize_features(features),
-        seed=7,
+    rebuilt_centers, rebuilt_members, _, _, _ = (
+        build_partition_subregions_from_grid_tiles(
+            coords_um=coords,
+            radius_um=10.0,
+            stride_um=12.0,
+            min_cells=15,
+            max_subregions=20,
+            partition_features=_standardize_features(features),
+            seed=7,
+        )
     )
     assert np.allclose(rebuilt_centers, result.subregion_centers_um)
-    assert all(np.array_equal(a, b) for a, b in zip(rebuilt_members, result.subregion_members, strict=False))
+    assert all(
+        np.array_equal(a, b)
+        for a, b in zip(rebuilt_members, result.subregion_members, strict=False)
+    )
     regions = _region_geometries_from_observed_points(result.subregion_members)
     measures = _build_subregion_measures(
         features=_standardize_features(features),
@@ -1895,37 +2329,47 @@ def test_returned_costs_match_returned_atoms() -> None:
         compute_device=torch.device("cpu"),
         return_diagnostics=True,
     )
-    recomputed, effective_eps_matrix, used_fallback_matrix = _stabilize_mixed_candidate_assignment_costs(
-        measures=measures,
-        atom_coords=result.cluster_atom_coords,
-        atom_features=result.cluster_atom_features,
-        betas=result.cluster_prototype_weights,
-        transport_costs=recomputed,
-        candidate_effective_eps_matrix=effective_eps_matrix,
-        candidate_used_fallback_matrix=used_fallback_matrix,
-        lambda_x=0.5,
-        lambda_y=1.0,
-        ot_eps=0.03,
-        rho=0.5,
-        align_iters=2,
-        allow_reflection=False,
-        allow_scale=False,
-        cost_scale_x=result.cost_scale_x,
-        cost_scale_y=result.cost_scale_y,
-        min_scale=0.75,
-        max_scale=1.33,
-        scale_penalty=0.05,
-        shift_penalty=0.05,
-        compute_device=torch.device("cpu"),
+    recomputed, effective_eps_matrix, used_fallback_matrix = (
+        _stabilize_mixed_candidate_assignment_costs(
+            measures=measures,
+            atom_coords=result.cluster_atom_coords,
+            atom_features=result.cluster_atom_features,
+            betas=result.cluster_prototype_weights,
+            transport_costs=recomputed,
+            candidate_effective_eps_matrix=effective_eps_matrix,
+            candidate_used_fallback_matrix=used_fallback_matrix,
+            lambda_x=0.5,
+            lambda_y=1.0,
+            ot_eps=0.03,
+            rho=0.5,
+            align_iters=2,
+            allow_reflection=False,
+            allow_scale=False,
+            cost_scale_x=result.cost_scale_x,
+            cost_scale_y=result.cost_scale_y,
+            min_scale=0.75,
+            max_scale=1.33,
+            scale_penalty=0.05,
+            shift_penalty=0.05,
+            compute_device=torch.device("cpu"),
+        )
     )
     assert recomputed.shape == result.subregion_cluster_costs.shape
     assert effective_eps_matrix.shape == recomputed.shape
     assert used_fallback_matrix.shape == recomputed.shape
-    assert np.array_equal(result.subregion_cluster_labels, result.subregion_cluster_costs.argmin(axis=1))
+    assert np.array_equal(
+        result.subregion_cluster_labels, result.subregion_cluster_costs.argmin(axis=1)
+    )
     assert np.allclose(recomputed, result.subregion_cluster_costs, atol=2e-3)
-    assert result.subregion_assigned_used_ot_fallback.shape[0] == len(result.subregion_members)
-    assert np.allclose(effective_eps_matrix, result.subregion_candidate_effective_eps_matrix)
-    assert np.array_equal(used_fallback_matrix, result.subregion_candidate_used_ot_fallback_matrix)
+    assert result.subregion_assigned_used_ot_fallback.shape[0] == len(
+        result.subregion_members
+    )
+    assert np.allclose(
+        effective_eps_matrix, result.subregion_candidate_effective_eps_matrix
+    )
+    assert np.array_equal(
+        used_fallback_matrix, result.subregion_candidate_used_ot_fallback_matrix
+    )
 
 
 def test_empty_mask_geometry_raises() -> None:
@@ -1950,13 +2394,18 @@ def test_empty_mask_geometry_raises() -> None:
 
 
 def test_fit_requires_explicit_fallback_flag_for_observed_hull_geometry() -> None:
-    coords = np.array([[0.0, 0.0], [0.5, 0.0], [0.0, 0.5], [5.0, 5.0], [5.5, 5.0], [5.0, 5.5]], dtype=np.float32)
+    coords = np.array(
+        [[0.0, 0.0], [0.5, 0.0], [0.0, 0.5], [5.0, 5.0], [5.5, 5.0], [5.0, 5.5]],
+        dtype=np.float32,
+    )
     features = np.array([[0.0], [0.0], [0.0], [1.0], [1.0], [1.0]], dtype=np.float32)
     subregion_members = [
         np.array([0, 1, 2], dtype=np.int32),
         np.array([3, 4, 5], dtype=np.int32),
     ]
-    subregion_centers = np.vstack([coords[members].mean(axis=0) for members in subregion_members]).astype(np.float32)
+    subregion_centers = np.vstack(
+        [coords[members].mean(axis=0) for members in subregion_members]
+    ).astype(np.float32)
     try:
         fit_multilevel_ot(
             features=features,
@@ -1988,7 +2437,9 @@ def test_fit_requires_explicit_fallback_flag_for_observed_hull_geometry() -> Non
     except ValueError:
         pass
     else:
-        raise AssertionError("Expected fit_multilevel_ot to require an explicit hull-fallback opt-in")
+        raise AssertionError(
+            "Expected fit_multilevel_ot to require an explicit hull-fallback opt-in"
+        )
 
 
 def test_explicit_subregions_respect_min_cells_filter() -> None:
@@ -2005,7 +2456,9 @@ def test_explicit_subregions_respect_min_cells_filter() -> None:
         ],
         dtype=np.float32,
     )
-    features = np.array([[0.0], [0.0], [0.0], [1.0], [1.0], [1.0], [2.0], [2.0]], dtype=np.float32)
+    features = np.array(
+        [[0.0], [0.0], [0.0], [1.0], [1.0], [1.0], [2.0], [2.0]], dtype=np.float32
+    )
     subregion_members = [
         np.array([0, 1, 2], dtype=np.int32),
         np.array([3, 4, 5], dtype=np.int32),
@@ -2093,13 +2546,18 @@ def test_fit_rejects_mismatched_explicit_subregion_centers() -> None:
 
 
 def test_shape_descriptor_frame_rejects_misaligned_geometries() -> None:
-    coords = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [5.0, 5.0], [6.0, 5.0], [5.0, 6.0]], dtype=np.float32)
+    coords = np.array(
+        [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [5.0, 5.0], [6.0, 5.0], [5.0, 6.0]],
+        dtype=np.float32,
+    )
     members = [np.array([0, 1, 2], dtype=np.int32), np.array([3, 4, 5], dtype=np.int32)]
     geometries = [
         RegionGeometry(
             region_id="r0",
             members=members[0],
-            polygon_vertices=np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+            polygon_vertices=np.array(
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32
+            ),
         )
     ]
     try:
@@ -2111,7 +2569,9 @@ def test_shape_descriptor_frame_rejects_misaligned_geometries() -> None:
 
 
 def test_fit_rejects_degenerate_zero_geometry_and_feature_weights() -> None:
-    coords = np.array([[0.0, 0.0], [0.1, 0.0], [3.0, 3.0], [3.1, 3.0]], dtype=np.float32)
+    coords = np.array(
+        [[0.0, 0.0], [0.1, 0.0], [3.0, 3.0], [3.1, 3.0]], dtype=np.float32
+    )
     features = np.array([[0.0], [0.0], [1.0], [1.0]], dtype=np.float32)
     try:
         fit_multilevel_ot(
@@ -2165,7 +2625,9 @@ def test_multilevel_ot_cuda_smoke_if_available() -> None:
         np.arange(0, 12, dtype=np.int32),
         np.arange(12, 24, dtype=np.int32),
     ]
-    subregion_centers = np.vstack([coords[m].mean(axis=0) for m in subregion_members]).astype(np.float32)
+    subregion_centers = np.vstack(
+        [coords[m].mean(axis=0) for m in subregion_members]
+    ).astype(np.float32)
     result = fit_multilevel_ot(
         features=features,
         coords_um=coords,
@@ -2202,7 +2664,9 @@ def test_weighted_similarity_fit_no_reflection_keeps_positive_determinant() -> N
     x = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 2.0]], dtype=np.float64)
     y = np.array([[0.0, 0.0], [-1.0, 0.0], [0.0, 2.0]], dtype=np.float64)
     w = np.array([0.2, 0.4, 0.4], dtype=np.float64)
-    transform = weighted_similarity_fit(x, y, w, allow_reflection=False, allow_scale=True)
+    transform = weighted_similarity_fit(
+        x, y, w, allow_reflection=False, allow_scale=True
+    )
     assert np.linalg.det(transform["R"]) > 0
     assert transform["scale"] > 0
 

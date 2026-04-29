@@ -37,9 +37,11 @@ from .geometry import (
     build_composite_subregions_from_basic_niches,
     fit_ot_shape_normalizer,
     make_reference_points_unit_disk,
+    refine_subregions_by_cluster_coherence,
     sample_geometry_points,
 )
 from .gpu_ot import sinkhorn_semirelaxed_unbalanced_log_torch
+from .heterogeneity import build_internal_heterogeneity_embeddings
 from .model_selection import (
     comprehensive_select_k_from_latent_embeddings,
     effective_min_cluster_size,
@@ -49,9 +51,18 @@ from .model_selection import (
     select_k_from_ot_landmark_costs,
 )
 from .numerics import pairwise_sqdist_array as _pairwise_sqdist_array
-from .spot_latent import compute_spot_level_latent_charts, empty_spot_level_latent_charts
+from .spot_latent import (
+    compute_spot_level_latent_charts,
+    empty_spot_level_latent_charts,
+)
 from .transforms import apply_similarity
-from .types import MultilevelOTResult, OTSolveDiagnostics, OptimizationMeasure, RegionGeometry, SubregionMeasure
+from .types import (
+    MultilevelOTResult,
+    OTSolveDiagnostics,
+    OptimizationMeasure,
+    RegionGeometry,
+    SubregionMeasure,
+)
 
 
 _RESTART_WORKER_MEASURES: list[OptimizationMeasure] | None = None
@@ -95,7 +106,9 @@ def _env_bool(name: str, default: bool) -> bool:
     return bool(default)
 
 
-def _make_optimization_measures(measures: list[SubregionMeasure]) -> list[OptimizationMeasure]:
+def _make_optimization_measures(
+    measures: list[SubregionMeasure],
+) -> list[OptimizationMeasure]:
     return [
         OptimizationMeasure(
             subregion_id=int(measure.subregion_id),
@@ -121,10 +134,17 @@ def _build_overlap_consistency_graph(
             np.zeros(0, dtype=np.int32),
             np.zeros(0, dtype=np.float32),
         )
-    rows = np.concatenate([np.asarray(measure.members, dtype=np.int64) for measure in measures], dtype=np.int64)
+    rows = np.concatenate(
+        [np.asarray(measure.members, dtype=np.int64) for measure in measures],
+        dtype=np.int64,
+    )
     cols = np.concatenate(
         [
-            np.full(np.asarray(measure.members, dtype=np.int64).shape[0], rid, dtype=np.int64)
+            np.full(
+                np.asarray(measure.members, dtype=np.int64).shape[0],
+                rid,
+                dtype=np.int64,
+            )
             for rid, measure in enumerate(measures)
         ],
         dtype=np.int64,
@@ -142,12 +162,16 @@ def _build_overlap_consistency_graph(
         dtype=np.int8,
     )
     overlap = (incidence.T @ incidence).tocoo()
-    member_sizes = np.asarray([len(measure.members) for measure in measures], dtype=np.int64)
+    member_sizes = np.asarray(
+        [len(measure.members) for measure in measures], dtype=np.int64
+    )
     summary_arr = np.asarray(summaries, dtype=np.float32)
     edge_i: list[int] = []
     edge_j: list[int] = []
     edge_weight: list[float] = []
-    for i, j, intersection in zip(overlap.row.tolist(), overlap.col.tolist(), overlap.data.tolist(), strict=False):
+    for i, j, intersection in zip(
+        overlap.row.tolist(), overlap.col.tolist(), overlap.data.tolist(), strict=False
+    ):
         if int(i) >= int(j) or int(intersection) <= 0:
             continue
         union = int(member_sizes[int(i)] + member_sizes[int(j)] - int(intersection))
@@ -157,7 +181,11 @@ def _build_overlap_consistency_graph(
         if jaccard < float(min_jaccard):
             continue
         weight = jaccard
-        if summary_arr.ndim == 2 and summary_arr.shape[0] == n_subregions and summary_arr.shape[1] > 0:
+        if (
+            summary_arr.ndim == 2
+            and summary_arr.shape[0] == n_subregions
+            and summary_arr.shape[1] > 0
+        ):
             contrast = float(np.linalg.norm(summary_arr[int(i)] - summary_arr[int(j)]))
             weight *= float(np.exp(-contrast / max(float(contrast_scale), 1e-6)))
         if weight <= 0:
@@ -184,7 +212,9 @@ def _compute_overlap_penalty_matrix(
         return np.zeros((n_subregions, n_clusters), dtype=np.float32)
     penalty = np.zeros((n_subregions, n_clusters), dtype=np.float64)
     norm = np.zeros(n_subregions, dtype=np.float64)
-    for i, j, weight in zip(edge_i.tolist(), edge_j.tolist(), edge_weight.tolist(), strict=False):
+    for i, j, weight in zip(
+        edge_i.tolist(), edge_j.tolist(), edge_weight.tolist(), strict=False
+    ):
         w = float(weight)
         penalty[int(i)] += w * (1.0 - probs_arr[int(j)])
         penalty[int(j)] += w * (1.0 - probs_arr[int(i)])
@@ -217,7 +247,9 @@ def _apply_overlap_consistency_regularization(
         np.asarray(edge_weight, dtype=np.float32),
     )
     weighted_penalties = float(overlap_consistency_weight) * penalties
-    return (costs + weighted_penalties).astype(np.float32), weighted_penalties.astype(np.float32)
+    return (costs + weighted_penalties).astype(np.float32), weighted_penalties.astype(
+        np.float32
+    )
 
 
 def _init_restart_worker(
@@ -235,7 +267,11 @@ def _init_restart_worker(
 
 
 def _run_restart_worker(run: int, compute_device: str) -> dict[str, object]:
-    if _RESTART_WORKER_MEASURES is None or _RESTART_WORKER_SUMMARIES is None or _RESTART_WORKER_PARAMS is None:
+    if (
+        _RESTART_WORKER_MEASURES is None
+        or _RESTART_WORKER_SUMMARIES is None
+        or _RESTART_WORKER_PARAMS is None
+    ):
         raise RuntimeError("Restart worker was not initialized.")
     return _execute_restart(
         measures=_RESTART_WORKER_MEASURES,
@@ -262,18 +298,26 @@ def _cluster_cost_matrix(
     y_t: torch.Tensor | None = None,
 ) -> np.ndarray | torch.Tensor:
     if compute_device.type == "cpu":
-        cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(cost_scale_x, 1e-12)
+        cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(
+            cost_scale_x, 1e-12
+        )
         cy = ot.dist(y, atom_features, metric="sqeuclidean") / max(cost_scale_y, 1e-12)
         return lambda_x * cx + lambda_y * cy
 
     u_aligned_t = torch.as_tensor(u_aligned, dtype=torch.float64, device=compute_device)
     if atom_coords_t is None:
-        atom_coords_t = torch.as_tensor(atom_coords, dtype=torch.float64, device=compute_device)
+        atom_coords_t = torch.as_tensor(
+            atom_coords, dtype=torch.float64, device=compute_device
+        )
     if atom_features_t is None:
-        atom_features_t = torch.as_tensor(atom_features, dtype=torch.float64, device=compute_device)
+        atom_features_t = torch.as_tensor(
+            atom_features, dtype=torch.float64, device=compute_device
+        )
     if y_t is None:
         y_t = torch.as_tensor(y, dtype=torch.float64, device=compute_device)
-    cx_t = torch.cdist(u_aligned_t, atom_coords_t, p=2).pow(2) / max(cost_scale_x, 1e-12)
+    cx_t = torch.cdist(u_aligned_t, atom_coords_t, p=2).pow(2) / max(
+        cost_scale_x, 1e-12
+    )
     cy_t = torch.cdist(y_t, atom_features_t, p=2).pow(2) / max(cost_scale_y, 1e-12)
     return float(lambda_x) * cx_t + float(lambda_y) * cy_t
 
@@ -289,9 +333,15 @@ def _compress_measure(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     n = canonical_coords.shape[0]
     if n <= m:
-        return canonical_coords.astype(np.float32), features.astype(np.float32), _normalize_hist(weights).astype(np.float32)
+        return (
+            canonical_coords.astype(np.float32),
+            features.astype(np.float32),
+            _normalize_hist(weights).astype(np.float32),
+        )
 
-    z = np.hstack([np.sqrt(lambda_x) * canonical_coords, np.sqrt(lambda_y) * features]).astype(np.float32)
+    z = np.hstack(
+        [np.sqrt(lambda_x) * canonical_coords, np.sqrt(lambda_y) * features]
+    ).astype(np.float32)
     km = MiniBatchKMeans(
         n_clusters=m,
         random_state=random_state,
@@ -313,7 +363,11 @@ def _compress_measure(
         y_centers[j] = (weights[mask, None] * features[mask]).sum(axis=0) / norm
     keep = a_centers > 1e-12
     if not np.any(keep):
-        return canonical_coords[:m].astype(np.float32), features[:m].astype(np.float32), _normalize_hist(weights[:m]).astype(np.float32)
+        return (
+            canonical_coords[:m].astype(np.float32),
+            features[:m].astype(np.float32),
+            _normalize_hist(weights[:m]).astype(np.float32),
+        )
     return (
         u_centers[keep].astype(np.float32),
         y_centers[keep].astype(np.float32),
@@ -342,7 +396,9 @@ def _build_subregion_measures(
         members = np.asarray(region.members, dtype=np.int32)
         local_coords = np.asarray(coords_um[members], dtype=np.float32)
         local_features = np.asarray(features[members], dtype=np.float32)
-        weights = np.full(local_coords.shape[0], 1.0 / max(local_coords.shape[0], 1), dtype=np.float32)
+        weights = np.full(
+            local_coords.shape[0], 1.0 / max(local_coords.shape[0], 1), dtype=np.float32
+        )
         geom_points, geometry_source, used_fallback = sample_geometry_points(
             region,
             observed_coords=local_coords,
@@ -463,25 +519,35 @@ def _feature_distribution_latent_embedding(
         global_var = np.maximum(y.var(axis=0, dtype=np.float64), 0.0)
         alpha = float(y.shape[0]) / (float(y.shape[0]) + tau)
         shrunk_mean = alpha * mean + (1.0 - alpha) * global_mean
-        mixed_var = (
-            alpha * (var + (mean - shrunk_mean) ** 2)
-            + (1.0 - alpha) * (global_var + (global_mean - shrunk_mean) ** 2)
+        mixed_var = alpha * (var + (mean - shrunk_mean) ** 2) + (1.0 - alpha) * (
+            global_var + (global_mean - shrunk_mean) ** 2
         )
         return np.hstack(
             [shrunk_mean, h_weight * np.sqrt(np.maximum(mixed_var, 0.0))]
         ).astype(np.float32)
     if normalized_mode == "mean_std_skew_count":
-        skew = np.average(centered * centered * centered, axis=0, weights=weights_arr) / np.maximum(std, 1e-8) ** 3
-        reliability = float(y.shape[0]) / (float(y.shape[0]) + max(float(shrinkage_tau), 1e-8))
-        return np.hstack([mean, std, skew, [np.log1p(float(y.shape[0])), reliability]]).astype(np.float32)
+        skew = (
+            np.average(centered * centered * centered, axis=0, weights=weights_arr)
+            / np.maximum(std, 1e-8) ** 3
+        )
+        reliability = float(y.shape[0]) / (
+            float(y.shape[0]) + max(float(shrinkage_tau), 1e-8)
+        )
+        return np.hstack(
+            [mean, std, skew, [np.log1p(float(y.shape[0])), reliability]]
+        ).astype(np.float32)
     if normalized_mode == "mean_std_quantile":
         quantiles = np.quantile(y, [0.10, 0.25, 0.50, 0.75, 0.90], axis=0)
         return np.hstack([mean, std, quantiles.reshape(-1)]).astype(np.float32)
-    raise ValueError(f"Mode '{normalized_mode}' is not supported for a single compressed measure embedding.")
+    raise ValueError(
+        f"Mode '{normalized_mode}' is not supported for a single compressed measure embedding."
+    )
 
 
 def _measure_feature_latent_embedding(measure: SubregionMeasure) -> np.ndarray:
-    return _feature_distribution_latent_embedding(measure.features, measure.weights, mode="mean_std")
+    return _feature_distribution_latent_embedding(
+        measure.features, measure.weights, mode="mean_std"
+    )
 
 
 def _member_feature_latent_embedding(
@@ -503,6 +569,23 @@ def _member_feature_latent_embedding(
     )
 
 
+def _subregion_sample_ids_from_members(
+    sample_ids: np.ndarray | None,
+    subregion_members: list[np.ndarray],
+) -> np.ndarray:
+    if sample_ids is None:
+        return np.full(len(subregion_members), "cohort", dtype=object)
+    sample_values = np.asarray(sample_ids).astype(str)
+    out = np.full(len(subregion_members), "cohort", dtype=object)
+    for rid, members in enumerate(subregion_members):
+        member_idx = np.asarray(members, dtype=np.int64)
+        if member_idx.size == 0:
+            continue
+        values, counts = np.unique(sample_values[member_idx], return_counts=True)
+        out[int(rid)] = str(values[int(np.argmax(counts))]) if values.size else "cohort"
+    return out
+
+
 def _soft_codebook_histogram_embeddings(
     features: np.ndarray,
     region_ids: np.ndarray,
@@ -522,7 +605,9 @@ def _soft_codebook_histogram_embeddings(
     hist = np.zeros((int(n_regions), int(n_codes)), dtype=np.float32)
     rng = np.random.default_rng(int(random_state))
     sample_size = min(max(int(codebook_sample_size), n_codes), int(x.shape[0]))
-    sample_idx = np.sort(rng.choice(int(x.shape[0]), size=sample_size, replace=False).astype(np.int64))
+    sample_idx = np.sort(
+        rng.choice(int(x.shape[0]), size=sample_size, replace=False).astype(np.int64)
+    )
     sample = x[sample_idx].astype(np.float64, copy=False)
     center = np.mean(sample, axis=0, dtype=np.float64)
     scale = np.std(sample, axis=0, dtype=np.float64)
@@ -542,21 +627,37 @@ def _soft_codebook_histogram_embeddings(
     model.fit(sample_z)
     centers = np.asarray(model.cluster_centers_, dtype=np.float32)
     sample_d2 = _pairwise_sqdist_array(sample_z, centers, device=torch.device("cpu"))
-    nearest_sample_d2 = np.min(sample_d2, axis=1) if sample_d2.size else np.zeros(0, dtype=np.float32)
-    positive = nearest_sample_d2[np.isfinite(nearest_sample_d2) & (nearest_sample_d2 > 1e-8)]
+    nearest_sample_d2 = (
+        np.min(sample_d2, axis=1) if sample_d2.size else np.zeros(0, dtype=np.float32)
+    )
+    positive = nearest_sample_d2[
+        np.isfinite(nearest_sample_d2) & (nearest_sample_d2 > 1e-8)
+    ]
     temperature = float(np.median(positive)) if positive.size else 1.0
     temperature = max(temperature, 1e-4)
-    chunk_size = max(4096, min(32768, int(os.environ.get("SPATIAL_OT_CODEBOOK_ASSIGNMENT_CHUNK_SIZE", "32768"))))
+    chunk_size = max(
+        4096,
+        min(
+            32768,
+            int(os.environ.get("SPATIAL_OT_CODEBOOK_ASSIGNMENT_CHUNK_SIZE", "32768")),
+        ),
+    )
     for start in range(0, int(x.shape[0]), chunk_size):
         stop = min(start + chunk_size, int(x.shape[0]))
-        chunk_z = ((x[start:stop].astype(np.float64, copy=False) - center[None, :]) / scale[None, :]).astype(np.float32)
+        chunk_z = (
+            (x[start:stop].astype(np.float64, copy=False) - center[None, :])
+            / scale[None, :]
+        ).astype(np.float32)
         d2 = _pairwise_sqdist_array(chunk_z, centers, device=torch.device("cpu"))
         logits = -d2 / temperature
         logits -= np.max(logits, axis=1, keepdims=True)
         probs = np.exp(logits).astype(np.float32)
         probs /= np.maximum(np.sum(probs, axis=1, keepdims=True), 1e-8)
         np.add.at(hist, region_arr[start:stop], probs)
-    denom = np.maximum(np.bincount(region_arr, minlength=int(n_regions)).astype(np.float32)[:, None], 1.0)
+    denom = np.maximum(
+        np.bincount(region_arr, minlength=int(n_regions)).astype(np.float32)[:, None],
+        1.0,
+    )
     return (hist / denom).astype(np.float32)
 
 
@@ -576,10 +677,24 @@ def _subregion_latent_embedding_metadata(
     blocks_by_mode = {
         "mean_std": ["feature_mean", "feature_std"],
         "mean_std_shrunk": ["shrunk_feature_mean", "shrunk_feature_std"],
-        "mean_std_skew_count": ["feature_mean", "feature_std", "feature_skew", "log1p_cell_count", "reliability_weight"],
-        "mean_std_quantile": ["feature_mean", "feature_std", "feature_quantiles_q10_q25_q50_q75_q90"],
+        "mean_std_skew_count": [
+            "feature_mean",
+            "feature_std",
+            "feature_skew",
+            "log1p_cell_count",
+            "reliability_weight",
+        ],
+        "mean_std_quantile": [
+            "feature_mean",
+            "feature_std",
+            "feature_quantiles_q10_q25_q50_q75_q90",
+        ],
         "codebook_histogram": ["soft_whitened_cell_state_codebook_histogram"],
-        "mean_std_codebook": ["shrunk_feature_mean", "shrunk_feature_std", "soft_whitened_cell_state_codebook_histogram"],
+        "mean_std_codebook": [
+            "shrunk_feature_mean",
+            "shrunk_feature_std",
+            "soft_whitened_cell_state_codebook_histogram",
+        ],
     }
     return {
         "mode": normalized,
@@ -587,7 +702,9 @@ def _subregion_latent_embedding_metadata(
         "embedding_dim": int(embedding_dim),
         "shrinkage_tau": float(shrinkage_tau),
         "sample_prior_weight": float(sample_prior_weight),
-        "cohort_prior_weight": float(1.0 - np.clip(float(sample_prior_weight), 0.0, 1.0)),
+        "cohort_prior_weight": float(
+            1.0 - np.clip(float(sample_prior_weight), 0.0, 1.0)
+        ),
         "sample_aware_shrinkage": bool(sample_aware_shrinkage),
         "codebook_size": int(codebook_size),
         "codebook_sample_size": int(codebook_sample_size),
@@ -669,7 +786,9 @@ def _build_subregion_latent_embeddings_from_members(
         sample_values = np.asarray(sample_ids)
         if sample_values.shape[0] != x.shape[0]:
             raise ValueError("sample_ids must have one entry per feature row.")
-        sample_names, sample_codes = np.unique(sample_values.astype(str), return_inverse=True)
+        sample_names, sample_codes = np.unique(
+            sample_values.astype(str), return_inverse=True
+        )
         sample_codes = sample_codes.astype(np.int32, copy=False)
     labels = np.full(int(x.shape[0]), -1, dtype=np.int32)
     for rid, members in enumerate(subregion_members):
@@ -696,7 +815,10 @@ def _build_subregion_latent_embeddings_from_members(
             dim = int(x.shape[1]) * 2 + max(int(codebook_size), 2)
         else:
             dim = int(x.shape[1]) * 2
-        return _finish(np.zeros((n_regions, dim), dtype=np.float32), subregion_sample_ids=subregion_sample_ids)
+        return _finish(
+            np.zeros((n_regions, dim), dtype=np.float32),
+            subregion_sample_ids=subregion_sample_ids,
+        )
     region_ids = labels[valid].astype(np.int64, copy=False)
     counts = np.bincount(region_ids, minlength=n_regions).astype(np.float64)
     sums = np.zeros((n_regions, int(x.shape[1])), dtype=np.float64)
@@ -705,7 +827,9 @@ def _build_subregion_latent_embeddings_from_members(
     for dim in range(int(x.shape[1])):
         col = values[:, dim]
         sums[:, dim] = np.bincount(region_ids, weights=col, minlength=n_regions)
-        sums_sq[:, dim] = np.bincount(region_ids, weights=col * col, minlength=n_regions)
+        sums_sq[:, dim] = np.bincount(
+            region_ids, weights=col * col, minlength=n_regions
+        )
     denom = np.maximum(counts[:, None], 1.0)
     mean = sums / denom
     var = np.maximum(sums_sq / denom - mean * mean, 0.0)
@@ -723,9 +847,15 @@ def _build_subregion_latent_embeddings_from_members(
             global_var = np.maximum(np.var(values, axis=0, dtype=np.float64), 0.0)
             prior_mean = np.broadcast_to(global_mean[None, :], mean.shape).copy()
             prior_var = np.broadcast_to(global_var[None, :], var.shape).copy()
-            if sample_codes is not None and sample_names.size > 1 and sample_prior_weight > 0.0:
+            if (
+                sample_codes is not None
+                and sample_names.size > 1
+                and sample_prior_weight > 0.0
+            ):
                 valid_sample_codes = sample_codes[valid]
-                sample_mean = np.zeros((int(sample_names.size), int(x.shape[1])), dtype=np.float64)
+                sample_mean = np.zeros(
+                    (int(sample_names.size), int(x.shape[1])), dtype=np.float64
+                )
                 sample_var = np.zeros_like(sample_mean)
                 for sample_code in range(int(sample_names.size)):
                     sample_mask = valid_sample_codes == int(sample_code)
@@ -734,26 +864,32 @@ def _build_subregion_latent_embeddings_from_members(
                         sample_var[sample_code] = global_var
                         continue
                     sample_values = values[sample_mask]
-                    sample_mean[sample_code] = np.mean(sample_values, axis=0, dtype=np.float64)
-                    sample_var[sample_code] = np.maximum(np.var(sample_values, axis=0, dtype=np.float64), 0.0)
+                    sample_mean[sample_code] = np.mean(
+                        sample_values, axis=0, dtype=np.float64
+                    )
+                    sample_var[sample_code] = np.maximum(
+                        np.var(sample_values, axis=0, dtype=np.float64), 0.0
+                    )
                 valid_region_samples = subregion_sample_codes >= 0
                 if np.any(valid_region_samples):
                     sm = sample_mean[subregion_sample_codes[valid_region_samples]]
                     sv = sample_var[subregion_sample_codes[valid_region_samples]]
-                    blended_mean = sample_prior_weight * sm + (1.0 - sample_prior_weight) * global_mean[None, :]
-                    blended_var = (
-                        sample_prior_weight * (sv + (sm - blended_mean) ** 2)
-                        + (1.0 - sample_prior_weight)
-                        * (global_var[None, :] + (global_mean[None, :] - blended_mean) ** 2)
+                    blended_mean = (
+                        sample_prior_weight * sm
+                        + (1.0 - sample_prior_weight) * global_mean[None, :]
+                    )
+                    blended_var = sample_prior_weight * (
+                        sv + (sm - blended_mean) ** 2
+                    ) + (1.0 - sample_prior_weight) * (
+                        global_var[None, :] + (global_mean[None, :] - blended_mean) ** 2
                     )
                     prior_mean[valid_region_samples] = blended_mean
                     prior_var[valid_region_samples] = np.maximum(blended_var, 0.0)
                     sample_aware = True
             alpha = (counts / np.maximum(counts + tau, 1e-8))[:, None]
             shrunk_mean = alpha * mean + (1.0 - alpha) * prior_mean
-            mixed_var = (
-                alpha * (var + (mean - shrunk_mean) ** 2)
-                + (1.0 - alpha) * (prior_var + (prior_mean - shrunk_mean) ** 2)
+            mixed_var = alpha * (var + (mean - shrunk_mean) ** 2) + (1.0 - alpha) * (
+                prior_var + (prior_mean - shrunk_mean) ** 2
             )
             base = np.hstack(
                 [shrunk_mean, h_weight * np.sqrt(np.maximum(mixed_var, 0.0))]
@@ -778,23 +914,39 @@ def _build_subregion_latent_embeddings_from_members(
         sums_cu = np.zeros_like(sums)
         for dim in range(int(x.shape[1])):
             col = values[:, dim]
-            sums_cu[:, dim] = np.bincount(region_ids, weights=col * col * col, minlength=n_regions)
+            sums_cu[:, dim] = np.bincount(
+                region_ids, weights=col * col * col, minlength=n_regions
+            )
         raw_third = sums_cu / denom
-        central_third = raw_third - 3.0 * mean * (sums_sq / denom) + 2.0 * mean * mean * mean
+        central_third = (
+            raw_third - 3.0 * mean * (sums_sq / denom) + 2.0 * mean * mean * mean
+        )
         skew = central_third / np.maximum(std, 1e-8) ** 3
-        reliability = (counts / np.maximum(counts + max(float(shrinkage_tau), 1e-8), 1e-8))[:, None]
+        reliability = (
+            counts / np.maximum(counts + max(float(shrinkage_tau), 1e-8), 1e-8)
+        )[:, None]
         count_features = np.hstack([np.log1p(counts)[:, None], reliability])
         latent = np.hstack([mean, std, skew, count_features]).astype(np.float32)
     elif normalized_mode == "mean_std_quantile":
         order = np.argsort(region_ids, kind="mergesort")
         sorted_region = region_ids[order]
         sorted_values = values[order]
-        breaks = np.r_[0, np.flatnonzero(np.diff(sorted_region)) + 1, sorted_region.shape[0]]
+        breaks = np.r_[
+            0, np.flatnonzero(np.diff(sorted_region)) + 1, sorted_region.shape[0]
+        ]
         quantiles = np.zeros((n_regions, int(x.shape[1]) * 5), dtype=np.float32)
         for left, right in zip(breaks[:-1], breaks[1:], strict=False):
             rid = int(sorted_region[left])
-            quantiles[rid] = np.quantile(sorted_values[left:right], [0.10, 0.25, 0.50, 0.75, 0.90], axis=0).reshape(-1).astype(np.float32)
-        latent = np.hstack([mean.astype(np.float32), std.astype(np.float32), quantiles]).astype(np.float32)
+            quantiles[rid] = (
+                np.quantile(
+                    sorted_values[left:right], [0.10, 0.25, 0.50, 0.75, 0.90], axis=0
+                )
+                .reshape(-1)
+                .astype(np.float32)
+            )
+        latent = np.hstack(
+            [mean.astype(np.float32), std.astype(np.float32), quantiles]
+        ).astype(np.float32)
     elif normalized_mode == "codebook_histogram":
         latent = _soft_codebook_histogram_embeddings(
             x[valid],
@@ -805,7 +957,9 @@ def _build_subregion_latent_embeddings_from_members(
             random_state=int(random_state),
         )
     else:
-        raise AssertionError(f"Unhandled subregion latent embedding mode: {normalized_mode}")
+        raise AssertionError(
+            f"Unhandled subregion latent embedding mode: {normalized_mode}"
+        )
     latent[counts <= 0] = 0.0
     if normalized_mode in {"mean_std_shrunk", "mean_std_codebook"}:
         return _finish(
@@ -828,7 +982,9 @@ def _build_subregion_latent_embeddings(measures: list[SubregionMeasure]) -> np.n
     """
     if not measures:
         return np.zeros((0, 0), dtype=np.float32)
-    return np.vstack([_measure_feature_latent_embedding(measure) for measure in measures]).astype(np.float32)
+    return np.vstack(
+        [_measure_feature_latent_embedding(measure) for measure in measures]
+    ).astype(np.float32)
 
 
 def _initialize_cluster_atoms(
@@ -844,7 +1000,9 @@ def _initialize_cluster_atoms(
     coord_dim = measures[0].canonical_coords.shape[1]
     feat_dim = measures[0].features.shape[1]
     atom_coords = np.zeros((n_clusters, atoms_per_cluster, coord_dim), dtype=np.float32)
-    atom_features = np.zeros((n_clusters, atoms_per_cluster, feat_dim), dtype=np.float32)
+    atom_features = np.zeros(
+        (n_clusters, atoms_per_cluster, feat_dim), dtype=np.float32
+    )
     betas = np.zeros((n_clusters, atoms_per_cluster), dtype=np.float32)
     sx = np.sqrt(max(float(lambda_x), 1e-12))
     sy = np.sqrt(max(float(lambda_y), 1e-12))
@@ -853,11 +1011,15 @@ def _initialize_cluster_atoms(
         idx = np.flatnonzero(labels == k)
         if idx.size == 0:
             idx = np.asarray([int(rng.integers(len(measures)))], dtype=np.int32)
-        u_pool = np.vstack([measures[r].canonical_coords for r in idx]).astype(np.float32)
+        u_pool = np.vstack([measures[r].canonical_coords for r in idx]).astype(
+            np.float32
+        )
         y_pool = np.vstack([measures[r].features for r in idx]).astype(np.float32)
         a_pool = np.concatenate([measures[r].weights for r in idx]).astype(np.float64)
         a_pool = _normalize_hist(a_pool)
-        z_pool = np.hstack([np.sqrt(lambda_x) * u_pool, np.sqrt(lambda_y) * y_pool]).astype(np.float32)
+        z_pool = np.hstack(
+            [np.sqrt(lambda_x) * u_pool, np.sqrt(lambda_y) * y_pool]
+        ).astype(np.float32)
 
         if z_pool.shape[0] >= atoms_per_cluster:
             km = KMeans(
@@ -872,19 +1034,29 @@ def _initialize_cluster_atoms(
                 beta_k[ell] = a_pool[mask].sum()
                 if beta_k[ell] <= 1e-12:
                     continue
-                atom_coords[k, ell] = np.average(u_pool[mask], axis=0, weights=a_pool[mask]).astype(np.float32)
-                atom_features[k, ell] = np.average(y_pool[mask], axis=0, weights=a_pool[mask]).astype(np.float32)
+                atom_coords[k, ell] = np.average(
+                    u_pool[mask], axis=0, weights=a_pool[mask]
+                ).astype(np.float32)
+                atom_features[k, ell] = np.average(
+                    y_pool[mask], axis=0, weights=a_pool[mask]
+                ).astype(np.float32)
             dead = beta_k <= 1e-12
             if np.any(dead):
                 centers = km.cluster_centers_
-                atom_coords[k, dead] = (centers[dead, :coord_dim] / sx).astype(np.float32)
-                atom_features[k, dead] = (centers[dead, coord_dim:] / sy).astype(np.float32)
+                atom_coords[k, dead] = (centers[dead, :coord_dim] / sx).astype(
+                    np.float32
+                )
+                atom_features[k, dead] = (centers[dead, coord_dim:] / sy).astype(
+                    np.float32
+                )
             betas[k] = _normalize_hist(beta_k + 1e-6).astype(np.float32)
         else:
             reps = int(np.ceil(atoms_per_cluster / max(z_pool.shape[0], 1)))
             atom_coords[k] = np.tile(u_pool, (reps, 1))[:atoms_per_cluster]
             atom_features[k] = np.tile(y_pool, (reps, 1))[:atoms_per_cluster]
-            betas[k] = np.full(atoms_per_cluster, 1.0 / atoms_per_cluster, dtype=np.float32)
+            betas[k] = np.full(
+                atoms_per_cluster, 1.0 / atoms_per_cluster, dtype=np.float32
+            )
 
     return atom_coords, atom_features, betas
 
@@ -979,8 +1151,12 @@ def _assignment_cost_breakdown(
     if gamma64.size == 0:
         return 0.0, 0.0, _transform_penalty(transform, scale_penalty, shift_penalty)
     u_aligned = apply_similarity(measure.canonical_coords, transform)
-    cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(float(cost_scale_x), 1e-12)
-    cy = ot.dist(measure.features, atom_features, metric="sqeuclidean") / max(float(cost_scale_y), 1e-12)
+    cx = ot.dist(u_aligned, atom_coords, metric="sqeuclidean") / max(
+        float(cost_scale_x), 1e-12
+    )
+    cy = ot.dist(measure.features, atom_features, metric="sqeuclidean") / max(
+        float(cost_scale_y), 1e-12
+    )
     geometry_cost = float(np.sum(gamma64 * (float(lambda_x) * cx)))
     feature_cost = float(np.sum(gamma64 * (float(lambda_y) * cy)))
     transform_penalty = _transform_penalty(transform, scale_penalty, shift_penalty)
@@ -1086,13 +1262,24 @@ def _solve_semirelaxed_unbalanced_gpu(
         last_objective = obj_val
         last_reg = reg
         if gamma_finite and obj_finite and converged:
-            return gamma, obj_val, OTSolveDiagnostics(effective_eps=float(reg), used_fallback=not np.isclose(reg, regs[0]))
+            return (
+                gamma,
+                obj_val,
+                OTSolveDiagnostics(
+                    effective_eps=float(reg), used_fallback=not np.isclose(reg, regs[0])
+                ),
+            )
     if last_gamma is None or not bool(torch.isfinite(last_gamma).all().item()):
-        raise FloatingPointError("Unable to obtain a finite semi-relaxed unbalanced OT solution on GPU.")
+        raise FloatingPointError(
+            "Unable to obtain a finite semi-relaxed unbalanced OT solution on GPU."
+        )
     return (
         last_gamma,
         last_objective if np.isfinite(last_objective) else 1e12,
-        OTSolveDiagnostics(effective_eps=float(last_reg), used_fallback=not np.isclose(last_reg, regs[0])),
+        OTSolveDiagnostics(
+            effective_eps=float(last_reg),
+            used_fallback=not np.isclose(last_reg, regs[0]),
+        ),
     )
 
 
@@ -1105,7 +1292,9 @@ def _solve_semirelaxed_unbalanced(
     compute_device: torch.device,
 ) -> tuple[np.ndarray, float, OTSolveDiagnostics]:
     if compute_device.type == "cuda":
-        gamma_t, objective, diag = _solve_semirelaxed_unbalanced_gpu(a, beta, c, eps=eps, rho=rho, compute_device=compute_device)
+        gamma_t, objective, diag = _solve_semirelaxed_unbalanced_gpu(
+            a, beta, c, eps=eps, rho=rho, compute_device=compute_device
+        )
         return gamma_t.detach().cpu().numpy().astype(np.float64), float(objective), diag
     regs = [max(float(eps), 1e-5)]
     regs.extend([regs[0] * 2.0, regs[0] * 4.0, regs[0] * 8.0])
@@ -1152,17 +1341,29 @@ def _solve_semirelaxed_unbalanced(
         last_objective = objective
         last_reg = reg
         numeric_warn = any(
-            ("Numerical errors" in str(w.message)) or ("did not converge" in str(w.message))
+            ("Numerical errors" in str(w.message))
+            or ("did not converge" in str(w.message))
             for w in caught
         )
         if np.all(np.isfinite(gamma)) and np.isfinite(objective) and not numeric_warn:
-            return gamma, objective, OTSolveDiagnostics(effective_eps=float(reg), used_fallback=not np.isclose(reg, regs[0]))
+            return (
+                gamma,
+                objective,
+                OTSolveDiagnostics(
+                    effective_eps=float(reg), used_fallback=not np.isclose(reg, regs[0])
+                ),
+            )
     if last_gamma is None or not np.all(np.isfinite(last_gamma)):
-        raise FloatingPointError("Unable to obtain a finite semi-relaxed unbalanced OT solution.")
+        raise FloatingPointError(
+            "Unable to obtain a finite semi-relaxed unbalanced OT solution."
+        )
     return (
         last_gamma,
         last_objective if np.isfinite(last_objective) else 1e12,
-        OTSolveDiagnostics(effective_eps=float(last_reg), used_fallback=not np.isclose(last_reg, regs[0])),
+        OTSolveDiagnostics(
+            effective_eps=float(last_reg),
+            used_fallback=not np.isclose(last_reg, regs[0]),
+        ),
     )
 
 
@@ -1187,15 +1388,33 @@ def aligned_semirelaxed_ot_to_cluster(
     scale_penalty: float,
     shift_penalty: float,
     compute_device: torch.device,
-) -> tuple[float, np.ndarray, dict[str, np.ndarray | float], np.ndarray, OTSolveDiagnostics]:
+) -> tuple[
+    float, np.ndarray, dict[str, np.ndarray | float], np.ndarray, OTSolveDiagnostics
+]:
     u = np.asarray(u, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     a = _normalize_hist(a)
     beta = _normalize_hist(beta)
-    transform: dict[str, np.ndarray | float] = {"R": np.eye(2, dtype=np.float64), "scale": 1.0, "t": np.zeros(2, dtype=np.float64)}
-    atom_coords_t = torch.as_tensor(atom_coords, dtype=torch.float64, device=compute_device) if compute_device.type != "cpu" else None
-    atom_features_t = torch.as_tensor(atom_features, dtype=torch.float64, device=compute_device) if compute_device.type != "cpu" else None
-    y_t = torch.as_tensor(y, dtype=torch.float64, device=compute_device) if compute_device.type != "cpu" else None
+    transform: dict[str, np.ndarray | float] = {
+        "R": np.eye(2, dtype=np.float64),
+        "scale": 1.0,
+        "t": np.zeros(2, dtype=np.float64),
+    }
+    atom_coords_t = (
+        torch.as_tensor(atom_coords, dtype=torch.float64, device=compute_device)
+        if compute_device.type != "cpu"
+        else None
+    )
+    atom_features_t = (
+        torch.as_tensor(atom_features, dtype=torch.float64, device=compute_device)
+        if compute_device.type != "cpu"
+        else None
+    )
+    y_t = (
+        torch.as_tensor(y, dtype=torch.float64, device=compute_device)
+        if compute_device.type != "cpu"
+        else None
+    )
 
     for _ in range(max(int(n_align_iter), 1)):
         u_aligned = apply_similarity(u, transform)
@@ -1213,7 +1432,9 @@ def aligned_semirelaxed_ot_to_cluster(
             atom_features_t=atom_features_t,
             y_t=y_t,
         )
-        gamma, _, _ = _solve_semirelaxed_unbalanced(a=a, beta=beta, c=c, eps=eps, rho=rho, compute_device=compute_device)
+        gamma, _, _ = _solve_semirelaxed_unbalanced(
+            a=a, beta=beta, c=c, eps=eps, rho=rho, compute_device=compute_device
+        )
         row_mass = np.maximum(gamma.sum(axis=1), 1e-12)
         target_bary = (gamma @ atom_coords) / row_mass[:, None]
         transform = weighted_similarity_fit(
@@ -1241,7 +1462,9 @@ def aligned_semirelaxed_ot_to_cluster(
         atom_features_t=atom_features_t,
         y_t=y_t,
     )
-    gamma, objective, solve_diag = _solve_semirelaxed_unbalanced(a=a, beta=beta, c=c, eps=eps, rho=rho, compute_device=compute_device)
+    gamma, objective, solve_diag = _solve_semirelaxed_unbalanced(
+        a=a, beta=beta, c=c, eps=eps, rho=rho, compute_device=compute_device
+    )
     target_mass = np.asarray(gamma.sum(axis=0), dtype=np.float64)
     theta = _normalize_hist(target_mass)
     objective += _transform_penalty(
@@ -1251,13 +1474,19 @@ def aligned_semirelaxed_ot_to_cluster(
     )
     if not np.isfinite(objective):
         objective = 1e12
-    return objective, gamma.astype(np.float32), transform, theta.astype(np.float32), solve_diag
+    return (
+        objective,
+        gamma.astype(np.float32),
+        transform,
+        theta.astype(np.float32),
+        solve_diag,
+    )
 
 
 def _batched_weighted_similarity_fit_torch(
-    x: torch.Tensor,      # (K, m, 2)
-    y: torch.Tensor,      # (K, m, 2)
-    w: torch.Tensor,      # (K, m)
+    x: torch.Tensor,  # (K, m, 2)
+    y: torch.Tensor,  # (K, m, 2)
+    w: torch.Tensor,  # (K, m)
     allow_reflection: bool,
     allow_scale: bool,
     min_scale: float,
@@ -1265,35 +1494,45 @@ def _batched_weighted_similarity_fit_torch(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     w_sum = w.sum(dim=-1, keepdim=True).clamp_min(1e-12)
     w_norm = w / w_sum
-    xbar = (w_norm.unsqueeze(-1) * x).sum(dim=-2)   # (K, 2)
-    ybar = (w_norm.unsqueeze(-1) * y).sum(dim=-2)   # (K, 2)
+    xbar = (w_norm.unsqueeze(-1) * x).sum(dim=-2)  # (K, 2)
+    ybar = (w_norm.unsqueeze(-1) * y).sum(dim=-2)  # (K, 2)
     x0 = x - xbar.unsqueeze(-2)
     y0 = y - ybar.unsqueeze(-2)
-    h = x0.transpose(-1, -2) @ (w_norm.unsqueeze(-1) * y0)   # (K, 2, 2)
+    h = x0.transpose(-1, -2) @ (w_norm.unsqueeze(-1) * y0)  # (K, 2, 2)
     u, _s, vt = torch.linalg.svd(h)
-    d = torch.eye(2, device=x.device, dtype=x.dtype).expand(h.shape[0], 2, 2).contiguous()
+    d = (
+        torch.eye(2, device=x.device, dtype=x.dtype)
+        .expand(h.shape[0], 2, 2)
+        .contiguous()
+    )
     if not allow_reflection:
         det = torch.linalg.det(u @ vt)
         neg = det < 0
         if torch.any(neg):
             d = d.clone()
-            d[:, -1, -1] = torch.where(neg, torch.full_like(det, -1.0), torch.full_like(det, 1.0))
-    r = u @ d @ vt                                   # (K, 2, 2)
+            d[:, -1, -1] = torch.where(
+                neg, torch.full_like(det, -1.0), torch.full_like(det, 1.0)
+            )
+    r = u @ d @ vt  # (K, 2, 2)
     if allow_scale:
-        denom = (w_norm * (x0 ** 2).sum(dim=-1)).sum(dim=-1).clamp_min(1e-12)   # (K,)
+        denom = (w_norm * (x0**2).sum(dim=-1)).sum(dim=-1).clamp_min(1e-12)  # (K,)
         trace = torch.einsum("kij,kij->k", r, h)
         scale = (trace / denom).clamp_min(1e-12)
     else:
         scale = torch.ones(h.shape[0], device=x.device, dtype=x.dtype)
     scale = scale.clamp(min=float(min_scale), max=float(max_scale))
-    xbar_r = torch.einsum("ki,kij->kj", xbar, r)     # (K, 2)
+    xbar_r = torch.einsum("ki,kij->kj", xbar, r)  # (K, 2)
     t = ybar - scale.unsqueeze(-1) * xbar_r
     return r, scale, t
 
 
-def _apply_similarity_batched_torch(x: torch.Tensor, r: torch.Tensor, scale: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+def _apply_similarity_batched_torch(
+    x: torch.Tensor, r: torch.Tensor, scale: torch.Tensor, t: torch.Tensor
+) -> torch.Tensor:
     # x: (K, m, 2), r: (K, 2, 2), scale: (K,), t: (K, 2)
-    return scale.unsqueeze(-1).unsqueeze(-1) * torch.einsum("kmi,kij->kmj", x, r) + t.unsqueeze(-2)
+    return scale.unsqueeze(-1).unsqueeze(-1) * torch.einsum(
+        "kmi,kij->kmj", x, r
+    ) + t.unsqueeze(-2)
 
 
 def _aligned_semirelaxed_ot_costs_all_clusters_gpu(
@@ -1326,8 +1565,8 @@ def _aligned_semirelaxed_ot_costs_all_clusters_gpu(
     dtype = torch.float32
     dev = compute_device
     # tensors
-    u_t = torch.as_tensor(u, dtype=dtype, device=dev)              # (m, 2)
-    y_t = torch.as_tensor(y, dtype=dtype, device=dev)              # (m, f)
+    u_t = torch.as_tensor(u, dtype=dtype, device=dev)  # (m, 2)
+    y_t = torch.as_tensor(y, dtype=dtype, device=dev)  # (m, f)
     a_vec = torch.as_tensor(_normalize_hist(a), dtype=dtype, device=dev)  # (m,)
     if atom_coords_t is None:
         atom_coords_t = torch.as_tensor(atom_coords, dtype=dtype, device=dev)
@@ -1349,7 +1588,7 @@ def _aligned_semirelaxed_ot_costs_all_clusters_gpu(
     sx = max(float(cost_scale_x), 1e-12)
     sy = max(float(cost_scale_y), 1e-12)
     cy_full = torch.cdist(y_kb, atom_features_t, p=2).pow(2) / sy
-    cy_scaled = float(lambda_y) * cy_full                # (K, m, p) — fixed over align iters
+    cy_scaled = float(lambda_y) * cy_full  # (K, m, p) — fixed over align iters
 
     eps_base = max(float(eps), 1e-5)
     reg_schedule = [eps_base, 2.0 * eps_base, 4.0 * eps_base, 8.0 * eps_base]
@@ -1375,16 +1614,20 @@ def _aligned_semirelaxed_ot_costs_all_clusters_gpu(
             if bool(finite.item()) and converged:
                 return gamma, obj, float(reg)
         if last_gamma is None:
-            raise FloatingPointError("Unable to obtain finite batched semirelaxed OT on GPU.")
+            raise FloatingPointError(
+                "Unable to obtain finite batched semirelaxed OT on GPU."
+            )
         return last_gamma, last_obj, float(last_reg)
 
     for _ in range(max(int(n_align_iter), 1)):
-        u_aligned = _apply_similarity_batched_torch(u_kb, r, scale, t)       # (K, m, 2)
-        cx = torch.cdist(u_aligned, atom_coords_t, p=2).pow(2) / sx          # (K, m, p)
+        u_aligned = _apply_similarity_batched_torch(u_kb, r, scale, t)  # (K, m, 2)
+        cx = torch.cdist(u_aligned, atom_coords_t, p=2).pow(2) / sx  # (K, m, p)
         cost = float(lambda_x) * cx + cy_scaled
         gamma, _, _ = _solve_once(cost)
-        row_mass = gamma.sum(dim=-1).clamp_min(1e-12)                        # (K, m)
-        target_bary = torch.einsum("kmp,kpd->kmd", gamma, atom_coords_t) / row_mass.unsqueeze(-1)
+        row_mass = gamma.sum(dim=-1).clamp_min(1e-12)  # (K, m)
+        target_bary = torch.einsum(
+            "kmp,kpd->kmd", gamma, atom_coords_t
+        ) / row_mass.unsqueeze(-1)
         r, scale, t = _batched_weighted_similarity_fit_torch(
             u_kb,
             target_bary,
@@ -1401,7 +1644,9 @@ def _aligned_semirelaxed_ot_costs_all_clusters_gpu(
     _, obj, _ = _solve_once(cost)
 
     # transform penalty: scale_penalty * log(scale)^2 + shift_penalty * (t @ t)
-    penalty = float(scale_penalty) * torch.log(scale.clamp_min(1e-12)).pow(2) + float(shift_penalty) * (t * t).sum(dim=-1)
+    penalty = float(scale_penalty) * torch.log(scale.clamp_min(1e-12)).pow(2) + float(
+        shift_penalty
+    ) * (t * t).sum(dim=-1)
     total = obj + penalty
     total = torch.where(torch.isfinite(total), total, torch.full_like(total, 1e12))
     return total.detach().cpu().numpy().astype(np.float64)
@@ -1458,10 +1703,7 @@ def _gpu_assignment_subregion_batch_size(
     p = max(int(support_size), 1)
     f = max(int(feature_dim), 1)
     per_subregion = bytes_per_float * max(
-        k * m * f * 2
-        + k * p * f
-        + k * m * p * 12
-        + k * m * 8,
+        k * m * f * 2 + k * p * f + k * m * p * 12 + k * m * 8,
         1,
     )
     budget = max(_cuda_target_bytes(device=device) // 4, 1 << 26)
@@ -1470,9 +1712,9 @@ def _gpu_assignment_subregion_batch_size(
 
 
 def _batched_weighted_similarity_fit_rk_torch(
-    x: torch.Tensor,      # (R, K, m, 2)  --- x is u replicated across K
-    y: torch.Tensor,      # (R, K, m, 2)  --- barycentric target
-    w: torch.Tensor,      # (R, K, m)
+    x: torch.Tensor,  # (R, K, m, 2)  --- x is u replicated across K
+    y: torch.Tensor,  # (R, K, m, 2)  --- barycentric target
+    w: torch.Tensor,  # (R, K, m)
     allow_reflection: bool,
     allow_scale: bool,
     min_scale: float,
@@ -1480,8 +1722,8 @@ def _batched_weighted_similarity_fit_rk_torch(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     w_sum = w.sum(dim=-1, keepdim=True).clamp_min(1e-12)
     w_norm = w / w_sum
-    xbar = (w_norm.unsqueeze(-1) * x).sum(dim=-2)     # (R, K, 2)
-    ybar = (w_norm.unsqueeze(-1) * y).sum(dim=-2)     # (R, K, 2)
+    xbar = (w_norm.unsqueeze(-1) * x).sum(dim=-2)  # (R, K, 2)
+    ybar = (w_norm.unsqueeze(-1) * y).sum(dim=-2)  # (R, K, 2)
     x0 = x - xbar.unsqueeze(-2)
     y0 = y - ybar.unsqueeze(-2)
     # h[r,k] = x0^T @ (diag(w_norm) @ y0)
@@ -1490,18 +1732,24 @@ def _batched_weighted_similarity_fit_rk_torch(
     u_svd, _s, vt = torch.linalg.svd(h)
     if not allow_reflection:
         det = torch.linalg.det(u_svd @ vt)
-        d = torch.eye(2, device=x.device, dtype=x.dtype).expand(*h.shape[:-2], 2, 2).contiguous()
+        d = (
+            torch.eye(2, device=x.device, dtype=x.dtype)
+            .expand(*h.shape[:-2], 2, 2)
+            .contiguous()
+        )
         neg = det < 0
         if torch.any(neg):
             d = d.clone()
             # set last diagonal entry to -1 where det<0
-            fix = torch.where(neg, torch.full_like(det, -1.0), torch.full_like(det, 1.0))
+            fix = torch.where(
+                neg, torch.full_like(det, -1.0), torch.full_like(det, 1.0)
+            )
             d[..., -1, -1] = fix
         r_mat = u_svd @ d @ vt
     else:
         r_mat = u_svd @ vt
     if allow_scale:
-        denom = (w_norm * (x0 ** 2).sum(dim=-1)).sum(dim=-1).clamp_min(1e-12)
+        denom = (w_norm * (x0**2).sum(dim=-1)).sum(dim=-1).clamp_min(1e-12)
         trace = torch.einsum("rkij,rkij->rk", r_mat, h)
         scale = (trace / denom).clamp_min(1e-12)
     else:
@@ -1512,8 +1760,12 @@ def _batched_weighted_similarity_fit_rk_torch(
     return r_mat, scale, t
 
 
-def _apply_similarity_rk_torch(x: torch.Tensor, r: torch.Tensor, scale: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-    return scale.unsqueeze(-1).unsqueeze(-1) * torch.einsum("rkmi,rkij->rkmj", x, r) + t.unsqueeze(-2)
+def _apply_similarity_rk_torch(
+    x: torch.Tensor, r: torch.Tensor, scale: torch.Tensor, t: torch.Tensor
+) -> torch.Tensor:
+    return scale.unsqueeze(-1).unsqueeze(-1) * torch.einsum(
+        "rkmi,rkij->rkmj", x, r
+    ) + t.unsqueeze(-2)
 
 
 def _compute_assignment_costs_rk_gpu(
@@ -1551,22 +1803,39 @@ def _compute_assignment_costs_rk_gpu(
     K = int(atom_coords.shape[0])
     p = int(atom_coords.shape[1])
 
-    atom_coords_t = torch.as_tensor(atom_coords, dtype=dtype, device=dev)        # (K, p, 2)
-    atom_features_t = torch.as_tensor(atom_features, dtype=dtype, device=dev)    # (K, p, f)
+    atom_coords_t = torch.as_tensor(atom_coords, dtype=dtype, device=dev)  # (K, p, 2)
+    atom_features_t = torch.as_tensor(
+        atom_features, dtype=dtype, device=dev
+    )  # (K, p, f)
     betas_np = np.stack([_normalize_hist(b) for b in betas], axis=0)
-    beta_k = torch.as_tensor(betas_np, dtype=dtype, device=dev)                   # (K, p)
+    beta_k = torch.as_tensor(betas_np, dtype=dtype, device=dev)  # (K, p)
 
     # Broadcast to (R, K, *)
     u_rkm = u_rm.unsqueeze(1).expand(R, K, m, u_rm.shape[-1]).contiguous()
     y_rkm = y_rm.unsqueeze(1).expand(R, K, m, y_rm.shape[-1]).contiguous()
     a_rkm = a_rm.unsqueeze(1).expand(R, K, m).contiguous()
-    atom_coords_rk = atom_coords_t.unsqueeze(0).expand(R, K, p, atom_coords_t.shape[-1]).contiguous()
-    atom_features_rk = atom_features_t.unsqueeze(0).expand(R, K, p, atom_features_t.shape[-1]).contiguous()
+    atom_coords_rk = (
+        atom_coords_t.unsqueeze(0).expand(R, K, p, atom_coords_t.shape[-1]).contiguous()
+    )
+    atom_features_rk = (
+        atom_features_t.unsqueeze(0)
+        .expand(R, K, p, atom_features_t.shape[-1])
+        .contiguous()
+    )
     beta_rk = beta_k.unsqueeze(0).expand(R, K, p).contiguous()
 
     sx = max(float(cost_scale_x), 1e-12)
     sy = max(float(cost_scale_y), 1e-12)
-    cy_full = torch.cdist(y_rkm.reshape(R * K, m, y_rm.shape[-1]), atom_features_rk.reshape(R * K, p, y_rm.shape[-1]), p=2).pow(2).reshape(R, K, m, p) / sy
+    cy_full = (
+        torch.cdist(
+            y_rkm.reshape(R * K, m, y_rm.shape[-1]),
+            atom_features_rk.reshape(R * K, p, y_rm.shape[-1]),
+            p=2,
+        )
+        .pow(2)
+        .reshape(R, K, m, p)
+        / sy
+    )
     cy_scaled = float(lambda_y) * cy_full
 
     r_mat = torch.eye(2, device=dev, dtype=dtype).expand(R, K, 2, 2).contiguous()
@@ -1577,7 +1846,9 @@ def _compute_assignment_costs_rk_gpu(
     reg_schedule = (eps_base, 2.0 * eps_base, 4.0 * eps_base, 8.0 * eps_base)
     rho_val = max(float(rho), 1e-6)
 
-    def _solve(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _solve(
+        cost: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # cost shape: (R, K, m, p). Flatten batch dims for Sinkhorn.
         flat_cost = cost.reshape(R * K, m, p)
         flat_a = a_rkm.reshape(R * K, m)
@@ -1602,11 +1873,15 @@ def _compute_assignment_costs_rk_gpu(
             finite = torch.isfinite(gamma).all(dim=(-1, -2)) & torch.isfinite(obj)
             if last_gamma is None:
                 last_gamma = torch.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0)
-                last_obj = torch.where(torch.isfinite(obj), obj, torch.full_like(obj, 1e12))
+                last_obj = torch.where(
+                    torch.isfinite(obj), obj, torch.full_like(obj, 1e12)
+                )
                 eff_reg = torch.full_like(obj, reg)
             update = finite if bool(converged) else finite & ~converged_solution
             if update.any():
-                last_gamma = torch.where(update.unsqueeze(-1).unsqueeze(-1), gamma, last_gamma)
+                last_gamma = torch.where(
+                    update.unsqueeze(-1).unsqueeze(-1), gamma, last_gamma
+                )
                 last_obj = torch.where(update, obj, last_obj)
                 eff_reg = torch.where(update, torch.full_like(eff_reg, reg), eff_reg)
                 found_finite = found_finite | update
@@ -1614,20 +1889,39 @@ def _compute_assignment_costs_rk_gpu(
                     converged_solution = converged_solution | update
             if bool(converged) and bool(finite.all().item()):
                 break
-        if last_gamma is None or last_obj is None or not bool(found_finite.any().item()):
+        if (
+            last_gamma is None
+            or last_obj is None
+            or not bool(found_finite.any().item())
+        ):
             raise FloatingPointError("GPU batched Sinkhorn failed")
-        used_fallback = (~converged_solution) | ~torch.isclose(eff_reg, torch.full_like(eff_reg, eps_base))
+        used_fallback = (~converged_solution) | ~torch.isclose(
+            eff_reg, torch.full_like(eff_reg, eps_base)
+        )
         return last_gamma, last_obj, eff_reg, used_fallback
 
     identity_r = torch.eye(2, device=dev, dtype=dtype).expand(R, K, 2, 2).contiguous()
     for _ in range(max(int(align_iters), 1)):
-        u_aligned = _apply_similarity_rk_torch(u_rkm, r_mat, scale_t, t_t)           # (R, K, m, 2)
-        cx = torch.cdist(u_aligned.reshape(R * K, m, u_aligned.shape[-1]), atom_coords_rk.reshape(R * K, p, u_aligned.shape[-1]), p=2).pow(2).reshape(R, K, m, p) / sx
+        u_aligned = _apply_similarity_rk_torch(
+            u_rkm, r_mat, scale_t, t_t
+        )  # (R, K, m, 2)
+        cx = (
+            torch.cdist(
+                u_aligned.reshape(R * K, m, u_aligned.shape[-1]),
+                atom_coords_rk.reshape(R * K, p, u_aligned.shape[-1]),
+                p=2,
+            )
+            .pow(2)
+            .reshape(R, K, m, p)
+            / sx
+        )
         cost = float(lambda_x) * cx + cy_scaled
         gamma, _obj, _reg, _used_fallback = _solve(cost)
         gamma = torch.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0)
-        row_mass = gamma.sum(dim=-1).clamp_min(1e-12)                                # (R, K, m)
-        target_bary = torch.einsum("rkmp,rkpd->rkmd", gamma, atom_coords_rk) / row_mass.unsqueeze(-1)
+        row_mass = gamma.sum(dim=-1).clamp_min(1e-12)  # (R, K, m)
+        target_bary = torch.einsum(
+            "rkmp,rkpd->rkmd", gamma, atom_coords_rk
+        ) / row_mass.unsqueeze(-1)
         r_new, scale_new, t_new = _batched_weighted_similarity_fit_rk_torch(
             u_rkm,
             target_bary,
@@ -1638,7 +1932,11 @@ def _compute_assignment_costs_rk_gpu(
             max_scale=max_scale,
         )
         # Reset any NaN/Inf transforms to identity so we don't poison subsequent iters.
-        bad = ~torch.isfinite(r_new).all(dim=(-1, -2)) | ~torch.isfinite(scale_new) | ~torch.isfinite(t_new).all(dim=-1)
+        bad = (
+            ~torch.isfinite(r_new).all(dim=(-1, -2))
+            | ~torch.isfinite(scale_new)
+            | ~torch.isfinite(t_new).all(dim=-1)
+        )
         if bool(bad.any().item()):
             r_new = torch.where(bad.unsqueeze(-1).unsqueeze(-1), identity_r, r_new)
             scale_new = torch.where(bad, torch.ones_like(scale_new), scale_new)
@@ -1646,11 +1944,22 @@ def _compute_assignment_costs_rk_gpu(
         r_mat, scale_t, t_t = r_new, scale_new, t_new
 
     u_aligned = _apply_similarity_rk_torch(u_rkm, r_mat, scale_t, t_t)
-    cx = torch.cdist(u_aligned.reshape(R * K, m, u_aligned.shape[-1]), atom_coords_rk.reshape(R * K, p, u_aligned.shape[-1]), p=2).pow(2).reshape(R, K, m, p) / sx
+    cx = (
+        torch.cdist(
+            u_aligned.reshape(R * K, m, u_aligned.shape[-1]),
+            atom_coords_rk.reshape(R * K, p, u_aligned.shape[-1]),
+            p=2,
+        )
+        .pow(2)
+        .reshape(R, K, m, p)
+        / sx
+    )
     cost = float(lambda_x) * cx + cy_scaled
     _gamma, obj, eff_reg, used_fallback = _solve(cost)
 
-    penalty = float(scale_penalty) * torch.log(scale_t.clamp_min(1e-12)).pow(2) + float(shift_penalty) * (t_t * t_t).sum(dim=-1)
+    penalty = float(scale_penalty) * torch.log(scale_t.clamp_min(1e-12)).pow(2) + float(
+        shift_penalty
+    ) * (t_t * t_t).sum(dim=-1)
     total = obj + penalty
     total = torch.where(torch.isfinite(total), total, torch.full_like(total, 1e12))
     total_np = total.detach().cpu().numpy().astype(np.float32)
@@ -1681,22 +1990,33 @@ def _compute_assigned_artifacts_r_gpu(
     scale_penalty: float,
     shift_penalty: float,
     compute_device: torch.device,
-) -> tuple[list[np.ndarray], list[dict[str, np.ndarray | float]], list[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    list[np.ndarray],
+    list[dict[str, np.ndarray | float]],
+    list[np.ndarray],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     """Fully batched (over R) aligned semirelaxed OT on GPU, returning per-subregion artifacts."""
     dtype = torch.float32
     dev = compute_device
     R = len(measures)
-    label_idx = torch.as_tensor(np.asarray(labels, dtype=np.int64), dtype=torch.long, device=dev)
+    label_idx = torch.as_tensor(
+        np.asarray(labels, dtype=np.int64), dtype=torch.long, device=dev
+    )
     u_rm, y_rm, a_rm, m_r = _pack_measures_padded(measures, dtype=dtype, device=dev)
-    atom_coords_t = torch.as_tensor(atom_coords, dtype=dtype, device=dev)          # (K, p, 2)
-    atom_features_t = torch.as_tensor(atom_features, dtype=dtype, device=dev)      # (K, p, f)
+    atom_coords_t = torch.as_tensor(atom_coords, dtype=dtype, device=dev)  # (K, p, 2)
+    atom_features_t = torch.as_tensor(
+        atom_features, dtype=dtype, device=dev
+    )  # (K, p, f)
     betas_np = np.stack([_normalize_hist(b) for b in betas], axis=0)
-    beta_k = torch.as_tensor(betas_np, dtype=dtype, device=dev)                    # (K, p)
+    beta_k = torch.as_tensor(betas_np, dtype=dtype, device=dev)  # (K, p)
 
     # Gather per-r atoms using labels
-    atom_coords_r = atom_coords_t[label_idx]       # (R, p, 2)
-    atom_features_r = atom_features_t[label_idx]   # (R, p, f)
-    beta_r = beta_k[label_idx]                     # (R, p)
+    atom_coords_r = atom_coords_t[label_idx]  # (R, p, 2)
+    atom_features_r = atom_features_t[label_idx]  # (R, p, f)
+    beta_r = beta_k[label_idx]  # (R, p)
 
     sx = max(float(cost_scale_x), 1e-12)
     sy = max(float(cost_scale_y), 1e-12)
@@ -1711,7 +2031,9 @@ def _compute_assigned_artifacts_r_gpu(
     reg_schedule = (eps_base, 2.0 * eps_base, 4.0 * eps_base, 8.0 * eps_base)
     rho_val = max(float(rho), 1e-6)
 
-    def _solve(cost: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _solve(
+        cost: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         last_gamma = None
         last_obj = None
         eff_reg = torch.full((R,), reg_schedule[0], dtype=dtype, device=dev)
@@ -1730,11 +2052,15 @@ def _compute_assigned_artifacts_r_gpu(
             finite = torch.isfinite(gamma).all(dim=(-1, -2)) & torch.isfinite(obj)
             if last_gamma is None:
                 last_gamma = torch.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0)
-                last_obj = torch.where(torch.isfinite(obj), obj, torch.full_like(obj, 1e12))
+                last_obj = torch.where(
+                    torch.isfinite(obj), obj, torch.full_like(obj, 1e12)
+                )
                 eff_reg = torch.full_like(obj, reg)
             update = finite if bool(converged) else finite & ~converged_solution
             if update.any():
-                last_gamma = torch.where(update.unsqueeze(-1).unsqueeze(-1), gamma, last_gamma)
+                last_gamma = torch.where(
+                    update.unsqueeze(-1).unsqueeze(-1), gamma, last_gamma
+                )
                 last_obj = torch.where(update, obj, last_obj)
                 eff_reg = torch.where(update, torch.full_like(eff_reg, reg), eff_reg)
                 found_finite = found_finite | update
@@ -1742,21 +2068,31 @@ def _compute_assigned_artifacts_r_gpu(
                     converged_solution = converged_solution | update
             if bool(converged) and bool(finite.all().item()):
                 break
-        if last_gamma is None or last_obj is None or not bool(found_finite.any().item()):
+        if (
+            last_gamma is None
+            or last_obj is None
+            or not bool(found_finite.any().item())
+        ):
             raise FloatingPointError("GPU batched-R Sinkhorn failed")
-        used_fallback = (~converged_solution) | ~torch.isclose(eff_reg, torch.full_like(eff_reg, eps_base))
+        used_fallback = (~converged_solution) | ~torch.isclose(
+            eff_reg, torch.full_like(eff_reg, eps_base)
+        )
         return last_gamma, last_obj, eff_reg, used_fallback
 
     # R-wise barycentric alignment
     identity_r = torch.eye(2, device=dev, dtype=dtype).expand(R, 2, 2).contiguous()
     for _ in range(max(int(align_iters), 1)):
-        u_aligned = scale_t.unsqueeze(-1).unsqueeze(-1) * torch.einsum("rmi,rij->rmj", u_rm, r_mat) + t_t.unsqueeze(-2)
+        u_aligned = scale_t.unsqueeze(-1).unsqueeze(-1) * torch.einsum(
+            "rmi,rij->rmj", u_rm, r_mat
+        ) + t_t.unsqueeze(-2)
         cx = torch.cdist(u_aligned, atom_coords_r, p=2).pow(2) / sx
         cost = float(lambda_x) * cx + cy_scaled
         gamma, _obj, _reg, _used_fallback = _solve(cost)
         gamma = torch.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0)
         row_mass = gamma.sum(dim=-1).clamp_min(1e-12)
-        target_bary = torch.einsum("rmp,rpd->rmd", gamma, atom_coords_r) / row_mass.unsqueeze(-1)
+        target_bary = torch.einsum(
+            "rmp,rpd->rmd", gamma, atom_coords_r
+        ) / row_mass.unsqueeze(-1)
         # Batched weighted similarity fit over R (2D).
         w_sum = row_mass.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         w_norm = row_mass / w_sum
@@ -1772,13 +2108,15 @@ def _compute_assigned_artifacts_r_gpu(
             neg = det < 0
             if torch.any(neg):
                 d = d.clone()
-                fix = torch.where(neg, torch.full_like(det, -1.0), torch.full_like(det, 1.0))
+                fix = torch.where(
+                    neg, torch.full_like(det, -1.0), torch.full_like(det, 1.0)
+                )
                 d[..., -1, -1] = fix
             r_new = u_svd @ d @ vt
         else:
             r_new = u_svd @ vt
         if allow_scale:
-            denom = (w_norm * (x0 ** 2).sum(dim=-1)).sum(dim=-1).clamp_min(1e-12)
+            denom = (w_norm * (x0**2).sum(dim=-1)).sum(dim=-1).clamp_min(1e-12)
             trace = torch.einsum("rij,rij->r", r_new, h)
             scale_new = (trace / denom).clamp_min(1e-12)
         else:
@@ -1786,7 +2124,11 @@ def _compute_assigned_artifacts_r_gpu(
         scale_new = scale_new.clamp(min=float(min_scale), max=float(max_scale))
         xbar_r = torch.einsum("ri,rij->rj", xbar, r_new)
         t_new = ybar - scale_new.unsqueeze(-1) * xbar_r
-        bad = ~torch.isfinite(r_new).all(dim=(-1, -2)) | ~torch.isfinite(scale_new) | ~torch.isfinite(t_new).all(dim=-1)
+        bad = (
+            ~torch.isfinite(r_new).all(dim=(-1, -2))
+            | ~torch.isfinite(scale_new)
+            | ~torch.isfinite(t_new).all(dim=-1)
+        )
         if bool(bad.any().item()):
             r_new = torch.where(bad.unsqueeze(-1).unsqueeze(-1), identity_r, r_new)
             scale_new = torch.where(bad, torch.ones_like(scale_new), scale_new)
@@ -1794,15 +2136,19 @@ def _compute_assigned_artifacts_r_gpu(
         r_mat, scale_t, t_t = r_new, scale_new, t_new
 
     # Final solve
-    u_aligned = scale_t.unsqueeze(-1).unsqueeze(-1) * torch.einsum("rmi,rij->rmj", u_rm, r_mat) + t_t.unsqueeze(-2)
+    u_aligned = scale_t.unsqueeze(-1).unsqueeze(-1) * torch.einsum(
+        "rmi,rij->rmj", u_rm, r_mat
+    ) + t_t.unsqueeze(-2)
     cx = torch.cdist(u_aligned, atom_coords_r, p=2).pow(2) / sx
     cost = float(lambda_x) * cx + cy_scaled
     gamma, obj, eff_reg, used_fallback_t = _solve(cost)
     gamma = torch.nan_to_num(gamma, nan=0.0, posinf=0.0, neginf=0.0)
-    col_mass = gamma.sum(dim=-2)                        # (R, p)
+    col_mass = gamma.sum(dim=-2)  # (R, p)
     theta = col_mass / col_mass.sum(dim=-1, keepdim=True).clamp_min(1e-12)
 
-    penalty = float(scale_penalty) * torch.log(scale_t.clamp_min(1e-12)).pow(2) + float(shift_penalty) * (t_t * t_t).sum(dim=-1)
+    penalty = float(scale_penalty) * torch.log(scale_t.clamp_min(1e-12)).pow(2) + float(
+        shift_penalty
+    ) * (t_t * t_t).sum(dim=-1)
     total = obj + penalty
     total = torch.where(torch.isfinite(total), total, torch.full_like(total, 1e12))
 
@@ -1823,17 +2169,30 @@ def _compute_assigned_artifacts_r_gpu(
     for r in range(R):
         mr = int(m_r_np[r])
         plans.append(gamma_np[r, :mr, :].astype(np.float32))
-        transforms.append({
-            "R": r_np[r].astype(np.float64),
-            "scale": float(scale_np[r]),
-            "t": t_np[r].astype(np.float64),
-        })
+        transforms.append(
+            {
+                "R": r_np[r].astype(np.float64),
+                "scale": float(scale_np[r]),
+                "t": t_np[r].astype(np.float64),
+            }
+        )
         thetas.append(theta_np[r].astype(np.float32))
-    return plans, transforms, thetas, total_np, eff_reg_np, used_fallback_np.astype(bool)
+    return (
+        plans,
+        transforms,
+        thetas,
+        total_np,
+        eff_reg_np,
+        used_fallback_np.astype(bool),
+    )
 
 
-def _ensure_nonempty_clusters(labels: np.ndarray, costs: np.ndarray, n_clusters: int) -> tuple[np.ndarray, np.ndarray]:
-    return _ensure_minimum_cluster_size(labels, costs, n_clusters=n_clusters, min_subregions_per_cluster=1)
+def _ensure_nonempty_clusters(
+    labels: np.ndarray, costs: np.ndarray, n_clusters: int
+) -> tuple[np.ndarray, np.ndarray]:
+    return _ensure_minimum_cluster_size(
+        labels, costs, n_clusters=n_clusters, min_subregions_per_cluster=1
+    )
 
 
 def _ensure_minimum_cluster_size(
@@ -1876,15 +2235,24 @@ def _compute_assignment_costs(
     n_subregions = len(measures)
     n_clusters = atom_coords.shape[0]
     costs = np.zeros((n_subregions, n_clusters), dtype=np.float64)
-    effective_eps = np.zeros((n_subregions, n_clusters), dtype=np.float32) if return_diagnostics else None
-    used_fallback = np.zeros((n_subregions, n_clusters), dtype=bool) if return_diagnostics else None
+    effective_eps = (
+        np.zeros((n_subregions, n_clusters), dtype=np.float32)
+        if return_diagnostics
+        else None
+    )
+    used_fallback = (
+        np.zeros((n_subregions, n_clusters), dtype=bool) if return_diagnostics else None
+    )
 
     if compute_device.type == "cuda":
         # Fully batched (R*K) GPU solve — amortizes kernel launch latency.
         batch_size = _gpu_assignment_subregion_batch_size(
             n_subregions=n_subregions,
             n_clusters=n_clusters,
-            measure_size=max((int(measure.canonical_coords.shape[0]) for measure in measures), default=1),
+            measure_size=max(
+                (int(measure.canonical_coords.shape[0]) for measure in measures),
+                default=1,
+            ),
             support_size=int(atom_coords.shape[1]),
             feature_dim=int(atom_features.shape[2]),
             device=compute_device,
@@ -1985,13 +2353,21 @@ def _compute_assignment_costs(
                 compute_device=compute_device,
             )
             costs[r, k] = float(np.clip(cost, -1e12, 1e12))
-            if return_diagnostics and effective_eps is not None and used_fallback is not None:
+            if (
+                return_diagnostics
+                and effective_eps is not None
+                and used_fallback is not None
+            ):
                 effective_eps[r, k] = float(solve_diag.effective_eps)
                 used_fallback[r, k] = bool(solve_diag.used_fallback)
     if not return_diagnostics:
         return costs.astype(np.float32)
     assert effective_eps is not None and used_fallback is not None
-    return costs.astype(np.float32), effective_eps.astype(np.float32), used_fallback.astype(bool)
+    return (
+        costs.astype(np.float32),
+        effective_eps.astype(np.float32),
+        used_fallback.astype(bool),
+    )
 
 
 def _stabilize_mixed_candidate_assignment_costs(
@@ -2025,9 +2401,8 @@ def _stabilize_mixed_candidate_assignment_costs(
     if transport.ndim != 2 or transport.shape[0] == 0:
         return transport, effective_eps, used_fallback
     mixed_mask = (
-        (np.max(effective_eps, axis=1) - np.min(effective_eps, axis=1) > 1e-8)
-        | np.any(used_fallback != used_fallback[:, :1], axis=1)
-    )
+        np.max(effective_eps, axis=1) - np.min(effective_eps, axis=1) > 1e-8
+    ) | np.any(used_fallback != used_fallback[:, :1], axis=1)
     if not np.any(mixed_mask):
         return transport, effective_eps, used_fallback
 
@@ -2060,13 +2435,16 @@ def _stabilize_mixed_candidate_assignment_costs(
             used_fallback[rid] = row_fallback[0]
             next_eps = float(np.max(row_eps[0]))
             row_is_mixed = (
-                (float(np.max(row_eps[0]) - np.min(row_eps[0])) > 1e-8)
-                or bool(np.any(row_fallback[0] != row_fallback[0][:1]))
-            )
+                float(np.max(row_eps[0]) - np.min(row_eps[0])) > 1e-8
+            ) or bool(np.any(row_fallback[0] != row_fallback[0][:1]))
             if not row_is_mixed or next_eps <= common_eps + 1e-8:
                 break
             common_eps = next_eps
-    return transport.astype(np.float32), effective_eps.astype(np.float32), used_fallback.astype(bool)
+    return (
+        transport.astype(np.float32),
+        effective_eps.astype(np.float32),
+        used_fallback.astype(bool),
+    )
 
 
 def _compute_assigned_artifacts(
@@ -2089,12 +2467,22 @@ def _compute_assigned_artifacts(
     scale_penalty: float,
     shift_penalty: float,
     compute_device: torch.device,
-) -> tuple[list[np.ndarray], list[dict[str, np.ndarray | float]], list[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    list[np.ndarray],
+    list[dict[str, np.ndarray | float]],
+    list[np.ndarray],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     if compute_device.type == "cuda":
         batch_size = _gpu_assignment_subregion_batch_size(
             n_subregions=len(measures),
             n_clusters=1,
-            measure_size=max((int(measure.canonical_coords.shape[0]) for measure in measures), default=1),
+            measure_size=max(
+                (int(measure.canonical_coords.shape[0]) for measure in measures),
+                default=1,
+            ),
             support_size=int(atom_coords.shape[1]),
             feature_dim=int(atom_features.shape[2]),
             device=compute_device,
@@ -2128,7 +2516,14 @@ def _compute_assigned_artifacts(
                     shift_penalty=shift_penalty,
                     compute_device=compute_device,
                 )
-                plans, transforms, thetas, assigned_costs, effective_eps, used_fallback = chunk
+                (
+                    plans,
+                    transforms,
+                    thetas,
+                    assigned_costs,
+                    effective_eps,
+                    used_fallback,
+                ) = chunk
                 all_plans.extend(plans)
                 all_transforms.extend(transforms)
                 all_thetas.extend(thetas)
@@ -2234,7 +2629,9 @@ def _update_atoms(
             )
             new_coords[k] = measure.canonical_coords[pick]
             new_features[k] = measure.features[pick]
-            new_betas[k] = np.full(atoms_per_cluster, 1.0 / atoms_per_cluster, dtype=np.float32)
+            new_betas[k] = np.full(
+                atoms_per_cluster, 1.0 / atoms_per_cluster, dtype=np.float32
+            )
             continue
 
         coord_num = np.zeros((atoms_per_cluster, coord_dim), dtype=np.float64)
@@ -2255,11 +2652,17 @@ def _update_atoms(
 
         active = denom > 1e-10
         if np.any(active):
-            new_coords[k, active] = (coord_num[active] / denom[active, None]).astype(np.float32)
-            new_features[k, active] = (feat_num[active] / denom[active, None]).astype(np.float32)
+            new_coords[k, active] = (coord_num[active] / denom[active, None]).astype(
+                np.float32
+            )
+            new_features[k, active] = (feat_num[active] / denom[active, None]).astype(
+                np.float32
+            )
 
         if np.any(~active):
-            u_pool = np.vstack([measures[r].canonical_coords for r in idx]).astype(np.float32)
+            u_pool = np.vstack([measures[r].canonical_coords for r in idx]).astype(
+                np.float32
+            )
             y_pool = np.vstack([measures[r].features for r in idx]).astype(np.float32)
             a_pool = _normalize_hist(np.concatenate([measures[r].weights for r in idx]))
             dead = np.where(~active)[0]
@@ -2290,12 +2693,20 @@ def _cell_cluster_feature_costs(
     if compute_device.type == "cuda" and n_cells > 0 and n_clusters > 0:
         dtype = torch.float32
         feats_t = torch.as_tensor(features, dtype=dtype, device=compute_device)
-        support_t = torch.as_tensor(support_features, dtype=dtype, device=compute_device)
-        weights_t = torch.as_tensor(np.clip(prototype_weights, 1e-8, None), dtype=dtype, device=compute_device)
+        support_t = torch.as_tensor(
+            support_features, dtype=dtype, device=compute_device
+        )
+        weights_t = torch.as_tensor(
+            np.clip(prototype_weights, 1e-8, None), dtype=dtype, device=compute_device
+        )
         costs_t = torch.empty((n_cells, n_clusters), dtype=dtype, device=compute_device)
         feat_dim = int(features.shape[1]) if features.ndim == 2 else 1
-        support_size = int(support_features.shape[1]) if support_features.ndim >= 2 else 1
-        support_flat = support_t.reshape(n_clusters * support_size, feat_dim).contiguous()
+        support_size = (
+            int(support_features.shape[1]) if support_features.ndim >= 2 else 1
+        )
+        support_flat = support_t.reshape(
+            n_clusters * support_size, feat_dim
+        ).contiguous()
         support_norm = (support_flat * support_flat).sum(dim=1)
         # Compute all cluster/atom distances with one GEMM per cell batch. This
         # avoids a Python loop over clusters and is much faster for K*p << n_cells.
@@ -2309,10 +2720,18 @@ def _cell_cluster_feature_costs(
                     try:
                         f_chunk = feats_t[start:stop]
                         chunk_norm = (f_chunk * f_chunk).sum(dim=1, keepdim=True)
-                        dist = chunk_norm + support_norm.unsqueeze(0) - 2.0 * (f_chunk @ support_flat.T)
-                        dist = dist.clamp_min(0.0).reshape(stop - start, n_clusters, support_size)
+                        dist = (
+                            chunk_norm
+                            + support_norm.unsqueeze(0)
+                            - 2.0 * (f_chunk @ support_flat.T)
+                        )
+                        dist = dist.clamp_min(0.0).reshape(
+                            stop - start, n_clusters, support_size
+                        )
                         scaled = torch.exp(-dist / temp) * weights_t.unsqueeze(0)
-                        costs_t[start:stop] = -temp * torch.log(scaled.sum(dim=-1).clamp_min(1e-8))
+                        costs_t[start:stop] = -temp * torch.log(
+                            scaled.sum(dim=-1).clamp_min(1e-8)
+                        )
                         chunk_done = True
                     except torch.OutOfMemoryError:
                         if stop - start <= 1:
@@ -2326,7 +2745,9 @@ def _cell_cluster_feature_costs(
         return costs_t.detach().cpu().numpy().astype(np.float32)
     costs = np.zeros((n_cells, n_clusters), dtype=np.float32)
     for k in range(n_clusters):
-        dist = _pairwise_sqdist_array(features, support_features[k], device=compute_device)
+        dist = _pairwise_sqdist_array(
+            features, support_features[k], device=compute_device
+        )
         weights = np.clip(prototype_weights[k], 1e-8, None).astype(np.float32)
         scores = np.exp(-dist / temp) * weights[None, :]
         costs[:, k] = -temp * np.log(np.maximum(scores.sum(axis=1), 1e-8))
@@ -2360,8 +2781,12 @@ def _project_cells_from_subregions(
         temperature=assignment_temperature,
         compute_device=compute_device,
     )
-    feature_probs = _softmax_over_negative_costs(feature_costs, temperature=assignment_temperature)
-    subregion_probs = _softmax_over_negative_costs(subregion_cluster_costs, temperature=max(assignment_temperature, 1e-4))
+    feature_probs = _softmax_over_negative_costs(
+        feature_costs, temperature=assignment_temperature
+    )
+    subregion_probs = _softmax_over_negative_costs(
+        subregion_cluster_costs, temperature=max(assignment_temperature, 1e-4)
+    )
 
     n_cells = features.shape[0]
     n_clusters = atom_coords.shape[0]
@@ -2376,12 +2801,21 @@ def _project_cells_from_subregions(
         k = int(subregion_labels[r])
         canonical = measure.normalizer.transform(coords_um[members])
         aligned = apply_similarity(canonical, assigned_transforms[r]).astype(np.float32)
-        cx = _pairwise_sqdist_array(aligned, atom_coords[k], device=compute_device) / max(float(cost_scale_x), 1e-5)
-        cy = _pairwise_sqdist_array(features[members], atom_features[k], device=compute_device) / max(float(cost_scale_y), 1e-5)
+        cx = _pairwise_sqdist_array(
+            aligned, atom_coords[k], device=compute_device
+        ) / max(float(cost_scale_x), 1e-5)
+        cy = _pairwise_sqdist_array(
+            features[members], atom_features[k], device=compute_device
+        ) / max(float(cost_scale_y), 1e-5)
         total_cost = float(lambda_x) * cx + float(lambda_y) * cy
-        atom_scores = np.exp(-total_cost / max(float(assignment_temperature), 1e-5)) * np.clip(prototype_weights[k], 1e-8, None)[None, :]
+        atom_scores = (
+            np.exp(-total_cost / max(float(assignment_temperature), 1e-5))
+            * np.clip(prototype_weights[k], 1e-8, None)[None, :]
+        )
         local_support = atom_scores.sum(axis=1).astype(np.float32)
-        local_model_probs[members] += local_support[:, None] * subregion_probs[r][None, :]
+        local_model_probs[members] += (
+            local_support[:, None] * subregion_probs[r][None, :]
+        )
         local_model_counts[members] += 1.0
     covered = membership_counts[:, 0] > 0
     if np.any(covered):
@@ -2391,7 +2825,9 @@ def _project_cells_from_subregions(
     local_covered = local_model_counts[:, 0] > 0
     if np.any(local_covered):
         local_model_probs[local_covered] /= local_model_counts[local_covered]
-        local_model_probs[local_covered] /= np.maximum(local_model_probs[local_covered].sum(axis=1, keepdims=True), 1e-8)
+        local_model_probs[local_covered] /= np.maximum(
+            local_model_probs[local_covered].sum(axis=1, keepdims=True), 1e-8
+        )
     if np.any(~local_covered):
         local_model_probs[~local_covered] = feature_probs[~local_covered]
 
@@ -2402,7 +2838,12 @@ def _project_cells_from_subregions(
     )
     combined = combined / np.maximum(combined.sum(axis=1, keepdims=True), 1e-8)
     labels = combined.argmax(axis=1).astype(np.int32)
-    return labels, combined.astype(np.float32), local_model_probs.astype(np.float32), context_probs.astype(np.float32)
+    return (
+        labels,
+        combined.astype(np.float32),
+        local_model_probs.astype(np.float32),
+        context_probs.astype(np.float32),
+    )
 
 
 def _execute_restart(
@@ -2460,10 +2901,18 @@ def _execute_restart(
         random_state=run_seed,
     )
     objective_history: list[dict[str, float]] = []
-    overlap_edge_i = np.asarray(overlap_edge_i if overlap_edge_i is not None else np.zeros(0, dtype=np.int32), dtype=np.int32)
-    overlap_edge_j = np.asarray(overlap_edge_j if overlap_edge_j is not None else np.zeros(0, dtype=np.int32), dtype=np.int32)
+    overlap_edge_i = np.asarray(
+        overlap_edge_i if overlap_edge_i is not None else np.zeros(0, dtype=np.int32),
+        dtype=np.int32,
+    )
+    overlap_edge_j = np.asarray(
+        overlap_edge_j if overlap_edge_j is not None else np.zeros(0, dtype=np.int32),
+        dtype=np.int32,
+    )
     overlap_edge_weight = np.asarray(
-        overlap_edge_weight if overlap_edge_weight is not None else np.zeros(0, dtype=np.float32),
+        overlap_edge_weight
+        if overlap_edge_weight is not None
+        else np.zeros(0, dtype=np.float32),
         dtype=np.float32,
     )
 
@@ -2505,26 +2954,28 @@ def _execute_restart(
             n_clusters=n_clusters,
             min_subregions_per_cluster=min_subregions_per_cluster,
         )
-        plans, transforms, thetas, assigned_costs, _, assigned_used_fallback = _compute_assigned_artifacts(
-            measures=measures,
-            labels=labels,
-            atom_coords=atom_coords,
-            atom_features=atom_features,
-            betas=betas,
-            lambda_x=lambda_x,
-            lambda_y=lambda_y,
-            eps=ot_eps,
-            rho=rho,
-            align_iters=align_iters,
-            allow_reflection=allow_reflection,
-            allow_scale=allow_scale,
-            cost_scale_x=cost_scale_x,
-            cost_scale_y=cost_scale_y,
-            min_scale=min_scale,
-            max_scale=max_scale,
-            scale_penalty=scale_penalty,
-            shift_penalty=shift_penalty,
-            compute_device=resolved_compute_device,
+        plans, transforms, thetas, assigned_costs, _, assigned_used_fallback = (
+            _compute_assigned_artifacts(
+                measures=measures,
+                labels=labels,
+                atom_coords=atom_coords,
+                atom_features=atom_features,
+                betas=betas,
+                lambda_x=lambda_x,
+                lambda_y=lambda_y,
+                eps=ot_eps,
+                rho=rho,
+                align_iters=align_iters,
+                allow_reflection=allow_reflection,
+                allow_scale=allow_scale,
+                cost_scale_x=cost_scale_x,
+                cost_scale_y=cost_scale_y,
+                min_scale=min_scale,
+                max_scale=max_scale,
+                scale_penalty=scale_penalty,
+                shift_penalty=shift_penalty,
+                compute_device=resolved_compute_device,
+            )
         )
         assigned_overlap_penalties = overlap_penalties[
             np.arange(labels.shape[0], dtype=np.int64),
@@ -2546,10 +2997,18 @@ def _execute_restart(
         coord_shift = _relative_change(atom_coords, prev_coords)
         feat_shift = _relative_change(atom_features, prev_features)
         mean_transport_obj = float(np.mean(assigned_costs))
-        mean_overlap_penalty = float(np.mean(assigned_overlap_penalties)) if assigned_overlap_penalties.size else 0.0
+        mean_overlap_penalty = (
+            float(np.mean(assigned_overlap_penalties))
+            if assigned_overlap_penalties.size
+            else 0.0
+        )
         mean_obj = float(np.mean(assigned_costs + assigned_overlap_penalties))
         sorted_costs = np.sort(costs, axis=1)
-        mean_margin = float(np.mean(sorted_costs[:, 1] - sorted_costs[:, 0])) if sorted_costs.shape[1] >= 2 else float("nan")
+        mean_margin = (
+            float(np.mean(sorted_costs[:, 1] - sorted_costs[:, 0]))
+            if sorted_costs.shape[1] >= 2
+            else float("nan")
+        )
         objective_history.append(
             {
                 "iteration": int(iteration + 1),
@@ -2562,15 +3021,23 @@ def _execute_restart(
                 "mean_assignment_margin": mean_margin,
                 "forced_label_count": int(forced_label_mask.sum()),
                 "min_subregions_per_cluster": int(
-                    effective_min_cluster_size(len(labels), n_clusters, int(min_subregions_per_cluster))
+                    effective_min_cluster_size(
+                        len(labels), n_clusters, int(min_subregions_per_cluster)
+                    )
                 ),
-                "assigned_ot_fallback_fraction": float(np.mean(assigned_used_fallback.astype(np.float32))),
+                "assigned_ot_fallback_fraction": float(
+                    np.mean(assigned_used_fallback.astype(np.float32))
+                ),
             }
         )
         if label_change_rate < 0.005 and max(coord_shift, feat_shift) < tol:
             break
 
-    final_transport_costs, _candidate_effective_eps_matrix, candidate_used_fallback_matrix = _compute_assignment_costs(
+    (
+        final_transport_costs,
+        _candidate_effective_eps_matrix,
+        candidate_used_fallback_matrix,
+    ) = _compute_assignment_costs(
         measures=measures,
         atom_coords=atom_coords,
         atom_features=atom_features,
@@ -2591,7 +3058,11 @@ def _execute_restart(
         compute_device=resolved_compute_device,
         return_diagnostics=True,
     )
-    final_transport_costs, _candidate_effective_eps_matrix, candidate_used_fallback_matrix = _stabilize_mixed_candidate_assignment_costs(
+    (
+        final_transport_costs,
+        _candidate_effective_eps_matrix,
+        candidate_used_fallback_matrix,
+    ) = _stabilize_mixed_candidate_assignment_costs(
         measures=measures,
         atom_coords=atom_coords,
         atom_features=atom_features,
@@ -2629,21 +3100,33 @@ def _execute_restart(
         min_subregions_per_cluster=min_subregions_per_cluster,
     )
     row_idx = np.arange(final_labels.shape[0], dtype=np.int64)
-    final_assigned_costs = final_transport_costs[row_idx, final_labels.astype(np.int64)].astype(np.float32)
-    final_assigned_used_fallback = candidate_used_fallback_matrix[row_idx, final_labels.astype(np.int64)].astype(bool)
+    final_assigned_costs = final_transport_costs[
+        row_idx, final_labels.astype(np.int64)
+    ].astype(np.float32)
+    final_assigned_used_fallback = candidate_used_fallback_matrix[
+        row_idx, final_labels.astype(np.int64)
+    ].astype(bool)
     final_assigned_overlap_penalties = final_overlap_penalties[
         row_idx,
         final_labels.astype(np.int64),
     ].astype(np.float32)
-    final_objective = float(np.sum(final_assigned_costs + final_assigned_overlap_penalties))
+    final_objective = float(
+        np.sum(final_assigned_costs + final_assigned_overlap_penalties)
+    )
     return {
         "run": int(run),
         "seed": int(run_seed),
         "objective": final_objective,
         "n_iter": int(len(objective_history)),
-        "mean_assigned_cost": float(np.mean(final_assigned_costs + final_assigned_overlap_penalties)),
+        "mean_assigned_cost": float(
+            np.mean(final_assigned_costs + final_assigned_overlap_penalties)
+        ),
         "mean_assigned_transport_cost": float(np.mean(final_assigned_costs)),
-        "mean_assigned_overlap_penalty": float(np.mean(final_assigned_overlap_penalties)) if final_assigned_overlap_penalties.size else 0.0,
+        "mean_assigned_overlap_penalty": float(
+            np.mean(final_assigned_overlap_penalties)
+        )
+        if final_assigned_overlap_penalties.size
+        else 0.0,
         "labels": final_labels.astype(np.int32),
         "costs": final_costs.astype(np.float32),
         "transport_costs": final_transport_costs.astype(np.float32),
@@ -2653,11 +3136,19 @@ def _execute_restart(
         "betas": betas.astype(np.float32),
         "objective_history": objective_history,
         "device": str(resolved_compute_device),
-        "assigned_ot_fallback_fraction": float(np.mean(final_assigned_used_fallback.astype(np.float32))),
-        "candidate_ot_fallback_fraction": float(np.mean(candidate_used_fallback_matrix.astype(np.float32))),
+        "assigned_ot_fallback_fraction": float(
+            np.mean(final_assigned_used_fallback.astype(np.float32))
+        ),
+        "candidate_ot_fallback_fraction": float(
+            np.mean(candidate_used_fallback_matrix.astype(np.float32))
+        ),
         "initial_min_size_forced_label_count": int(init_forced_label_mask.sum()),
         "final_min_size_forced_label_count": int(final_forced_label_mask.sum()),
-        "min_subregions_per_cluster": int(effective_min_cluster_size(len(final_labels), n_clusters, int(min_subregions_per_cluster))),
+        "min_subregions_per_cluster": int(
+            effective_min_cluster_size(
+                len(final_labels), n_clusters, int(min_subregions_per_cluster)
+            )
+        ),
         "runtime_memory": _runtime_memory_snapshot(resolved_compute_device),
     }
 
@@ -2719,15 +3210,23 @@ def _fit_restart_bundles(
         "overlap_edge_weight": overlap_edge_weight,
         "overlap_consistency_weight": float(overlap_consistency_weight),
     }
-    device_pool = _resolve_cuda_device_pool(str(compute_device), int(n_init)) if resolved_compute_device.type == "cuda" else [str(resolved_compute_device)]
-    parallel_restart_workers = _resolve_parallel_restart_workers(device_pool, int(n_init))
+    device_pool = (
+        _resolve_cuda_device_pool(str(compute_device), int(n_init))
+        if resolved_compute_device.type == "cuda"
+        else [str(resolved_compute_device)]
+    )
+    parallel_restart_workers = _resolve_parallel_restart_workers(
+        device_pool, int(n_init)
+    )
     restart_results: list[dict[str, object]] = []
     _progress(
         f"{progress_label}: running {int(n_init)} restart(s) for K={int(n_clusters)} on {','.join(device_pool)} "
         f"with max_iter={int(max_iter)}, align_iters={int(align_iters)}"
     )
     if parallel_restart_workers > 1:
-        total_torch_threads = _env_int("SPATIAL_OT_TORCH_NUM_THREADS", max(torch.get_num_threads(), 1))
+        total_torch_threads = _env_int(
+            "SPATIAL_OT_TORCH_NUM_THREADS", max(torch.get_num_threads(), 1)
+        )
         worker_threads = max(1, total_torch_threads // parallel_restart_workers)
         worker_interop_threads = 1
         ctx = mp.get_context("spawn")
@@ -2735,10 +3234,18 @@ def _fit_restart_bundles(
             max_workers=parallel_restart_workers,
             mp_context=ctx,
             initializer=_init_restart_worker,
-            initargs=(measures, summaries, restart_params, worker_threads, worker_interop_threads),
+            initargs=(
+                measures,
+                summaries,
+                restart_params,
+                worker_threads,
+                worker_interop_threads,
+            ),
         ) as executor:
             future_map = {
-                executor.submit(_run_restart_worker, run, device_pool[run % len(device_pool)]): run
+                executor.submit(
+                    _run_restart_worker, run, device_pool[run % len(device_pool)]
+                ): run
                 for run in range(int(n_init))
             }
             for future in as_completed(future_map):
@@ -2770,14 +3277,31 @@ def _fit_restart_bundles(
             "objective": float(result["objective"]),
             "n_iter": int(result["n_iter"]),
             "mean_assigned_cost": float(result["mean_assigned_cost"]),
-            "mean_assigned_transport_cost": float(result.get("mean_assigned_transport_cost", result["mean_assigned_cost"])),
-            "mean_assigned_overlap_penalty": float(result.get("mean_assigned_overlap_penalty", 0.0)),
+            "mean_assigned_transport_cost": float(
+                result.get("mean_assigned_transport_cost", result["mean_assigned_cost"])
+            ),
+            "mean_assigned_overlap_penalty": float(
+                result.get("mean_assigned_overlap_penalty", 0.0)
+            ),
             "device": str(result["device"]),
-            "assigned_ot_fallback_fraction": float(result["assigned_ot_fallback_fraction"]),
-            "candidate_ot_fallback_fraction": float(result.get("candidate_ot_fallback_fraction", result["assigned_ot_fallback_fraction"])),
-            "initial_min_size_forced_label_count": int(result.get("initial_min_size_forced_label_count", 0)),
-            "final_min_size_forced_label_count": int(result.get("final_min_size_forced_label_count", 0)),
-            "min_subregions_per_cluster": int(result.get("min_subregions_per_cluster", 1)),
+            "assigned_ot_fallback_fraction": float(
+                result["assigned_ot_fallback_fraction"]
+            ),
+            "candidate_ot_fallback_fraction": float(
+                result.get(
+                    "candidate_ot_fallback_fraction",
+                    result["assigned_ot_fallback_fraction"],
+                )
+            ),
+            "initial_min_size_forced_label_count": int(
+                result.get("initial_min_size_forced_label_count", 0)
+            ),
+            "final_min_size_forced_label_count": int(
+                result.get("final_min_size_forced_label_count", 0)
+            ),
+            "min_subregions_per_cluster": int(
+                result.get("min_subregions_per_cluster", 1)
+            ),
             "runtime_memory": dict(result.get("runtime_memory", {})),
         }
         for result in restart_results
@@ -2831,26 +3355,28 @@ def _fit_fixed_label_atom_dictionary(
     for iteration in range(max(int(max_iter), 1)):
         prev_coords = atom_coords.copy()
         prev_features = atom_features.copy()
-        plans, transforms, thetas, assigned_costs, assigned_eps, assigned_fallback = _compute_assigned_artifacts(
-            measures=measures,
-            labels=fixed_labels,
-            atom_coords=atom_coords,
-            atom_features=atom_features,
-            betas=betas,
-            lambda_x=lambda_x,
-            lambda_y=lambda_y,
-            eps=ot_eps,
-            rho=rho,
-            align_iters=align_iters,
-            allow_reflection=allow_reflection,
-            allow_scale=allow_scale,
-            cost_scale_x=cost_scale_x,
-            cost_scale_y=cost_scale_y,
-            min_scale=min_scale,
-            max_scale=max_scale,
-            scale_penalty=scale_penalty,
-            shift_penalty=shift_penalty,
-            compute_device=compute_device,
+        plans, transforms, thetas, assigned_costs, assigned_eps, assigned_fallback = (
+            _compute_assigned_artifacts(
+                measures=measures,
+                labels=fixed_labels,
+                atom_coords=atom_coords,
+                atom_features=atom_features,
+                betas=betas,
+                lambda_x=lambda_x,
+                lambda_y=lambda_y,
+                eps=ot_eps,
+                rho=rho,
+                align_iters=align_iters,
+                allow_reflection=allow_reflection,
+                allow_scale=allow_scale,
+                cost_scale_x=cost_scale_x,
+                cost_scale_y=cost_scale_y,
+                min_scale=min_scale,
+                max_scale=max_scale,
+                scale_penalty=scale_penalty,
+                shift_penalty=shift_penalty,
+                compute_device=compute_device,
+            )
         )
         atom_coords, atom_features, betas = _update_atoms(
             measures=measures,
@@ -2876,7 +3402,9 @@ def _fit_fixed_label_atom_dictionary(
                 "feature_shift": feat_shift,
                 "mean_assignment_margin": float("nan"),
                 "forced_label_count": 0,
-                "assigned_ot_fallback_fraction": float(np.mean(np.asarray(assigned_fallback, dtype=np.float32))),
+                "assigned_ot_fallback_fraction": float(
+                    np.mean(np.asarray(assigned_fallback, dtype=np.float32))
+                ),
             }
         )
         final_plans = plans
@@ -2888,7 +3416,14 @@ def _fit_fixed_label_atom_dictionary(
         if max(coord_shift, feat_shift) < float(tol):
             break
 
-    final_plans, final_transforms, final_thetas, final_costs, final_eps, final_fallback = _compute_assigned_artifacts(
+    (
+        final_plans,
+        final_transforms,
+        final_thetas,
+        final_costs,
+        final_eps,
+        final_fallback,
+    ) = _compute_assigned_artifacts(
         measures=measures,
         labels=fixed_labels,
         atom_coords=atom_coords,
@@ -2963,7 +3498,11 @@ def _cluster_feature_centroids_from_subregions(
     )
     for cid in range(int(n_clusters)):
         idx = label_arr == int(cid)
-        centroids[cid] = mean_features[idx].mean(axis=0).astype(np.float32) if np.any(idx) else global_mean
+        centroids[cid] = (
+            mean_features[idx].mean(axis=0).astype(np.float32)
+            if np.any(idx)
+            else global_mean
+        )
     return centroids
 
 
@@ -2996,27 +3535,32 @@ def _fit_pooled_latent_only_result(
     seed: int,
     basic_niche_size_um: float | None,
     used_basic_niches: bool,
+    joint_refinement_summary: dict[str, object] | None = None,
 ) -> MultilevelOTResult:
     _progress(
         "using fast pooled-subregion-latent-only fit; skipping fixed-label OT atom diagnostics "
-        "because the hard area cap produced a very large subregion set"
+        "because the constructed run has a very large subregion set"
     )
     n_subregions = int(len(subregion_members))
     feature_dim = int(np.asarray(features).shape[1])
-    subregion_latent_embeddings, subregion_latent_diagnostics = _build_subregion_latent_embeddings_from_members(
-        features,
-        subregion_members,
-        mode=subregion_latent_embedding_mode,
-        shrinkage_tau=float(subregion_latent_shrinkage_tau),
-        heterogeneity_weight=float(subregion_latent_heterogeneity_weight),
-        sample_ids=sample_ids,
-        sample_prior_weight=float(subregion_latent_sample_prior_weight),
-        codebook_size=int(subregion_latent_codebook_size),
-        codebook_sample_size=int(subregion_latent_codebook_sample_size),
-        random_state=int(seed),
-        return_diagnostics=True,
+    subregion_latent_embeddings, subregion_latent_diagnostics = (
+        _build_subregion_latent_embeddings_from_members(
+            features,
+            subregion_members,
+            mode=subregion_latent_embedding_mode,
+            shrinkage_tau=float(subregion_latent_shrinkage_tau),
+            heterogeneity_weight=float(subregion_latent_heterogeneity_weight),
+            sample_ids=sample_ids,
+            sample_prior_weight=float(subregion_latent_sample_prior_weight),
+            codebook_size=int(subregion_latent_codebook_size),
+            codebook_sample_size=int(subregion_latent_codebook_sample_size),
+            random_state=int(seed),
+            return_diagnostics=True,
+        )
     )
-    subregion_latent_embedding_mode = _normalize_subregion_latent_embedding_mode(subregion_latent_embedding_mode)
+    subregion_latent_embedding_mode = _normalize_subregion_latent_embedding_mode(
+        subregion_latent_embedding_mode
+    )
     subregion_latent_embedding_metadata = _subregion_latent_embedding_metadata(
         mode=subregion_latent_embedding_mode,
         shrinkage_tau=float(subregion_latent_shrinkage_tau),
@@ -3026,8 +3570,14 @@ def _fit_pooled_latent_only_result(
         codebook_sample_size=int(subregion_latent_codebook_sample_size),
         feature_dim=feature_dim,
         embedding_dim=int(subregion_latent_embeddings.shape[1]),
-        sample_aware_shrinkage=bool(subregion_latent_diagnostics.get("sample_aware_shrinkage", False)),
+        sample_aware_shrinkage=bool(
+            subregion_latent_diagnostics.get("sample_aware_shrinkage", False)
+        ),
     )
+    if joint_refinement_summary is not None:
+        subregion_latent_embedding_metadata["joint_refinement"] = dict(
+            joint_refinement_summary
+        )
     auto_k_selection: dict[str, object] | None = None
     selected_n_clusters = int(n_clusters)
     if bool(auto_n_clusters):
@@ -3035,7 +3585,9 @@ def _fit_pooled_latent_only_result(
             "automatic K selection enabled on pooled subregion latent embeddings; candidate K="
             + ",".join(str(k) for k in candidate_ks)
         )
-        stability_seed_count = max(3, min(8, _env_int("SPATIAL_OT_AUTO_K_STABILITY_SEEDS", 5)))
+        stability_seed_count = max(
+            3, min(8, _env_int("SPATIAL_OT_AUTO_K_STABILITY_SEEDS", 5))
+        )
         auto_k_selection = comprehensive_select_k_from_latent_embeddings(
             subregion_latent_embeddings,
             candidate_n_clusters=candidate_ks,
@@ -3044,8 +3596,12 @@ def _fit_pooled_latent_only_result(
             n_init=max(1, int(n_init)),
             max_silhouette_subregions=int(auto_k_max_score_subregions),
             gap_references=int(auto_k_gap_references),
-            bootstrap_repeats=max(0, _env_int("SPATIAL_OT_AUTO_K_BOOTSTRAP_REPEATS", 3)),
-            bootstrap_fraction=float(_env_float("SPATIAL_OT_AUTO_K_BOOTSTRAP_FRACTION", 0.8)),
+            bootstrap_repeats=max(
+                0, _env_int("SPATIAL_OT_AUTO_K_BOOTSTRAP_REPEATS", 3)
+            ),
+            bootstrap_fraction=float(
+                _env_float("SPATIAL_OT_AUTO_K_BOOTSTRAP_FRACTION", 0.8)
+            ),
             min_cluster_size=int(min_subregions_per_cluster),
             random_state=int(seed),
         )
@@ -3058,7 +3614,9 @@ def _fit_pooled_latent_only_result(
                 "pilot_n_init": None,
                 "pilot_max_iter": None,
                 "final_refit_n_init": int(n_init),
-                "requested_min_subregions_per_cluster": int(requested_min_subregions_per_cluster),
+                "requested_min_subregions_per_cluster": int(
+                    requested_min_subregions_per_cluster
+                ),
                 "reused_pilot_fit_for_final": False,
                 "fast_pooled_latent_only": True,
             }
@@ -3068,7 +3626,9 @@ def _fit_pooled_latent_only_result(
             f"from votes={auto_k_selection.get('criterion_votes', {})}"
         )
 
-    _progress(f"fitting selected K={selected_n_clusters} pooled subregion latent clusters")
+    _progress(
+        f"fitting selected K={selected_n_clusters} pooled subregion latent clusters"
+    )
     latent_fit = fit_kmeans_on_latent_embeddings(
         subregion_latent_embeddings,
         n_clusters=int(selected_n_clusters),
@@ -3076,7 +3636,9 @@ def _fit_pooled_latent_only_result(
         min_cluster_size=int(min_subregions_per_cluster),
         random_state=int(seed),
     )
-    _progress("pooled subregion latent clustering finished; assembling large-run result")
+    _progress(
+        "pooled subregion latent clustering finished; assembling large-run result"
+    )
     labels = np.asarray(latent_fit["labels"], dtype=np.int32)
     final_argmin_labels = np.asarray(latent_fit["argmin_labels"], dtype=np.int32)
     final_costs = np.asarray(latent_fit["costs"], dtype=np.float32)
@@ -3099,17 +3661,30 @@ def _fit_pooled_latent_only_result(
         feature_dim=feature_dim,
     )
     atom_coords = np.zeros((int(selected_n_clusters), atom_count, 2), dtype=np.float32)
-    atom_features = np.repeat(cluster_feature_centroids[:, None, :], atom_count, axis=1).astype(np.float32)
-    betas = np.full((int(selected_n_clusters), atom_count), 1.0 / float(atom_count), dtype=np.float32)
-    cluster_supports = np.concatenate([atom_coords, atom_features], axis=2).astype(np.float32)
+    atom_features = np.repeat(
+        cluster_feature_centroids[:, None, :], atom_count, axis=1
+    ).astype(np.float32)
+    betas = np.full(
+        (int(selected_n_clusters), atom_count),
+        1.0 / float(atom_count),
+        dtype=np.float32,
+    )
+    cluster_supports = np.concatenate([atom_coords, atom_features], axis=2).astype(
+        np.float32
+    )
 
-    standardized = np.asarray(latent_fit.get("standardized_embeddings", subregion_latent_embeddings), dtype=np.float32)
+    standardized = np.asarray(
+        latent_fit.get("standardized_embeddings", subregion_latent_embeddings),
+        dtype=np.float32,
+    )
     measure_summaries = standardized.astype(np.float32)
     atom_weights = standardized[:, : min(standardized.shape[1], 32)].astype(np.float32)
     if atom_weights.shape[1] == 0:
         atom_weights = np.zeros((n_subregions, 1), dtype=np.float32)
 
-    assigned = final_costs[np.arange(n_subregions, dtype=np.int64), labels.astype(np.int64)].astype(np.float32)
+    assigned = final_costs[
+        np.arange(n_subregions, dtype=np.int64), labels.astype(np.int64)
+    ].astype(np.float32)
     spot_latent = empty_spot_level_latent_charts(
         n_cells=int(features.shape[0]),
         atoms_per_cluster=atom_count,
@@ -3127,10 +3702,18 @@ def _fit_pooled_latent_only_result(
             "device": "cpu",
             "assigned_ot_fallback_fraction": 0.0,
             "candidate_ot_fallback_fraction": 0.0,
-            "initial_min_size_forced_label_count": int(np.asarray(latent_fit["forced_label_mask"], dtype=bool).sum()),
-            "final_min_size_forced_label_count": int(np.asarray(latent_fit["forced_label_mask"], dtype=bool).sum()),
+            "initial_min_size_forced_label_count": int(
+                np.asarray(latent_fit["forced_label_mask"], dtype=bool).sum()
+            ),
+            "final_min_size_forced_label_count": int(
+                np.asarray(latent_fit["forced_label_mask"], dtype=bool).sum()
+            ),
             "min_subregions_per_cluster": int(
-                effective_min_cluster_size(n_subregions, int(selected_n_clusters), int(min_subregions_per_cluster))
+                effective_min_cluster_size(
+                    n_subregions,
+                    int(selected_n_clusters),
+                    int(min_subregions_per_cluster),
+                )
             ),
             "runtime_memory": _runtime_memory_snapshot(_resolve_compute_device("cpu")),
             "label_assignment_source": "pooled_subregion_latent_embeddings",
@@ -3140,29 +3723,46 @@ def _fit_pooled_latent_only_result(
     ]
     zero_sub = np.zeros(n_subregions, dtype=np.float32)
     false_sub = np.zeros(n_subregions, dtype=bool)
-    candidate_eps = np.full((n_subregions, int(selected_n_clusters)), float(ot_eps), dtype=np.float32)
+    candidate_eps = np.full(
+        (n_subregions, int(selected_n_clusters)), float(ot_eps), dtype=np.float32
+    )
     candidate_fallback = np.zeros((n_subregions, int(selected_n_clusters)), dtype=bool)
-    subregion_basic_niche_ids = [np.zeros(0, dtype=np.int32) for _ in range(n_subregions)]
+    subregion_basic_niche_ids = [
+        np.zeros(0, dtype=np.int32) for _ in range(n_subregions)
+    ]
     return MultilevelOTResult(
-        basic_niche_size_um=float(basic_niche_size_um) if used_basic_niches and basic_niche_size_um is not None else None,
+        basic_niche_size_um=float(basic_niche_size_um)
+        if used_basic_niches and basic_niche_size_um is not None
+        else None,
         basic_niche_centers_um=np.zeros((0, 2), dtype=np.float32),
         basic_niche_members=[],
         subregion_basic_niche_ids=subregion_basic_niche_ids,
         subregion_centers_um=np.asarray(centers_um, dtype=np.float32),
-        subregion_members=[np.asarray(members, dtype=np.int32) for members in subregion_members],
+        subregion_members=[
+            np.asarray(members, dtype=np.int32) for members in subregion_members
+        ],
         subregion_argmin_labels=final_argmin_labels,
-        subregion_forced_label_mask=np.asarray(latent_fit["forced_label_mask"], dtype=bool),
-        subregion_geometry_point_counts=np.asarray([len(members) for members in subregion_members], dtype=np.int32),
-        subregion_geometry_sources=["observed_point_cloud_fast_area_capped"] * n_subregions,
+        subregion_forced_label_mask=np.asarray(
+            latent_fit["forced_label_mask"], dtype=bool
+        ),
+        subregion_geometry_point_counts=np.asarray(
+            [len(members) for members in subregion_members], dtype=np.int32
+        ),
+        subregion_geometry_sources=["observed_point_cloud_fast_area_capped"]
+        * n_subregions,
         subregion_geometry_used_fallback=np.zeros(n_subregions, dtype=bool),
         subregion_normalizer_radius_p95=np.full(n_subregions, np.nan, dtype=np.float32),
         subregion_normalizer_radius_max=np.full(n_subregions, np.nan, dtype=np.float32),
-        subregion_normalizer_interpolation_residual=np.full(n_subregions, np.nan, dtype=np.float32),
+        subregion_normalizer_interpolation_residual=np.full(
+            n_subregions, np.nan, dtype=np.float32
+        ),
         subregion_cluster_labels=labels,
         subregion_cluster_probs=subregion_cluster_probs.astype(np.float32),
         subregion_cluster_costs=final_costs.astype(np.float32),
         subregion_cluster_transport_costs=np.zeros_like(final_costs, dtype=np.float32),
-        subregion_cluster_overlap_penalties=np.zeros_like(final_costs, dtype=np.float32),
+        subregion_cluster_overlap_penalties=np.zeros_like(
+            final_costs, dtype=np.float32
+        ),
         subregion_atom_weights=atom_weights.astype(np.float32),
         subregion_measure_summaries=measure_summaries.astype(np.float32),
         subregion_latent_embeddings=subregion_latent_embeddings.astype(np.float32),
@@ -3174,10 +3774,14 @@ def _fit_pooled_latent_only_result(
         subregion_latent_raw_to_shrunk_distance=np.asarray(
             subregion_latent_diagnostics["raw_to_shrunk_distance"], dtype=np.float32
         ),
-        subregion_sample_ids=np.asarray(subregion_latent_diagnostics["sample_ids"], dtype=object),
+        subregion_sample_ids=np.asarray(
+            subregion_latent_diagnostics["sample_ids"], dtype=object
+        ),
         subregion_clustering_method="pooled_subregion_latent",
         subregion_clustering_uses_spatial=False,
-        subregion_assigned_effective_eps=np.full(n_subregions, float(ot_eps), dtype=np.float32),
+        subregion_assigned_effective_eps=np.full(
+            n_subregions, float(ot_eps), dtype=np.float32
+        ),
         subregion_assigned_used_ot_fallback=false_sub,
         subregion_candidate_effective_eps_matrix=candidate_eps,
         subregion_candidate_used_ot_fallback_matrix=candidate_fallback,
@@ -3197,69 +3801,143 @@ def _fit_pooled_latent_only_result(
         cell_context_cluster_probs=cell_probs,
         cell_cluster_probs=cell_probs,
         cell_cluster_labels=cell_labels,
-        spot_latent_cell_indices=spot_latent["spot_latent_cell_indices"].astype(np.int32),
-        spot_latent_subregion_ids=spot_latent["spot_latent_subregion_ids"].astype(np.int32),
-        spot_latent_cluster_labels=spot_latent["spot_latent_cluster_labels"].astype(np.int32),
+        spot_latent_cell_indices=spot_latent["spot_latent_cell_indices"].astype(
+            np.int32
+        ),
+        spot_latent_subregion_ids=spot_latent["spot_latent_subregion_ids"].astype(
+            np.int32
+        ),
+        spot_latent_cluster_labels=spot_latent["spot_latent_cluster_labels"].astype(
+            np.int32
+        ),
         spot_latent_coords=spot_latent["spot_latent_coords"].astype(np.float32),
-        spot_latent_within_coords=spot_latent["spot_latent_within_coords"].astype(np.float32),
-        spot_latent_cluster_anchors=spot_latent["spot_latent_cluster_anchors"].astype(np.float32),
-        spot_latent_atom_embedding=spot_latent["spot_latent_atom_embedding"].astype(np.float32),
-        spot_latent_aligned_coords=spot_latent["spot_latent_aligned_coords"].astype(np.float32),
-        spot_latent_cluster_probs=spot_latent["spot_latent_cluster_probs"].astype(np.float32),
-        spot_latent_atom_confidence=spot_latent["spot_latent_atom_confidence"].astype(np.float32),
-        spot_latent_posterior_entropy=spot_latent["spot_latent_posterior_entropy"].astype(np.float32),
-        spot_latent_normalized_posterior_entropy=spot_latent["spot_latent_normalized_posterior_entropy"].astype(np.float32),
+        spot_latent_within_coords=spot_latent["spot_latent_within_coords"].astype(
+            np.float32
+        ),
+        spot_latent_cluster_anchors=spot_latent["spot_latent_cluster_anchors"].astype(
+            np.float32
+        ),
+        spot_latent_atom_embedding=spot_latent["spot_latent_atom_embedding"].astype(
+            np.float32
+        ),
+        spot_latent_aligned_coords=spot_latent["spot_latent_aligned_coords"].astype(
+            np.float32
+        ),
+        spot_latent_cluster_probs=spot_latent["spot_latent_cluster_probs"].astype(
+            np.float32
+        ),
+        spot_latent_atom_confidence=spot_latent["spot_latent_atom_confidence"].astype(
+            np.float32
+        ),
+        spot_latent_posterior_entropy=spot_latent[
+            "spot_latent_posterior_entropy"
+        ].astype(np.float32),
+        spot_latent_normalized_posterior_entropy=spot_latent[
+            "spot_latent_normalized_posterior_entropy"
+        ].astype(np.float32),
         spot_latent_atom_argmax=spot_latent["spot_latent_atom_argmax"].astype(np.int32),
-        spot_latent_temperature_used=spot_latent["spot_latent_temperature_used"].astype(np.float32),
-        spot_latent_temperature_cost_gap=spot_latent["spot_latent_temperature_cost_gap"].astype(np.float32),
-        spot_latent_temperature_fixed=spot_latent["spot_latent_temperature_fixed"].astype(np.float32),
+        spot_latent_temperature_used=spot_latent["spot_latent_temperature_used"].astype(
+            np.float32
+        ),
+        spot_latent_temperature_cost_gap=spot_latent[
+            "spot_latent_temperature_cost_gap"
+        ].astype(np.float32),
+        spot_latent_temperature_fixed=spot_latent[
+            "spot_latent_temperature_fixed"
+        ].astype(np.float32),
         spot_latent_weights=spot_latent["spot_latent_weights"].astype(np.float32),
-        spot_latent_atom_posteriors=spot_latent["spot_latent_atom_posteriors"].astype(np.float32),
-        spot_latent_posterior_entropy_cost_gap=spot_latent["spot_latent_posterior_entropy_cost_gap"].astype(np.float32),
-        spot_latent_normalized_posterior_entropy_cost_gap=spot_latent["spot_latent_normalized_posterior_entropy_cost_gap"].astype(np.float32),
-        spot_latent_posterior_entropy_fixed=spot_latent["spot_latent_posterior_entropy_fixed"].astype(np.float32),
-        spot_latent_normalized_posterior_entropy_fixed=spot_latent["spot_latent_normalized_posterior_entropy_fixed"].astype(np.float32),
-        spot_latent_cluster_anchor_distance=spot_latent["spot_latent_cluster_anchor_distance"].astype(np.float32),
-        spot_latent_cluster_anchor_ot_fallback_matrix=spot_latent["spot_latent_cluster_anchor_ot_fallback_matrix"].astype(bool),
-        spot_latent_cluster_anchor_solver_status_matrix=spot_latent["spot_latent_cluster_anchor_solver_status_matrix"].astype(np.int8),
+        spot_latent_atom_posteriors=spot_latent["spot_latent_atom_posteriors"].astype(
+            np.float32
+        ),
+        spot_latent_posterior_entropy_cost_gap=spot_latent[
+            "spot_latent_posterior_entropy_cost_gap"
+        ].astype(np.float32),
+        spot_latent_normalized_posterior_entropy_cost_gap=spot_latent[
+            "spot_latent_normalized_posterior_entropy_cost_gap"
+        ].astype(np.float32),
+        spot_latent_posterior_entropy_fixed=spot_latent[
+            "spot_latent_posterior_entropy_fixed"
+        ].astype(np.float32),
+        spot_latent_normalized_posterior_entropy_fixed=spot_latent[
+            "spot_latent_normalized_posterior_entropy_fixed"
+        ].astype(np.float32),
+        spot_latent_cluster_anchor_distance=spot_latent[
+            "spot_latent_cluster_anchor_distance"
+        ].astype(np.float32),
+        spot_latent_cluster_anchor_ot_fallback_matrix=spot_latent[
+            "spot_latent_cluster_anchor_ot_fallback_matrix"
+        ].astype(bool),
+        spot_latent_cluster_anchor_solver_status_matrix=spot_latent[
+            "spot_latent_cluster_anchor_solver_status_matrix"
+        ].astype(np.int8),
         spot_latent_cluster_anchor_ot_fallback_fraction=float(
             spot_latent["spot_latent_cluster_anchor_ot_fallback_fraction"].item()
         ),
-        spot_latent_atom_mds_stress=spot_latent["spot_latent_atom_mds_stress"].astype(np.float32),
+        spot_latent_atom_mds_stress=spot_latent["spot_latent_atom_mds_stress"].astype(
+            np.float32
+        ),
         spot_latent_atom_mds_positive_eigenvalue_mass_2d=spot_latent[
             "spot_latent_atom_mds_positive_eigenvalue_mass_2d"
         ].astype(np.float32),
         spot_latent_atom_mds_negative_eigenvalue_mass_fraction=spot_latent[
             "spot_latent_atom_mds_negative_eigenvalue_mass_fraction"
         ].astype(np.float32),
-        cell_spot_latent_unweighted_coords=spot_latent["cell_spot_latent_unweighted_coords"].astype(np.float32),
+        cell_spot_latent_unweighted_coords=spot_latent[
+            "cell_spot_latent_unweighted_coords"
+        ].astype(np.float32),
         cell_spot_latent_confidence_weighted_coords=spot_latent[
             "cell_spot_latent_confidence_weighted_coords"
         ].astype(np.float32),
-        cell_spot_latent_coords=spot_latent["cell_spot_latent_coords"].astype(np.float32),
-        cell_spot_latent_cluster_labels=spot_latent["cell_spot_latent_cluster_labels"].astype(np.int32),
-        cell_spot_latent_weights=spot_latent["cell_spot_latent_weights"].astype(np.float32),
-        cell_spot_latent_posterior_entropy=spot_latent["cell_spot_latent_posterior_entropy"].astype(np.float32),
+        cell_spot_latent_coords=spot_latent["cell_spot_latent_coords"].astype(
+            np.float32
+        ),
+        cell_spot_latent_cluster_labels=spot_latent[
+            "cell_spot_latent_cluster_labels"
+        ].astype(np.int32),
+        cell_spot_latent_weights=spot_latent["cell_spot_latent_weights"].astype(
+            np.float32
+        ),
+        cell_spot_latent_posterior_entropy=spot_latent[
+            "cell_spot_latent_posterior_entropy"
+        ].astype(np.float32),
         spot_latent_mode=str(spot_latent["spot_latent_mode"].item()),
-        spot_latent_chart_learning_mode=str(spot_latent["spot_latent_chart_learning_mode"].item()),
-        spot_latent_projection_mode=str(spot_latent["spot_latent_projection_mode"].item()),
-        spot_latent_validation_role=str(spot_latent["spot_latent_validation_role"].item()),
-        spot_latent_global_within_scale=float(spot_latent["spot_latent_global_within_scale"].item()),
-        spot_latent_assignment_temperature=float(spot_latent["spot_latent_assignment_temperature"].item()),
-        spot_latent_temperature_mode=str(spot_latent["spot_latent_temperature_mode"].item()),
-        spot_latent_cluster_anchor_distance_method=str(spot_latent["spot_latent_cluster_anchor_distance_method"].item()),
+        spot_latent_chart_learning_mode=str(
+            spot_latent["spot_latent_chart_learning_mode"].item()
+        ),
+        spot_latent_projection_mode=str(
+            spot_latent["spot_latent_projection_mode"].item()
+        ),
+        spot_latent_validation_role=str(
+            spot_latent["spot_latent_validation_role"].item()
+        ),
+        spot_latent_global_within_scale=float(
+            spot_latent["spot_latent_global_within_scale"].item()
+        ),
+        spot_latent_assignment_temperature=float(
+            spot_latent["spot_latent_assignment_temperature"].item()
+        ),
+        spot_latent_temperature_mode=str(
+            spot_latent["spot_latent_temperature_mode"].item()
+        ),
+        spot_latent_cluster_anchor_distance_method=str(
+            spot_latent["spot_latent_cluster_anchor_distance_method"].item()
+        ),
         spot_latent_cluster_anchor_distance_requested_method=str(
             spot_latent["spot_latent_cluster_anchor_distance_requested_method"].item()
         ),
         spot_latent_cluster_anchor_distance_effective_method=str(
             spot_latent["spot_latent_cluster_anchor_distance_effective_method"].item()
         ),
-        spot_latent_cluster_mds_stress=float(spot_latent["spot_latent_cluster_mds_stress"].item()),
+        spot_latent_cluster_mds_stress=float(
+            spot_latent["spot_latent_cluster_mds_stress"].item()
+        ),
         spot_latent_cluster_mds_positive_eigenvalue_mass_2d=float(
             spot_latent["spot_latent_cluster_mds_positive_eigenvalue_mass_2d"].item()
         ),
         spot_latent_cluster_mds_negative_eigenvalue_mass_fraction=float(
-            spot_latent["spot_latent_cluster_mds_negative_eigenvalue_mass_fraction"].item()
+            spot_latent[
+                "spot_latent_cluster_mds_negative_eigenvalue_mass_fraction"
+            ].item()
         ),
         cost_scale_x=1.0,
         cost_scale_y=1.0,
@@ -3275,7 +3953,9 @@ def _fit_pooled_latent_only_result(
         restart_summaries=restart_summaries,
         min_subregions_per_cluster=int(requested_min_subregions_per_cluster),
         effective_min_subregions_per_cluster=int(
-            effective_min_cluster_size(n_subregions, int(selected_n_clusters), int(min_subregions_per_cluster))
+            effective_min_cluster_size(
+                n_subregions, int(selected_n_clusters), int(min_subregions_per_cluster)
+            )
         ),
         auto_k_selection=auto_k_selection,
     )
@@ -3327,8 +4007,15 @@ def fit_multilevel_ot(
     deep_segmentation_feature_dims: int = 32,
     deep_segmentation_feature_weight: float = 1.0,
     deep_segmentation_spatial_weight: float = 0.05,
+    joint_refinement_iters: int = 2,
+    joint_refinement_knn: int = 12,
+    joint_refinement_feature_dims: int = 32,
+    joint_refinement_cluster_weight: float = 1.0,
+    joint_refinement_spatial_weight: float = 0.25,
+    joint_refinement_cut_weight: float = 0.5,
+    joint_refinement_max_move_fraction: float = 0.05,
     compute_spot_latent: bool = True,
-    subregion_clustering_method: str = "pooled_subregion_latent",
+    subregion_clustering_method: str = "heterogeneity_ot_niche",
     subregion_latent_embedding_mode: str = "mean_std_shrunk",
     subregion_latent_shrinkage_tau: float = 25.0,
     subregion_latent_heterogeneity_weight: float = _SUBREGION_LATENT_HETEROGENEITY_WEIGHT,
@@ -3383,23 +4070,55 @@ def fit_multilevel_ot(
     if int(auto_k_mds_components) < 1:
         raise ValueError("auto_k_mds_components must be at least 1")
     if int(auto_k_pilot_n_init) < 1 or int(auto_k_pilot_max_iter) < 1:
-        raise ValueError("auto_k_pilot_n_init and auto_k_pilot_max_iter must be at least 1")
+        raise ValueError(
+            "auto_k_pilot_n_init and auto_k_pilot_max_iter must be at least 1"
+        )
     if int(min_subregions_per_cluster) < 1:
         raise ValueError("min_subregions_per_cluster must be at least 1")
     construction_method = str(subregion_construction_method).strip().lower()
-    if construction_method not in {"data_driven", "deep_segmentation"}:
-        raise ValueError("subregion_construction_method must be 'data_driven' or 'deep_segmentation'.")
+    if construction_method not in {
+        "data_driven",
+        "deep_segmentation",
+        "joint_refinement",
+    }:
+        raise ValueError(
+            "subregion_construction_method must be 'data_driven', 'deep_segmentation', or 'joint_refinement'."
+        )
     clustering_method = str(subregion_clustering_method).strip().lower()
-    subregion_latent_embedding_mode = _normalize_subregion_latent_embedding_mode(subregion_latent_embedding_mode)
+    subregion_latent_embedding_mode = _normalize_subregion_latent_embedding_mode(
+        subregion_latent_embedding_mode
+    )
     subregion_latent_shrinkage_tau = max(float(subregion_latent_shrinkage_tau), 0.0)
-    subregion_latent_heterogeneity_weight = max(float(subregion_latent_heterogeneity_weight), 0.0)
-    subregion_latent_sample_prior_weight = float(np.clip(float(subregion_latent_sample_prior_weight), 0.0, 1.0))
+    subregion_latent_heterogeneity_weight = max(
+        float(subregion_latent_heterogeneity_weight), 0.0
+    )
+    subregion_latent_sample_prior_weight = float(
+        np.clip(float(subregion_latent_sample_prior_weight), 0.0, 1.0)
+    )
     subregion_latent_codebook_size = max(int(subregion_latent_codebook_size), 2)
-    subregion_latent_codebook_sample_size = max(int(subregion_latent_codebook_sample_size), subregion_latent_codebook_size)
-    if clustering_method not in {"pooled_subregion_latent", "ot_dictionary"}:
-        raise ValueError("subregion_clustering_method must be 'pooled_subregion_latent' or 'ot_dictionary'.")
+    subregion_latent_codebook_sample_size = max(
+        int(subregion_latent_codebook_sample_size), subregion_latent_codebook_size
+    )
+    if clustering_method not in {
+        "pooled_subregion_latent",
+        "heterogeneity_ot_niche",
+        "ot_dictionary",
+    }:
+        raise ValueError(
+            "subregion_clustering_method must be 'pooled_subregion_latent', "
+            "'heterogeneity_ot_niche', or 'ot_dictionary'."
+        )
     subregion_feature_weight = max(0.0, float(subregion_feature_weight))
     subregion_feature_dims = max(0, int(subregion_feature_dims))
+    joint_refinement_iters = max(0, int(joint_refinement_iters))
+    joint_refinement_knn = max(2, int(joint_refinement_knn))
+    joint_refinement_feature_dims = max(1, int(joint_refinement_feature_dims))
+    joint_refinement_cluster_weight = max(0.0, float(joint_refinement_cluster_weight))
+    joint_refinement_spatial_weight = max(0.0, float(joint_refinement_spatial_weight))
+    joint_refinement_cut_weight = max(0.0, float(joint_refinement_cut_weight))
+    joint_refinement_max_move_fraction = float(
+        np.clip(float(joint_refinement_max_move_fraction), 0.0, 1.0)
+    )
 
     _progress(
         f"standardizing feature matrix for {features.shape[0]} cells and {features.shape[1]} features"
@@ -3413,20 +4132,31 @@ def fit_multilevel_ot(
     if subregion_members is None:
         if region_geometries is not None:
             _progress(f"using {len(region_geometries)} explicit region geometries")
-            subregion_members = [np.asarray(region.members, dtype=np.int32) for region in region_geometries]
-            subregion_basic_niche_ids = [np.asarray([], dtype=np.int32) for _ in subregion_members]
+            subregion_members = [
+                np.asarray(region.members, dtype=np.int32)
+                for region in region_geometries
+            ]
+            subregion_basic_niche_ids = [
+                np.asarray([], dtype=np.int32) for _ in subregion_members
+            ]
         elif build_generated_subregions:
             target_scale_for_subregions = (
                 float(basic_niche_size_um)
                 if basic_niche_size_um is not None
                 else float(stride_um)
             )
-            if construction_method == "deep_segmentation":
+            if construction_method in {"deep_segmentation", "joint_refinement"}:
+                refinement_suffix = (
+                    "; cluster-aware joint refinement will run after initial pooled-latent clustering"
+                    if construction_method == "joint_refinement"
+                    else ""
+                )
                 _progress(
                     "building mutually exclusive deep-graph segmentation subregions "
                     f"(target_scale={target_scale_for_subregions:g}um, knn={int(deep_segmentation_knn)}, "
-                    f"cap={int(max_subregions)}, max_area={max_subregion_area_um2}; "
-                    "learned embedding affinity drives boundary cuts)"
+                    f"cap={int(max_subregions)}, soft_area_target={max_subregion_area_um2}; "
+                    "learned embedding affinity drives boundary cuts; min_cells and connectivity are hard constraints"
+                    f"{refinement_suffix})"
                 )
                 used_basic_niches = True
                 (
@@ -3448,13 +4178,15 @@ def fit_multilevel_ot(
                     segmentation_spatial_weight=float(deep_segmentation_spatial_weight),
                     seed=seed,
                 )
-                proposal_region_geometries = _region_geometries_from_observed_points(subregion_members)
+                proposal_region_geometries = _region_geometries_from_observed_points(
+                    subregion_members
+                )
             elif basic_niche_size_um is not None:
                 _progress(
                     "building mutually exclusive data-driven subregions "
                     f"(target_scale={float(basic_niche_size_um):g}um, stride={float(stride_um):g}um, "
                     f"feature_weight={subregion_feature_weight:g}, cap={int(max_subregions)}, "
-                    f"max_area={max_subregion_area_um2}; "
+                    f"soft_area_target={max_subregion_area_um2}; "
                     "radius_um is not a membership radius)"
                 )
                 used_basic_niches = True
@@ -3477,12 +4209,14 @@ def fit_multilevel_ot(
                     max_area_um2=max_subregion_area_um2,
                     seed=seed,
                 )
-                proposal_region_geometries = _region_geometries_from_observed_points(subregion_members)
+                proposal_region_geometries = _region_geometries_from_observed_points(
+                    subregion_members
+                )
             else:
                 _progress(
                     "building mutually exclusive data-driven subregions "
                     f"(target_scale={float(stride_um):g}um, feature_weight={subregion_feature_weight:g}, "
-                    f"cap={int(max_subregions)}, max_area={max_subregion_area_um2}; "
+                    f"cap={int(max_subregions)}, soft_area_target={max_subregion_area_um2}; "
                     "radius_um is not a membership radius); geometry is data-driven"
                 )
                 (
@@ -3503,46 +4237,74 @@ def fit_multilevel_ot(
                     partition_feature_dims=subregion_feature_dims,
                     seed=seed,
                 )
-                subregion_basic_niche_ids = [np.asarray([], dtype=np.int32) for _ in subregion_members]
-                proposal_region_geometries = _region_geometries_from_observed_points(subregion_members)
+                subregion_basic_niche_ids = [
+                    np.asarray([], dtype=np.int32) for _ in subregion_members
+                ]
+                proposal_region_geometries = _region_geometries_from_observed_points(
+                    subregion_members
+                )
         else:
-            raise ValueError("Explicit region_geometries or subregion_members are required when generated subregion construction is disabled.")
+            raise ValueError(
+                "Explicit region_geometries or subregion_members are required when generated subregion construction is disabled."
+            )
     else:
-        subregion_members = [np.asarray(members, dtype=np.int32) for members in subregion_members]
-        subregion_basic_niche_ids = [np.asarray([], dtype=np.int32) for _ in subregion_members]
+        subregion_members = [
+            np.asarray(members, dtype=np.int32) for members in subregion_members
+        ]
+        subregion_basic_niche_ids = [
+            np.asarray([], dtype=np.int32) for _ in subregion_members
+        ]
     if region_geometries is None:
-        region_geometries = proposal_region_geometries or _region_geometries_from_members(subregion_members)
+        region_geometries = (
+            proposal_region_geometries
+            or _region_geometries_from_members(subregion_members)
+        )
     if len(subregion_members) == 0:
         raise RuntimeError("No valid subregions were provided or constructed.")
     if len(region_geometries) != len(subregion_members):
-        raise ValueError("region_geometries must have the same length as the constructed subregions.")
+        raise ValueError(
+            "region_geometries must have the same length as the constructed subregions."
+        )
     centers_um: np.ndarray | None = None
     if subregion_centers_um is not None:
         centers_um = np.asarray(subregion_centers_um, dtype=np.float32)
         if centers_um.ndim != 2 or centers_um.shape[1] != 2:
-            raise ValueError("subregion_centers_um must be a 2D array with shape (n_subregions, 2).")
+            raise ValueError(
+                "subregion_centers_um must be a 2D array with shape (n_subregions, 2)."
+            )
         if centers_um.shape[0] != len(subregion_members):
             raise ValueError("subregion_centers_um must have one row per subregion.")
     try:
         _validate_mutually_exclusive_memberships(features.shape[0], subregion_members)
     except RuntimeError as exc:
-        raise ValueError("Subregion memberships must be mutually exclusive and contain valid non-empty cell indices.") from exc
+        raise ValueError(
+            "Subregion memberships must be mutually exclusive and contain valid non-empty cell indices."
+        ) from exc
 
-    if max_subregion_area_um2 is None:
-        keep_idx = [idx for idx, members in enumerate(subregion_members) if np.asarray(members).size >= int(min_cells)]
-        if len(keep_idx) != len(subregion_members):
-            if not keep_idx:
-                raise RuntimeError("No valid subregions remain after applying min_cells.")
-            keep_arr = np.asarray(keep_idx, dtype=np.int32)
-            if centers_um is not None:
-                centers_um = centers_um[keep_arr]
-            subregion_members = [subregion_members[int(idx)] for idx in keep_idx]
-            subregion_basic_niche_ids = [subregion_basic_niche_ids[int(idx)] for idx in keep_idx]
-            region_geometries = [region_geometries[int(idx)] for idx in keep_idx]
-            try:
-                _validate_mutually_exclusive_memberships(features.shape[0], subregion_members)
-            except RuntimeError as exc:
-                raise ValueError("Subregion memberships must remain mutually exclusive after min_cells filtering.") from exc
+    keep_idx = [
+        idx
+        for idx, members in enumerate(subregion_members)
+        if np.asarray(members).size >= int(min_cells)
+    ]
+    if len(keep_idx) != len(subregion_members):
+        if not keep_idx:
+            raise RuntimeError("No valid subregions remain after applying min_cells.")
+        keep_arr = np.asarray(keep_idx, dtype=np.int32)
+        if centers_um is not None:
+            centers_um = centers_um[keep_arr]
+        subregion_members = [subregion_members[int(idx)] for idx in keep_idx]
+        subregion_basic_niche_ids = [
+            subregion_basic_niche_ids[int(idx)] for idx in keep_idx
+        ]
+        region_geometries = [region_geometries[int(idx)] for idx in keep_idx]
+        try:
+            _validate_mutually_exclusive_memberships(
+                features.shape[0], subregion_members
+            )
+        except RuntimeError as exc:
+            raise ValueError(
+                "Subregion memberships must remain mutually exclusive after min_cells filtering."
+            ) from exc
     if centers_um is None:
         centers_um = np.vstack(
             [
@@ -3557,7 +4319,9 @@ def fit_multilevel_ot(
         fallback_n_clusters=requested_n_clusters,
         n_subregions=int(centers_um.shape[0]),
     )
-    required_n_clusters = max(candidate_ks) if bool(auto_n_clusters) else requested_n_clusters
+    required_n_clusters = (
+        max(candidate_ks) if bool(auto_n_clusters) else requested_n_clusters
+    )
     if centers_um.shape[0] < required_n_clusters:
         raise ValueError(
             f"n_clusters={required_n_clusters} exceeds the number of constructed subregions={centers_um.shape[0]}."
@@ -3572,6 +4336,195 @@ def fit_multilevel_ot(
         _progress(
             f"requested min_subregions_per_cluster={requested_min_subregions_per_cluster} exceeds the "
             f"available average for K={required_n_clusters}; using effective minimum {effective_min_for_requested_k}"
+        )
+
+    joint_refinement_summary: dict[str, object] = {
+        "enabled": bool(construction_method == "joint_refinement"),
+        "applied": False,
+    }
+    if construction_method == "joint_refinement":
+        if not build_generated_subregions:
+            raise ValueError(
+                "subregion_construction_method='joint_refinement' requires generated subregions."
+            )
+        if clustering_method not in {"pooled_subregion_latent", "heterogeneity_ot_niche"}:
+            raise ValueError(
+                "subregion_construction_method='joint_refinement' requires "
+                "an embedding-based subregion_clustering_method."
+            )
+        _progress(
+            "running constrained joint segmentation-clustering refinement "
+            f"(iters={joint_refinement_iters}, knn={joint_refinement_knn}, "
+            f"max_move_fraction={joint_refinement_max_move_fraction:g})"
+        )
+        initial_embeddings, _initial_diagnostics = (
+            _build_subregion_latent_embeddings_from_members(
+                features,
+                subregion_members,
+                mode=subregion_latent_embedding_mode,
+                shrinkage_tau=subregion_latent_shrinkage_tau,
+                heterogeneity_weight=subregion_latent_heterogeneity_weight,
+                sample_ids=sample_ids,
+                sample_prior_weight=subregion_latent_sample_prior_weight,
+                codebook_size=subregion_latent_codebook_size,
+                codebook_sample_size=subregion_latent_codebook_sample_size,
+                random_state=int(seed),
+                return_diagnostics=True,
+            )
+        )
+        preliminary_k = int(requested_n_clusters)
+        preliminary_auto_k_selection: dict[str, object] | None = None
+        if bool(auto_n_clusters):
+            preliminary_auto_k_selection = (
+                comprehensive_select_k_from_latent_embeddings(
+                    initial_embeddings,
+                    candidate_n_clusters=candidate_ks,
+                    fallback_n_clusters=int(requested_n_clusters),
+                    seeds=tuple(
+                        int(seed) + offset
+                        for offset in range(
+                            max(
+                                3,
+                                min(
+                                    8, _env_int("SPATIAL_OT_AUTO_K_STABILITY_SEEDS", 5)
+                                ),
+                            )
+                        )
+                    ),
+                    n_init=max(1, int(auto_k_pilot_n_init)),
+                    max_silhouette_subregions=int(auto_k_max_score_subregions),
+                    gap_references=int(auto_k_gap_references),
+                    bootstrap_repeats=max(
+                        0, _env_int("SPATIAL_OT_AUTO_K_BOOTSTRAP_REPEATS", 3)
+                    ),
+                    bootstrap_fraction=float(
+                        _env_float("SPATIAL_OT_AUTO_K_BOOTSTRAP_FRACTION", 0.8)
+                    ),
+                    min_cluster_size=int(effective_min_for_requested_k),
+                    random_state=int(seed),
+                )
+            )
+            preliminary_k = int(preliminary_auto_k_selection["selected_k"])
+        preliminary_auto_k_summary = None
+        if preliminary_auto_k_selection is not None:
+            preliminary_auto_k_summary = {
+                "selected_k": int(
+                    preliminary_auto_k_selection.get("selected_k", preliminary_k)
+                ),
+                "candidate_n_clusters": [
+                    int(k)
+                    for k in preliminary_auto_k_selection.get(
+                        "candidate_n_clusters", candidate_ks
+                    )
+                ],
+                "criterion_votes": {
+                    str(key): int(value)
+                    for key, value in dict(
+                        preliminary_auto_k_selection.get("criterion_votes", {})
+                    ).items()
+                },
+            }
+        preliminary_fit = fit_kmeans_on_latent_embeddings(
+            initial_embeddings,
+            n_clusters=int(preliminary_k),
+            n_init=max(int(n_init), 1),
+            min_cluster_size=int(
+                effective_min_cluster_size(
+                    len(subregion_members),
+                    preliminary_k,
+                    int(min_subregions_per_cluster),
+                )
+            ),
+            random_state=int(seed),
+        )
+        initial_region_count = int(len(subregion_members))
+        initial_cell_memberships = int(
+            sum(np.asarray(member, dtype=np.int32).size for member in subregion_members)
+        )
+        refined_centers, refined_members, refined_basic_ids, refinement_history = (
+            refine_subregions_by_cluster_coherence(
+                coords_um=coords_um,
+                features=features,
+                members=subregion_members,
+                subregion_cluster_labels=np.asarray(
+                    preliminary_fit["labels"], dtype=np.int32
+                ),
+                min_cells=int(min_cells),
+                max_subregions=int(max_subregions),
+                target_scale_um=float(
+                    basic_niche_size_um
+                    if basic_niche_size_um is not None
+                    else stride_um
+                ),
+                n_iters=int(joint_refinement_iters),
+                n_neighbors=int(joint_refinement_knn),
+                cluster_weight=float(joint_refinement_cluster_weight),
+                spatial_weight=float(joint_refinement_spatial_weight),
+                cut_weight=float(joint_refinement_cut_weight),
+                max_move_fraction=float(joint_refinement_max_move_fraction),
+                feature_dims=int(joint_refinement_feature_dims),
+                seed=int(seed),
+            )
+        )
+        refined_cell_memberships = int(
+            sum(np.asarray(member, dtype=np.int32).size for member in refined_members)
+        )
+        centers_um = refined_centers.astype(np.float32)
+        subregion_members = [
+            np.asarray(member, dtype=np.int32) for member in refined_members
+        ]
+        subregion_basic_niche_ids = [
+            np.asarray(ids, dtype=np.int32) for ids in refined_basic_ids
+        ]
+        region_geometries = _region_geometries_from_observed_points(subregion_members)
+        _validate_mutually_exclusive_memberships(
+            features.shape[0], subregion_members, require_full_coverage=True
+        )
+        accepted_moves = float(
+            sum(float(row.get("accepted_moves", 0.0)) for row in refinement_history)
+        )
+        joint_refinement_summary = {
+            "enabled": True,
+            "applied": True,
+            "initial_region_count": initial_region_count,
+            "final_region_count": int(len(subregion_members)),
+            "initial_cell_memberships": initial_cell_memberships,
+            "final_cell_memberships": refined_cell_memberships,
+            "preliminary_k": int(preliminary_k),
+            "preliminary_auto_k_selection": preliminary_auto_k_summary,
+            "history": refinement_history,
+            "accepted_boundary_moves": accepted_moves,
+            "moved_cell_fraction": float(accepted_moves / max(features.shape[0], 1)),
+            "cluster_weight": float(joint_refinement_cluster_weight),
+            "spatial_weight": float(joint_refinement_spatial_weight),
+            "cut_weight": float(joint_refinement_cut_weight),
+            "max_move_fraction_per_iter": float(joint_refinement_max_move_fraction),
+            "feature_dims": int(joint_refinement_feature_dims),
+            "requires_connected_output": True,
+            "requires_min_cells": True,
+            "uses_soft_area_target": bool(max_subregion_area_um2 is not None),
+        }
+        _progress(
+            "joint refinement finished: "
+            f"{initial_region_count} -> {len(subregion_members)} subregions, "
+            f"accepted_moves={accepted_moves:g}"
+        )
+        candidate_ks = sanitize_candidate_n_clusters(
+            candidate_n_clusters,
+            fallback_n_clusters=requested_n_clusters,
+            n_subregions=int(centers_um.shape[0]),
+        )
+        required_n_clusters = (
+            max(candidate_ks) if bool(auto_n_clusters) else requested_n_clusters
+        )
+        if centers_um.shape[0] < required_n_clusters:
+            raise ValueError(
+                f"n_clusters={required_n_clusters} exceeds the number of refined subregions={centers_um.shape[0]}."
+            )
+        effective_min_for_requested_k = effective_min_cluster_size(
+            int(centers_um.shape[0]),
+            int(required_n_clusters),
+            requested_min_subregions_per_cluster,
         )
 
     fast_pooled_latent_enabled = _env_bool("SPATIAL_OT_FAST_POOLED_LATENT_ONLY", True)
@@ -3604,15 +4557,22 @@ def fit_multilevel_ot(
             seed=seed,
             basic_niche_size_um=basic_niche_size_um,
             used_basic_niches=used_basic_niches,
+            joint_refinement_summary=joint_refinement_summary,
         )
 
-    _progress(f"constructed {len(subregion_members)} subregions; fitting shape normalizers and compressed measures")
-    for rid, (region, members) in enumerate(zip(region_geometries, subregion_members, strict=False)):
+    _progress(
+        f"constructed {len(subregion_members)} subregions; fitting shape normalizers and compressed measures"
+    )
+    for rid, (region, members) in enumerate(
+        zip(region_geometries, subregion_members, strict=False)
+    ):
         region.members = np.asarray(members, dtype=np.int32)
         if not region.region_id:
             region.region_id = f"region_{rid:04d}"
 
-    reference_points, reference_weights = make_reference_points_unit_disk(geometry_samples)
+    reference_points, reference_weights = make_reference_points_unit_disk(
+        geometry_samples
+    )
     measures = _build_subregion_measures(
         features=features,
         coords_um=coords_um,
@@ -3633,56 +4593,104 @@ def fit_multilevel_ot(
     _progress("estimating overlap graph and cost scales")
     optimization_measures = _make_optimization_measures(measures)
     summaries = np.vstack([_measure_summary(m) for m in optimization_measures])
-    subregion_latent_embeddings, subregion_latent_diagnostics = _build_subregion_latent_embeddings_from_members(
-        features,
-        subregion_members,
-        mode=subregion_latent_embedding_mode,
-        shrinkage_tau=subregion_latent_shrinkage_tau,
-        heterogeneity_weight=subregion_latent_heterogeneity_weight,
-        sample_ids=sample_ids,
-        sample_prior_weight=subregion_latent_sample_prior_weight,
-        codebook_size=subregion_latent_codebook_size,
-        codebook_sample_size=subregion_latent_codebook_sample_size,
-        random_state=int(seed),
-        return_diagnostics=True,
+    if clustering_method == "heterogeneity_ot_niche":
+        _progress(
+            "building internal heterogeneity motif embeddings "
+            "(soft state composition, diversity, canonical spatial-state field, pair graph)"
+        )
+        subregion_latent_embeddings, subregion_latent_embedding_metadata = (
+            build_internal_heterogeneity_embeddings(
+                measures,
+                codebook_size=int(subregion_latent_codebook_size),
+                codebook_sample_size=int(subregion_latent_codebook_sample_size),
+                random_state=int(seed),
+            )
+        )
+        subregion_latent_embedding_mode = "heterogeneity_ot_niche"
+        subregion_latent_diagnostics = {
+            "shrinkage_alpha": np.ones(len(subregion_members), dtype=np.float32),
+            "raw_to_shrunk_distance": np.zeros(len(subregion_members), dtype=np.float32),
+            "sample_ids": _subregion_sample_ids_from_members(
+                sample_ids, subregion_members
+            ),
+            "sample_aware_shrinkage": False,
+        }
+    else:
+        subregion_latent_embeddings, subregion_latent_diagnostics = (
+            _build_subregion_latent_embeddings_from_members(
+                features,
+                subregion_members,
+                mode=subregion_latent_embedding_mode,
+                shrinkage_tau=subregion_latent_shrinkage_tau,
+                heterogeneity_weight=subregion_latent_heterogeneity_weight,
+                sample_ids=sample_ids,
+                sample_prior_weight=subregion_latent_sample_prior_weight,
+                codebook_size=subregion_latent_codebook_size,
+                codebook_sample_size=subregion_latent_codebook_sample_size,
+                random_state=int(seed),
+                return_diagnostics=True,
+            )
+        )
+        subregion_latent_embedding_metadata = _subregion_latent_embedding_metadata(
+            mode=subregion_latent_embedding_mode,
+            shrinkage_tau=subregion_latent_shrinkage_tau,
+            heterogeneity_weight=subregion_latent_heterogeneity_weight,
+            sample_prior_weight=subregion_latent_sample_prior_weight,
+            codebook_size=subregion_latent_codebook_size,
+            codebook_sample_size=subregion_latent_codebook_sample_size,
+            feature_dim=int(features.shape[1]),
+            embedding_dim=int(subregion_latent_embeddings.shape[1]),
+            sample_aware_shrinkage=bool(
+                subregion_latent_diagnostics.get("sample_aware_shrinkage", False)
+            ),
+        )
+    subregion_latent_embedding_metadata["joint_refinement"] = dict(
+        joint_refinement_summary
     )
-    subregion_latent_embedding_metadata = _subregion_latent_embedding_metadata(
-        mode=subregion_latent_embedding_mode,
-        shrinkage_tau=subregion_latent_shrinkage_tau,
-        heterogeneity_weight=subregion_latent_heterogeneity_weight,
-        sample_prior_weight=subregion_latent_sample_prior_weight,
-        codebook_size=subregion_latent_codebook_size,
-        codebook_sample_size=subregion_latent_codebook_sample_size,
-        feature_dim=int(features.shape[1]),
-        embedding_dim=int(subregion_latent_embeddings.shape[1]),
-        sample_aware_shrinkage=bool(subregion_latent_diagnostics.get("sample_aware_shrinkage", False)),
+    overlap_edge_i, overlap_edge_j, overlap_edge_weight = (
+        _build_overlap_consistency_graph(
+            measures=measures,
+            summaries=summaries,
+            min_jaccard=max(float(overlap_jaccard_min), 0.0),
+            contrast_scale=max(float(overlap_contrast_scale), 1e-6),
+        )
     )
-    overlap_edge_i, overlap_edge_j, overlap_edge_weight = _build_overlap_consistency_graph(
-        measures=measures,
-        summaries=summaries,
-        min_jaccard=max(float(overlap_jaccard_min), 0.0),
-        contrast_scale=max(float(overlap_contrast_scale), 1e-6),
+    cost_scale_x, cost_scale_y = _estimate_cost_scales(
+        measures,
+        max_points=5000,
+        random_state=seed,
+        compute_device=resolved_compute_device,
     )
-    cost_scale_x, cost_scale_y = _estimate_cost_scales(measures, max_points=5000, random_state=seed, compute_device=resolved_compute_device)
     auto_k_selection: dict[str, object] | None = None
     selected_n_clusters = requested_n_clusters
     reused_pilot_fit = False
     pilot_restart_summaries: list[dict[str, object]] | None = None
     pilot_best_bundle: dict[str, object] | None = None
     if bool(auto_n_clusters):
-        _progress("automatic K selection enabled; candidate K=" + ",".join(str(k) for k in candidate_ks))
-        if clustering_method == "pooled_subregion_latent":
-            stability_seed_count = max(3, min(8, _env_int("SPATIAL_OT_AUTO_K_STABILITY_SEEDS", 5)))
+        _progress(
+            "automatic K selection enabled; candidate K="
+            + ",".join(str(k) for k in candidate_ks)
+        )
+        if clustering_method in {"pooled_subregion_latent", "heterogeneity_ot_niche"}:
+            stability_seed_count = max(
+                3, min(8, _env_int("SPATIAL_OT_AUTO_K_STABILITY_SEEDS", 5))
+            )
             auto_k_selection = comprehensive_select_k_from_latent_embeddings(
                 subregion_latent_embeddings,
                 candidate_n_clusters=candidate_ks,
                 fallback_n_clusters=requested_n_clusters,
-                seeds=tuple(int(seed) + offset for offset in range(stability_seed_count)),
+                seeds=tuple(
+                    int(seed) + offset for offset in range(stability_seed_count)
+                ),
                 n_init=max(1, int(auto_k_pilot_n_init)),
                 max_silhouette_subregions=int(auto_k_max_score_subregions),
                 gap_references=int(auto_k_gap_references),
-                bootstrap_repeats=max(0, _env_int("SPATIAL_OT_AUTO_K_BOOTSTRAP_REPEATS", 3)),
-                bootstrap_fraction=float(_env_float("SPATIAL_OT_AUTO_K_BOOTSTRAP_FRACTION", 0.8)),
+                bootstrap_repeats=max(
+                    0, _env_int("SPATIAL_OT_AUTO_K_BOOTSTRAP_REPEATS", 3)
+                ),
+                bootstrap_fraction=float(
+                    _env_float("SPATIAL_OT_AUTO_K_BOOTSTRAP_FRACTION", 0.8)
+                ),
                 min_cluster_size=int(min_subregions_per_cluster),
                 random_state=int(seed),
             )
@@ -3691,36 +4699,38 @@ def fit_multilevel_ot(
             pilot_n_init = int(auto_k_pilot_n_init)
             pilot_max_iter = int(auto_k_pilot_max_iter)
             _progress(f"auto-K OT pilot K={pilot_n_clusters}")
-            _pilot_restart_results, pilot_restart_summaries, pilot_best_bundle = _fit_restart_bundles(
-                measures=optimization_measures,
-                summaries=summaries,
-                n_clusters=pilot_n_clusters,
-                atoms_per_cluster=atoms_per_cluster,
-                lambda_x=lambda_x,
-                lambda_y=lambda_y,
-                ot_eps=ot_eps,
-                rho=rho,
-                align_iters=align_iters,
-                allow_reflection=allow_reflection,
-                allow_scale=allow_scale,
-                cost_scale_x=cost_scale_x,
-                cost_scale_y=cost_scale_y,
-                min_scale=min_scale,
-                max_scale=max_scale,
-                scale_penalty=scale_penalty,
-                shift_penalty=shift_penalty,
-                max_iter=pilot_max_iter,
-                tol=tol,
-                min_subregions_per_cluster=min_subregions_per_cluster,
-                seed=seed,
-                overlap_edge_i=overlap_edge_i,
-                overlap_edge_j=overlap_edge_j,
-                overlap_edge_weight=overlap_edge_weight,
-                overlap_consistency_weight=overlap_consistency_weight,
-                n_init=pilot_n_init,
-                compute_device=compute_device,
-                resolved_compute_device=resolved_compute_device,
-                progress_label="auto-K pilot",
+            _pilot_restart_results, pilot_restart_summaries, pilot_best_bundle = (
+                _fit_restart_bundles(
+                    measures=optimization_measures,
+                    summaries=summaries,
+                    n_clusters=pilot_n_clusters,
+                    atoms_per_cluster=atoms_per_cluster,
+                    lambda_x=lambda_x,
+                    lambda_y=lambda_y,
+                    ot_eps=ot_eps,
+                    rho=rho,
+                    align_iters=align_iters,
+                    allow_reflection=allow_reflection,
+                    allow_scale=allow_scale,
+                    cost_scale_x=cost_scale_x,
+                    cost_scale_y=cost_scale_y,
+                    min_scale=min_scale,
+                    max_scale=max_scale,
+                    scale_penalty=scale_penalty,
+                    shift_penalty=shift_penalty,
+                    max_iter=pilot_max_iter,
+                    tol=tol,
+                    min_subregions_per_cluster=min_subregions_per_cluster,
+                    seed=seed,
+                    overlap_edge_i=overlap_edge_i,
+                    overlap_edge_j=overlap_edge_j,
+                    overlap_edge_weight=overlap_edge_weight,
+                    overlap_consistency_weight=overlap_consistency_weight,
+                    n_init=pilot_n_init,
+                    compute_device=compute_device,
+                    resolved_compute_device=resolved_compute_device,
+                    progress_label="auto-K pilot",
+                )
             )
             auto_k_selection = select_k_from_ot_landmark_costs(
                 np.asarray(pilot_best_bundle["transport_costs"], dtype=np.float32),
@@ -3742,12 +4752,20 @@ def fit_multilevel_ot(
             {
                 "requested_n_clusters": int(requested_n_clusters),
                 "selection_clustering_method": str(clustering_method),
-                "pilot_n_clusters": int(max(candidate_ks)) if clustering_method == "ot_dictionary" else None,
-                "pilot_n_init": int(auto_k_pilot_n_init) if clustering_method == "ot_dictionary" else None,
-                "pilot_max_iter": int(auto_k_pilot_max_iter) if clustering_method == "ot_dictionary" else None,
+                "pilot_n_clusters": int(max(candidate_ks))
+                if clustering_method == "ot_dictionary"
+                else None,
+                "pilot_n_init": int(auto_k_pilot_n_init)
+                if clustering_method == "ot_dictionary"
+                else None,
+                "pilot_max_iter": int(auto_k_pilot_max_iter)
+                if clustering_method == "ot_dictionary"
+                else None,
                 "final_refit_n_init": int(n_init),
                 "final_refit_max_iter": int(max_iter),
-                "requested_min_subregions_per_cluster": int(requested_min_subregions_per_cluster),
+                "requested_min_subregions_per_cluster": int(
+                    requested_min_subregions_per_cluster
+                ),
                 "reused_pilot_fit_for_final": bool(reused_pilot_fit),
                 "pilot_restart_summaries": pilot_restart_summaries,
             }
@@ -3759,11 +4777,20 @@ def fit_multilevel_ot(
 
     n_clusters = int(selected_n_clusters)
     selected_restart_id = 0
-    if clustering_method == "pooled_subregion_latent":
-        _progress(
-            "clustering pooled raw-member feature-distribution subregion latent embeddings "
-            f"(K={n_clusters}; no spatial coordinates or OT costs in label assignment)"
-        )
+    if clustering_method in {"pooled_subregion_latent", "heterogeneity_ot_niche"}:
+        if clustering_method == "heterogeneity_ot_niche":
+            _progress(
+                "clustering internal heterogeneity motif embeddings "
+                f"(K={n_clusters}; uses canonical within-subregion arrangement, "
+                "not raw tissue position or sample labels)"
+            )
+            label_assignment_source = "internal_heterogeneity_motif_embeddings"
+        else:
+            _progress(
+                "clustering pooled raw-member feature-distribution subregion latent embeddings "
+                f"(K={n_clusters}; no spatial coordinates or OT costs in label assignment)"
+            )
+            label_assignment_source = "pooled_subregion_latent_embeddings"
         latent_fit = fit_kmeans_on_latent_embeddings(
             subregion_latent_embeddings,
             n_clusters=n_clusters,
@@ -3772,12 +4799,16 @@ def fit_multilevel_ot(
             random_state=int(seed),
         )
         labels = np.asarray(latent_fit["labels"], dtype=np.int32)
-        final_argmin_labels_best = np.asarray(latent_fit["argmin_labels"], dtype=np.int32)
+        final_argmin_labels_best = np.asarray(
+            latent_fit["argmin_labels"], dtype=np.int32
+        )
         final_costs = np.asarray(latent_fit["costs"], dtype=np.float32)
         final_transport_costs = final_costs.astype(np.float32, copy=True)
         final_overlap_penalties = np.zeros_like(final_costs, dtype=np.float32)
         forced_label_mask_best = np.asarray(latent_fit["forced_label_mask"], dtype=bool)
-        candidate_effective_eps_matrix_best = np.full(final_costs.shape, float(ot_eps), dtype=np.float32)
+        candidate_effective_eps_matrix_best = np.full(
+            final_costs.shape, float(ot_eps), dtype=np.float32
+        )
         candidate_used_fallback_matrix_best = np.zeros(final_costs.shape, dtype=bool)
         fixed_atom_bundle = _fit_fixed_label_atom_dictionary(
             measures=optimization_measures,
@@ -3810,73 +4841,99 @@ def fit_multilevel_ot(
         plans = list(fixed_atom_bundle["plans"])
         transforms = list(fixed_atom_bundle["transforms"])
         thetas = list(fixed_atom_bundle["thetas"])
-        assigned_effective_eps_best = np.asarray(fixed_atom_bundle["assigned_effective_eps"], dtype=np.float32)
-        assigned_used_fallback_best = np.asarray(fixed_atom_bundle["assigned_used_fallback"], dtype=bool)
+        assigned_effective_eps_best = np.asarray(
+            fixed_atom_bundle["assigned_effective_eps"], dtype=np.float32
+        )
+        assigned_used_fallback_best = np.asarray(
+            fixed_atom_bundle["assigned_used_fallback"], dtype=bool
+        )
         restart_summaries = [
             {
                 "run": 0,
                 "seed": int(seed),
                 "objective": float(latent_fit["inertia"]),
                 "n_iter": int(len(objective_history)),
-                "mean_assigned_cost": float(np.mean(final_costs[np.arange(labels.shape[0]), labels])),
-                "mean_assigned_transport_cost": float(np.mean(fixed_atom_bundle["assigned_costs"])),
+                "mean_assigned_cost": float(
+                    np.mean(final_costs[np.arange(labels.shape[0]), labels])
+                ),
+                "mean_assigned_transport_cost": float(
+                    np.mean(fixed_atom_bundle["assigned_costs"])
+                ),
                 "mean_assigned_overlap_penalty": 0.0,
                 "device": str(resolved_compute_device),
-                "assigned_ot_fallback_fraction": float(np.mean(assigned_used_fallback_best.astype(np.float32))),
+                "assigned_ot_fallback_fraction": float(
+                    np.mean(assigned_used_fallback_best.astype(np.float32))
+                ),
                 "candidate_ot_fallback_fraction": 0.0,
-                "initial_min_size_forced_label_count": int(forced_label_mask_best.sum()),
+                "initial_min_size_forced_label_count": int(
+                    forced_label_mask_best.sum()
+                ),
                 "final_min_size_forced_label_count": int(forced_label_mask_best.sum()),
                 "min_subregions_per_cluster": int(
-                    effective_min_cluster_size(len(labels), n_clusters, int(min_subregions_per_cluster))
+                    effective_min_cluster_size(
+                        len(labels), n_clusters, int(min_subregions_per_cluster)
+                    )
                 ),
                 "runtime_memory": dict(fixed_atom_bundle.get("runtime_memory", {})),
-                "label_assignment_source": "pooled_subregion_latent_embeddings",
+                "label_assignment_source": label_assignment_source,
             }
         ]
     else:
-        if reused_pilot_fit and pilot_best_bundle is not None and pilot_restart_summaries is not None:
+        if (
+            reused_pilot_fit
+            and pilot_best_bundle is not None
+            and pilot_restart_summaries is not None
+        ):
             restart_summaries = pilot_restart_summaries
             best_bundle = pilot_best_bundle
         else:
-            _final_restart_results, restart_summaries, best_bundle = _fit_restart_bundles(
-                measures=optimization_measures,
-                summaries=summaries,
-                n_clusters=n_clusters,
-                atoms_per_cluster=atoms_per_cluster,
-                lambda_x=lambda_x,
-                lambda_y=lambda_y,
-                ot_eps=ot_eps,
-                rho=rho,
-                align_iters=align_iters,
-                allow_reflection=allow_reflection,
-                allow_scale=allow_scale,
-                cost_scale_x=cost_scale_x,
-                cost_scale_y=cost_scale_y,
-                min_scale=min_scale,
-                max_scale=max_scale,
-                scale_penalty=scale_penalty,
-                shift_penalty=shift_penalty,
-                max_iter=max_iter,
-                tol=tol,
-                min_subregions_per_cluster=min_subregions_per_cluster,
-                seed=seed,
-                overlap_edge_i=overlap_edge_i,
-                overlap_edge_j=overlap_edge_j,
-                overlap_edge_weight=overlap_edge_weight,
-                overlap_consistency_weight=overlap_consistency_weight,
-                n_init=n_init,
-                compute_device=compute_device,
-                resolved_compute_device=resolved_compute_device,
-                progress_label="final fit",
+            _final_restart_results, restart_summaries, best_bundle = (
+                _fit_restart_bundles(
+                    measures=optimization_measures,
+                    summaries=summaries,
+                    n_clusters=n_clusters,
+                    atoms_per_cluster=atoms_per_cluster,
+                    lambda_x=lambda_x,
+                    lambda_y=lambda_y,
+                    ot_eps=ot_eps,
+                    rho=rho,
+                    align_iters=align_iters,
+                    allow_reflection=allow_reflection,
+                    allow_scale=allow_scale,
+                    cost_scale_x=cost_scale_x,
+                    cost_scale_y=cost_scale_y,
+                    min_scale=min_scale,
+                    max_scale=max_scale,
+                    scale_penalty=scale_penalty,
+                    shift_penalty=shift_penalty,
+                    max_iter=max_iter,
+                    tol=tol,
+                    min_subregions_per_cluster=min_subregions_per_cluster,
+                    seed=seed,
+                    overlap_edge_i=overlap_edge_i,
+                    overlap_edge_j=overlap_edge_j,
+                    overlap_edge_weight=overlap_edge_weight,
+                    overlap_consistency_weight=overlap_consistency_weight,
+                    n_init=n_init,
+                    compute_device=compute_device,
+                    resolved_compute_device=resolved_compute_device,
+                    progress_label="final fit",
+                )
             )
         selected_restart_id = int(best_bundle["run"])
-        _progress(f"selected restart {selected_restart_id}; computing final diagnostics")
+        _progress(
+            f"selected restart {selected_restart_id}; computing final diagnostics"
+        )
         atom_coords = np.asarray(best_bundle["atom_coords"], dtype=np.float32)
         atom_features = np.asarray(best_bundle["atom_features"], dtype=np.float32)
         betas = np.asarray(best_bundle["betas"], dtype=np.float32)
         objective_history = list(best_bundle["objective_history"])
         best_compute_device = _resolve_compute_device(str(best_bundle["device"]))
-        final_transport_costs, candidate_effective_eps_matrix_best, candidate_used_fallback_matrix_best = _compute_assignment_costs(
+        (
+            final_transport_costs,
+            candidate_effective_eps_matrix_best,
+            candidate_used_fallback_matrix_best,
+        ) = _compute_assignment_costs(
             measures=measures,
             atom_coords=atom_coords,
             atom_features=atom_features,
@@ -3897,7 +4954,11 @@ def fit_multilevel_ot(
             compute_device=best_compute_device,
             return_diagnostics=True,
         )
-        final_transport_costs, candidate_effective_eps_matrix_best, candidate_used_fallback_matrix_best = _stabilize_mixed_candidate_assignment_costs(
+        (
+            final_transport_costs,
+            candidate_effective_eps_matrix_best,
+            candidate_used_fallback_matrix_best,
+        ) = _stabilize_mixed_candidate_assignment_costs(
             measures=measures,
             atom_coords=atom_coords,
             atom_features=atom_features,
@@ -3920,12 +4981,14 @@ def fit_multilevel_ot(
             shift_penalty=shift_penalty,
             compute_device=best_compute_device,
         )
-        final_costs, final_overlap_penalties = _apply_overlap_consistency_regularization(
-            final_transport_costs,
-            edge_i=overlap_edge_i,
-            edge_j=overlap_edge_j,
-            edge_weight=overlap_edge_weight,
-            overlap_consistency_weight=overlap_consistency_weight,
+        final_costs, final_overlap_penalties = (
+            _apply_overlap_consistency_regularization(
+                final_transport_costs,
+                edge_i=overlap_edge_i,
+                edge_j=overlap_edge_j,
+                edge_weight=overlap_edge_weight,
+                overlap_consistency_weight=overlap_consistency_weight,
+            )
         )
         final_argmin_labels_best = final_costs.argmin(axis=1).astype(np.int32)
         labels, forced_label_mask_best = _ensure_minimum_cluster_size(
@@ -3934,7 +4997,14 @@ def fit_multilevel_ot(
             n_clusters=n_clusters,
             min_subregions_per_cluster=min_subregions_per_cluster,
         )
-        plans, transforms, thetas, _assigned_transport_costs_best, assigned_effective_eps_best, assigned_used_fallback_best = _compute_assigned_artifacts(
+        (
+            plans,
+            transforms,
+            thetas,
+            _assigned_transport_costs_best,
+            assigned_effective_eps_best,
+            assigned_used_fallback_best,
+        ) = _compute_assigned_artifacts(
             measures=measures,
             labels=labels,
             atom_coords=atom_coords,
@@ -3959,7 +5029,11 @@ def fit_multilevel_ot(
         np.arange(labels.shape[0], dtype=np.int64),
         labels.astype(np.int64),
     ].astype(np.float32)
-    assigned_geometry_transport_costs_best, assigned_feature_transport_costs_best, assigned_transform_penalties_best = _compute_assigned_cost_breakdowns(
+    (
+        assigned_geometry_transport_costs_best,
+        assigned_feature_transport_costs_best,
+        assigned_transform_penalties_best,
+    ) = _compute_assigned_cost_breakdowns(
         measures=measures,
         labels=labels,
         plans=plans,
@@ -3973,30 +5047,43 @@ def fit_multilevel_ot(
         scale_penalty=scale_penalty,
         shift_penalty=shift_penalty,
     )
-    assigned_rotation_deg_best, assigned_reflection_best, assigned_scale_best, assigned_translation_norm_best = _transform_diagnostic_arrays(transforms)
+    (
+        assigned_rotation_deg_best,
+        assigned_reflection_best,
+        assigned_scale_best,
+        assigned_translation_norm_best,
+    ) = _transform_diagnostic_arrays(transforms)
 
-    thetas_assigned = np.vstack([np.asarray(theta, dtype=np.float32) for theta in thetas]).astype(np.float32)
-    subregion_cluster_probs = _softmax_over_negative_costs(final_costs, temperature=max(float(np.std(final_costs)), 1e-3))
-    cluster_supports = np.concatenate([atom_coords, atom_features], axis=2).astype(np.float32)
+    thetas_assigned = np.vstack(
+        [np.asarray(theta, dtype=np.float32) for theta in thetas]
+    ).astype(np.float32)
+    subregion_cluster_probs = _softmax_over_negative_costs(
+        final_costs, temperature=max(float(np.std(final_costs)), 1e-3)
+    )
+    cluster_supports = np.concatenate([atom_coords, atom_features], axis=2).astype(
+        np.float32
+    )
 
     _progress("projecting cell-level cluster probabilities")
-    cell_cluster_labels, cell_cluster_probs, cell_feature_probs, cell_context_probs = _project_cells_from_subregions(
-        features=features,
-        coords_um=coords_um,
-        measures=measures,
-        subregion_labels=labels,
-        atom_coords=atom_coords,
-        atom_features=atom_features,
-        prototype_weights=betas,
-        assigned_transforms=transforms,
-        subregion_cluster_costs=final_costs,
-        lambda_x=lambda_x,
-        lambda_y=lambda_y,
-        cost_scale_x=cost_scale_x,
-        cost_scale_y=cost_scale_y,
-        assignment_temperature=max(cost_scale_y, 1e-3),
-        context_weight=0.5,
-        compute_device=resolved_compute_device,
+    cell_cluster_labels, cell_cluster_probs, cell_feature_probs, cell_context_probs = (
+        _project_cells_from_subregions(
+            features=features,
+            coords_um=coords_um,
+            measures=measures,
+            subregion_labels=labels,
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            prototype_weights=betas,
+            assigned_transforms=transforms,
+            subregion_cluster_costs=final_costs,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
+            assignment_temperature=max(cost_scale_y, 1e-3),
+            context_weight=0.5,
+            compute_device=resolved_compute_device,
+        )
     )
     if compute_spot_latent:
         _progress("computing occurrence-level spot latent charts")
@@ -4026,20 +5113,57 @@ def fit_multilevel_ot(
         )
 
     return MultilevelOTResult(
-        basic_niche_size_um=float(basic_niche_size_um) if used_basic_niches and basic_niche_size_um is not None else None,
+        basic_niche_size_um=float(basic_niche_size_um)
+        if used_basic_niches and basic_niche_size_um is not None
+        else None,
         basic_niche_centers_um=basic_niche_centers_um.astype(np.float32),
-        basic_niche_members=[np.asarray(members, dtype=np.int32) for members in basic_niche_members],
-        subregion_basic_niche_ids=[np.asarray(niche_ids, dtype=np.int32) for niche_ids in subregion_basic_niche_ids],
+        basic_niche_members=[
+            np.asarray(members, dtype=np.int32) for members in basic_niche_members
+        ],
+        subregion_basic_niche_ids=[
+            np.asarray(niche_ids, dtype=np.int32)
+            for niche_ids in subregion_basic_niche_ids
+        ],
         subregion_centers_um=centers_um.astype(np.float32),
         subregion_members=[m.members for m in measures],
         subregion_argmin_labels=final_argmin_labels_best.astype(np.int32),
         subregion_forced_label_mask=forced_label_mask_best.astype(bool),
-        subregion_geometry_point_counts=np.asarray([m.geometry_point_count for m in measures], dtype=np.int32),
-        subregion_geometry_sources=[m.normalizer_diagnostics.geometry_source for m in measures],
-        subregion_geometry_used_fallback=np.asarray([m.normalizer_diagnostics.used_fallback for m in measures], dtype=bool),
-        subregion_normalizer_radius_p95=np.asarray([m.normalizer_diagnostics.mapped_radius_p95 if m.normalizer_diagnostics.mapped_radius_p95 is not None else np.nan for m in measures], dtype=np.float32),
-        subregion_normalizer_radius_max=np.asarray([m.normalizer_diagnostics.mapped_radius_max if m.normalizer_diagnostics.mapped_radius_max is not None else np.nan for m in measures], dtype=np.float32),
-        subregion_normalizer_interpolation_residual=np.asarray([m.normalizer_diagnostics.interpolation_residual if m.normalizer_diagnostics.interpolation_residual is not None else np.nan for m in measures], dtype=np.float32),
+        subregion_geometry_point_counts=np.asarray(
+            [m.geometry_point_count for m in measures], dtype=np.int32
+        ),
+        subregion_geometry_sources=[
+            m.normalizer_diagnostics.geometry_source for m in measures
+        ],
+        subregion_geometry_used_fallback=np.asarray(
+            [m.normalizer_diagnostics.used_fallback for m in measures], dtype=bool
+        ),
+        subregion_normalizer_radius_p95=np.asarray(
+            [
+                m.normalizer_diagnostics.mapped_radius_p95
+                if m.normalizer_diagnostics.mapped_radius_p95 is not None
+                else np.nan
+                for m in measures
+            ],
+            dtype=np.float32,
+        ),
+        subregion_normalizer_radius_max=np.asarray(
+            [
+                m.normalizer_diagnostics.mapped_radius_max
+                if m.normalizer_diagnostics.mapped_radius_max is not None
+                else np.nan
+                for m in measures
+            ],
+            dtype=np.float32,
+        ),
+        subregion_normalizer_interpolation_residual=np.asarray(
+            [
+                m.normalizer_diagnostics.interpolation_residual
+                if m.normalizer_diagnostics.interpolation_residual is not None
+                else np.nan
+                for m in measures
+            ],
+            dtype=np.float32,
+        ),
         subregion_cluster_labels=labels,
         subregion_cluster_probs=subregion_cluster_probs.astype(np.float32),
         subregion_cluster_costs=final_costs.astype(np.float32),
@@ -4056,21 +5180,41 @@ def fit_multilevel_ot(
         subregion_latent_raw_to_shrunk_distance=np.asarray(
             subregion_latent_diagnostics["raw_to_shrunk_distance"], dtype=np.float32
         ),
-        subregion_sample_ids=np.asarray(subregion_latent_diagnostics["sample_ids"], dtype=object),
+        subregion_sample_ids=np.asarray(
+            subregion_latent_diagnostics["sample_ids"], dtype=object
+        ),
         subregion_clustering_method=str(clustering_method),
-        subregion_clustering_uses_spatial=bool(clustering_method != "pooled_subregion_latent"),
+        subregion_clustering_uses_spatial=bool(
+            clustering_method != "pooled_subregion_latent"
+        ),
         subregion_assigned_effective_eps=assigned_effective_eps_best.astype(np.float32),
         subregion_assigned_used_ot_fallback=assigned_used_fallback_best.astype(bool),
-        subregion_candidate_effective_eps_matrix=candidate_effective_eps_matrix_best.astype(np.float32),
-        subregion_candidate_used_ot_fallback_matrix=candidate_used_fallback_matrix_best.astype(bool),
-        subregion_assigned_geometry_transport_costs=assigned_geometry_transport_costs_best.astype(np.float32),
-        subregion_assigned_feature_transport_costs=assigned_feature_transport_costs_best.astype(np.float32),
-        subregion_assigned_transform_penalties=assigned_transform_penalties_best.astype(np.float32),
-        subregion_assigned_overlap_consistency_penalties=assigned_overlap_penalties_best.astype(np.float32),
-        subregion_assigned_transform_rotation_deg=assigned_rotation_deg_best.astype(np.float32),
+        subregion_candidate_effective_eps_matrix=candidate_effective_eps_matrix_best.astype(
+            np.float32
+        ),
+        subregion_candidate_used_ot_fallback_matrix=candidate_used_fallback_matrix_best.astype(
+            bool
+        ),
+        subregion_assigned_geometry_transport_costs=assigned_geometry_transport_costs_best.astype(
+            np.float32
+        ),
+        subregion_assigned_feature_transport_costs=assigned_feature_transport_costs_best.astype(
+            np.float32
+        ),
+        subregion_assigned_transform_penalties=assigned_transform_penalties_best.astype(
+            np.float32
+        ),
+        subregion_assigned_overlap_consistency_penalties=assigned_overlap_penalties_best.astype(
+            np.float32
+        ),
+        subregion_assigned_transform_rotation_deg=assigned_rotation_deg_best.astype(
+            np.float32
+        ),
         subregion_assigned_transform_reflection=assigned_reflection_best.astype(bool),
         subregion_assigned_transform_scale=assigned_scale_best.astype(np.float32),
-        subregion_assigned_transform_translation_norm=assigned_translation_norm_best.astype(np.float32),
+        subregion_assigned_transform_translation_norm=assigned_translation_norm_best.astype(
+            np.float32
+        ),
         cluster_supports=cluster_supports.astype(np.float32),
         cluster_atom_coords=atom_coords.astype(np.float32),
         cluster_atom_features=atom_features.astype(np.float32),
@@ -4079,37 +5223,69 @@ def fit_multilevel_ot(
         cell_context_cluster_probs=cell_context_probs.astype(np.float32),
         cell_cluster_probs=cell_cluster_probs.astype(np.float32),
         cell_cluster_labels=cell_cluster_labels.astype(np.int32),
-        spot_latent_cell_indices=spot_latent["spot_latent_cell_indices"].astype(np.int32),
-        spot_latent_subregion_ids=spot_latent["spot_latent_subregion_ids"].astype(np.int32),
-        spot_latent_cluster_labels=spot_latent["spot_latent_cluster_labels"].astype(np.int32),
+        spot_latent_cell_indices=spot_latent["spot_latent_cell_indices"].astype(
+            np.int32
+        ),
+        spot_latent_subregion_ids=spot_latent["spot_latent_subregion_ids"].astype(
+            np.int32
+        ),
+        spot_latent_cluster_labels=spot_latent["spot_latent_cluster_labels"].astype(
+            np.int32
+        ),
         spot_latent_coords=spot_latent["spot_latent_coords"].astype(np.float32),
-        spot_latent_within_coords=spot_latent["spot_latent_within_coords"].astype(np.float32),
-        spot_latent_cluster_anchors=spot_latent["spot_latent_cluster_anchors"].astype(np.float32),
-        spot_latent_atom_embedding=spot_latent["spot_latent_atom_embedding"].astype(np.float32),
-        spot_latent_aligned_coords=spot_latent["spot_latent_aligned_coords"].astype(np.float32),
-        spot_latent_cluster_probs=spot_latent["spot_latent_cluster_probs"].astype(np.float32),
-        spot_latent_atom_confidence=spot_latent["spot_latent_atom_confidence"].astype(np.float32),
-        spot_latent_posterior_entropy=spot_latent["spot_latent_posterior_entropy"].astype(np.float32),
+        spot_latent_within_coords=spot_latent["spot_latent_within_coords"].astype(
+            np.float32
+        ),
+        spot_latent_cluster_anchors=spot_latent["spot_latent_cluster_anchors"].astype(
+            np.float32
+        ),
+        spot_latent_atom_embedding=spot_latent["spot_latent_atom_embedding"].astype(
+            np.float32
+        ),
+        spot_latent_aligned_coords=spot_latent["spot_latent_aligned_coords"].astype(
+            np.float32
+        ),
+        spot_latent_cluster_probs=spot_latent["spot_latent_cluster_probs"].astype(
+            np.float32
+        ),
+        spot_latent_atom_confidence=spot_latent["spot_latent_atom_confidence"].astype(
+            np.float32
+        ),
+        spot_latent_posterior_entropy=spot_latent[
+            "spot_latent_posterior_entropy"
+        ].astype(np.float32),
         spot_latent_normalized_posterior_entropy=spot_latent[
             "spot_latent_normalized_posterior_entropy"
         ].astype(np.float32),
         spot_latent_atom_argmax=spot_latent["spot_latent_atom_argmax"].astype(np.int32),
-        spot_latent_temperature_used=spot_latent["spot_latent_temperature_used"].astype(np.float32),
-        spot_latent_temperature_cost_gap=spot_latent["spot_latent_temperature_cost_gap"].astype(np.float32),
-        spot_latent_temperature_fixed=spot_latent["spot_latent_temperature_fixed"].astype(np.float32),
-        spot_latent_weights=spot_latent["spot_latent_weights"].astype(np.float32),
-        spot_latent_atom_posteriors=spot_latent["spot_latent_atom_posteriors"].astype(np.float32),
-        spot_latent_posterior_entropy_cost_gap=spot_latent["spot_latent_posterior_entropy_cost_gap"].astype(
+        spot_latent_temperature_used=spot_latent["spot_latent_temperature_used"].astype(
             np.float32
         ),
+        spot_latent_temperature_cost_gap=spot_latent[
+            "spot_latent_temperature_cost_gap"
+        ].astype(np.float32),
+        spot_latent_temperature_fixed=spot_latent[
+            "spot_latent_temperature_fixed"
+        ].astype(np.float32),
+        spot_latent_weights=spot_latent["spot_latent_weights"].astype(np.float32),
+        spot_latent_atom_posteriors=spot_latent["spot_latent_atom_posteriors"].astype(
+            np.float32
+        ),
+        spot_latent_posterior_entropy_cost_gap=spot_latent[
+            "spot_latent_posterior_entropy_cost_gap"
+        ].astype(np.float32),
         spot_latent_normalized_posterior_entropy_cost_gap=spot_latent[
             "spot_latent_normalized_posterior_entropy_cost_gap"
         ].astype(np.float32),
-        spot_latent_posterior_entropy_fixed=spot_latent["spot_latent_posterior_entropy_fixed"].astype(np.float32),
+        spot_latent_posterior_entropy_fixed=spot_latent[
+            "spot_latent_posterior_entropy_fixed"
+        ].astype(np.float32),
         spot_latent_normalized_posterior_entropy_fixed=spot_latent[
             "spot_latent_normalized_posterior_entropy_fixed"
         ].astype(np.float32),
-        spot_latent_cluster_anchor_distance=spot_latent["spot_latent_cluster_anchor_distance"].astype(np.float32),
+        spot_latent_cluster_anchor_distance=spot_latent[
+            "spot_latent_cluster_anchor_distance"
+        ].astype(np.float32),
         spot_latent_cluster_anchor_ot_fallback_matrix=spot_latent[
             "spot_latent_cluster_anchor_ot_fallback_matrix"
         ].astype(bool),
@@ -4119,30 +5295,52 @@ def fit_multilevel_ot(
         spot_latent_cluster_anchor_ot_fallback_fraction=float(
             spot_latent["spot_latent_cluster_anchor_ot_fallback_fraction"].item()
         ),
-        spot_latent_atom_mds_stress=spot_latent["spot_latent_atom_mds_stress"].astype(np.float32),
+        spot_latent_atom_mds_stress=spot_latent["spot_latent_atom_mds_stress"].astype(
+            np.float32
+        ),
         spot_latent_atom_mds_positive_eigenvalue_mass_2d=spot_latent[
             "spot_latent_atom_mds_positive_eigenvalue_mass_2d"
         ].astype(np.float32),
         spot_latent_atom_mds_negative_eigenvalue_mass_fraction=spot_latent[
             "spot_latent_atom_mds_negative_eigenvalue_mass_fraction"
         ].astype(np.float32),
-        cell_spot_latent_unweighted_coords=spot_latent["cell_spot_latent_unweighted_coords"].astype(np.float32),
+        cell_spot_latent_unweighted_coords=spot_latent[
+            "cell_spot_latent_unweighted_coords"
+        ].astype(np.float32),
         cell_spot_latent_confidence_weighted_coords=spot_latent[
             "cell_spot_latent_confidence_weighted_coords"
         ].astype(np.float32),
-        cell_spot_latent_coords=spot_latent["cell_spot_latent_coords"].astype(np.float32),
-        cell_spot_latent_cluster_labels=spot_latent["cell_spot_latent_cluster_labels"].astype(np.int32),
-        cell_spot_latent_weights=spot_latent["cell_spot_latent_weights"].astype(np.float32),
+        cell_spot_latent_coords=spot_latent["cell_spot_latent_coords"].astype(
+            np.float32
+        ),
+        cell_spot_latent_cluster_labels=spot_latent[
+            "cell_spot_latent_cluster_labels"
+        ].astype(np.int32),
+        cell_spot_latent_weights=spot_latent["cell_spot_latent_weights"].astype(
+            np.float32
+        ),
         cell_spot_latent_posterior_entropy=spot_latent[
             "cell_spot_latent_posterior_entropy"
         ].astype(np.float32),
         spot_latent_mode=str(spot_latent["spot_latent_mode"].item()),
-        spot_latent_chart_learning_mode=str(spot_latent["spot_latent_chart_learning_mode"].item()),
-        spot_latent_projection_mode=str(spot_latent["spot_latent_projection_mode"].item()),
-        spot_latent_validation_role=str(spot_latent["spot_latent_validation_role"].item()),
-        spot_latent_global_within_scale=float(spot_latent["spot_latent_global_within_scale"].item()),
-        spot_latent_assignment_temperature=float(spot_latent["spot_latent_assignment_temperature"].item()),
-        spot_latent_temperature_mode=str(spot_latent["spot_latent_temperature_mode"].item()),
+        spot_latent_chart_learning_mode=str(
+            spot_latent["spot_latent_chart_learning_mode"].item()
+        ),
+        spot_latent_projection_mode=str(
+            spot_latent["spot_latent_projection_mode"].item()
+        ),
+        spot_latent_validation_role=str(
+            spot_latent["spot_latent_validation_role"].item()
+        ),
+        spot_latent_global_within_scale=float(
+            spot_latent["spot_latent_global_within_scale"].item()
+        ),
+        spot_latent_assignment_temperature=float(
+            spot_latent["spot_latent_assignment_temperature"].item()
+        ),
+        spot_latent_temperature_mode=str(
+            spot_latent["spot_latent_temperature_mode"].item()
+        ),
         spot_latent_cluster_anchor_distance_method=str(
             spot_latent["spot_latent_cluster_anchor_distance_method"].item()
         ),
@@ -4152,12 +5350,16 @@ def fit_multilevel_ot(
         spot_latent_cluster_anchor_distance_effective_method=str(
             spot_latent["spot_latent_cluster_anchor_distance_effective_method"].item()
         ),
-        spot_latent_cluster_mds_stress=float(spot_latent["spot_latent_cluster_mds_stress"].item()),
+        spot_latent_cluster_mds_stress=float(
+            spot_latent["spot_latent_cluster_mds_stress"].item()
+        ),
         spot_latent_cluster_mds_positive_eigenvalue_mass_2d=float(
             spot_latent["spot_latent_cluster_mds_positive_eigenvalue_mass_2d"].item()
         ),
         spot_latent_cluster_mds_negative_eigenvalue_mass_fraction=float(
-            spot_latent["spot_latent_cluster_mds_negative_eigenvalue_mass_fraction"].item()
+            spot_latent[
+                "spot_latent_cluster_mds_negative_eigenvalue_mass_fraction"
+            ].item()
         ),
         cost_scale_x=float(cost_scale_x),
         cost_scale_y=float(cost_scale_y),
@@ -4166,7 +5368,9 @@ def fit_multilevel_ot(
         restart_summaries=restart_summaries,
         min_subregions_per_cluster=int(requested_min_subregions_per_cluster),
         effective_min_subregions_per_cluster=int(
-            effective_min_cluster_size(len(labels), n_clusters, int(min_subregions_per_cluster))
+            effective_min_cluster_size(
+                len(labels), n_clusters, int(min_subregions_per_cluster)
+            )
         ),
         auto_k_selection=auto_k_selection,
     )

@@ -61,7 +61,14 @@ class MultilevelOTConfig:
     deep_segmentation_feature_dims: int = 32
     deep_segmentation_feature_weight: float = 1.0
     deep_segmentation_spatial_weight: float = 0.05
-    subregion_clustering_method: str = "pooled_subregion_latent"
+    joint_refinement_iters: int = 2
+    joint_refinement_knn: int = 12
+    joint_refinement_feature_dims: int = 32
+    joint_refinement_cluster_weight: float = 1.0
+    joint_refinement_spatial_weight: float = 0.25
+    joint_refinement_cut_weight: float = 0.5
+    joint_refinement_max_move_fraction: float = 0.05
+    subregion_clustering_method: str = "heterogeneity_ot_niche"
     subregion_latent_embedding_mode: str = "mean_std_shrunk"
     subregion_latent_shrinkage_tau: float = 25.0
     subregion_latent_heterogeneity_weight: float = 0.5
@@ -184,7 +191,9 @@ def _parse_candidate_n_clusters(value) -> tuple[int, ...]:
     return tuple(int(k) for k in value)
 
 
-def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> MultilevelExperimentConfig:
+def _validate_multilevel_experiment(
+    config: MultilevelExperimentConfig,
+) -> MultilevelExperimentConfig:
     for required in ["input_h5ad", "output_dir", "feature_obsm_key"]:
         if not getattr(config.paths, required):
             raise ValueError(f"paths.{required} must be set")
@@ -204,7 +213,10 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.min_cells must be >= 1")
     if config.ot.max_subregions != 0 and config.ot.max_subregions < 1:
         raise ValueError("ot.max_subregions must be positive or 0")
-    if config.ot.max_subregion_area_um2 is not None and config.ot.max_subregion_area_um2 <= 0:
+    if (
+        config.ot.max_subregion_area_um2 is not None
+        and config.ot.max_subregion_area_um2 <= 0
+    ):
         config.ot.max_subregion_area_um2 = None
     if config.ot.lambda_x < 0 or config.ot.lambda_y < 0:
         raise ValueError("ot.lambda_x and ot.lambda_y must be non-negative")
@@ -216,8 +228,14 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.overlap_jaccard_min must be between 0 and 1")
     if config.ot.overlap_contrast_scale <= 0:
         raise ValueError("ot.overlap_contrast_scale must be > 0")
-    valid_subregion_construction = {"data_driven", "deep_segmentation"}
-    config.ot.subregion_construction_method = str(config.ot.subregion_construction_method).strip().lower()
+    valid_subregion_construction = {
+        "data_driven",
+        "deep_segmentation",
+        "joint_refinement",
+    }
+    config.ot.subregion_construction_method = (
+        str(config.ot.subregion_construction_method).strip().lower()
+    )
     if config.ot.subregion_construction_method not in valid_subregion_construction:
         raise ValueError(
             "ot.subregion_construction_method must be one of "
@@ -231,12 +249,43 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.deep_segmentation_knn must be at least 2")
     if config.ot.deep_segmentation_feature_dims < 1:
         raise ValueError("ot.deep_segmentation_feature_dims must be at least 1")
-    if config.ot.deep_segmentation_feature_weight < 0 or config.ot.deep_segmentation_spatial_weight < 0:
-        raise ValueError("ot.deep_segmentation_feature_weight and ot.deep_segmentation_spatial_weight must be >= 0")
-    if config.ot.deep_segmentation_feature_weight == 0 and config.ot.deep_segmentation_spatial_weight == 0:
+    if (
+        config.ot.deep_segmentation_feature_weight < 0
+        or config.ot.deep_segmentation_spatial_weight < 0
+    ):
+        raise ValueError(
+            "ot.deep_segmentation_feature_weight and ot.deep_segmentation_spatial_weight must be >= 0"
+        )
+    if (
+        config.ot.deep_segmentation_feature_weight == 0
+        and config.ot.deep_segmentation_spatial_weight == 0
+    ):
         raise ValueError("at least one deep segmentation edge weight must be positive")
-    valid_clustering_methods = {"pooled_subregion_latent", "ot_dictionary"}
-    config.ot.subregion_clustering_method = str(config.ot.subregion_clustering_method).strip().lower()
+    if config.ot.joint_refinement_iters < 0:
+        raise ValueError("ot.joint_refinement_iters must be >= 0")
+    if config.ot.joint_refinement_knn < 2:
+        raise ValueError("ot.joint_refinement_knn must be at least 2")
+    if config.ot.joint_refinement_feature_dims < 1:
+        raise ValueError("ot.joint_refinement_feature_dims must be at least 1")
+    if config.ot.joint_refinement_cluster_weight < 0:
+        raise ValueError("ot.joint_refinement_cluster_weight must be >= 0")
+    if config.ot.joint_refinement_spatial_weight < 0:
+        raise ValueError("ot.joint_refinement_spatial_weight must be >= 0")
+    if config.ot.joint_refinement_cut_weight < 0:
+        raise ValueError("ot.joint_refinement_cut_weight must be >= 0")
+    if (
+        config.ot.joint_refinement_max_move_fraction < 0
+        or config.ot.joint_refinement_max_move_fraction > 1
+    ):
+        raise ValueError("ot.joint_refinement_max_move_fraction must be in [0, 1]")
+    valid_clustering_methods = {
+        "pooled_subregion_latent",
+        "heterogeneity_ot_niche",
+        "ot_dictionary",
+    }
+    config.ot.subregion_clustering_method = (
+        str(config.ot.subregion_clustering_method).strip().lower()
+    )
     if config.ot.subregion_clustering_method not in valid_clustering_methods:
         raise ValueError(
             "ot.subregion_clustering_method must be one of "
@@ -266,8 +315,13 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         raise ValueError("ot.subregion_latent_sample_prior_weight must be in [0, 1]")
     if config.ot.subregion_latent_codebook_size < 2:
         raise ValueError("ot.subregion_latent_codebook_size must be at least 2")
-    if config.ot.subregion_latent_codebook_sample_size < config.ot.subregion_latent_codebook_size:
-        raise ValueError("ot.subregion_latent_codebook_sample_size must be >= ot.subregion_latent_codebook_size")
+    if (
+        config.ot.subregion_latent_codebook_sample_size
+        < config.ot.subregion_latent_codebook_size
+    ):
+        raise ValueError(
+            "ot.subregion_latent_codebook_sample_size must be >= ot.subregion_latent_codebook_size"
+        )
     if config.ot.geometry_eps <= 0 or config.ot.ot_eps <= 0:
         raise ValueError("ot.geometry_eps and ot.ot_eps must be > 0")
     if config.ot.rho <= 0:
@@ -277,16 +331,32 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
     if config.ot.compressed_support_size < 2:
         raise ValueError("ot.compressed_support_size must be at least 2")
     if config.ot.align_iters < 1 or config.ot.max_iter < 1 or config.ot.n_init < 1:
-        raise ValueError("ot.align_iters, ot.max_iter, and ot.n_init must be at least 1")
+        raise ValueError(
+            "ot.align_iters, ot.max_iter, and ot.n_init must be at least 1"
+        )
     if config.ot.tol <= 0:
         raise ValueError("ot.tol must be > 0")
-    if config.ot.min_scale <= 0 or config.ot.max_scale <= 0 or config.ot.min_scale > config.ot.max_scale:
-        raise ValueError("ot.min_scale and ot.max_scale must be positive and min_scale <= max_scale")
+    if (
+        config.ot.min_scale <= 0
+        or config.ot.max_scale <= 0
+        or config.ot.min_scale > config.ot.max_scale
+    ):
+        raise ValueError(
+            "ot.min_scale and ot.max_scale must be positive and min_scale <= max_scale"
+        )
     if not str(config.ot.compute_device).strip():
         raise ValueError("ot.compute_device must be a non-empty string")
     if config.ot.shape_leakage_permutations < 0:
         raise ValueError("ot.shape_leakage_permutations must be >= 0")
-    config.ot.candidate_n_clusters = tuple(sorted({int(k) for k in _parse_candidate_n_clusters(config.ot.candidate_n_clusters) if int(k) >= 2}))
+    config.ot.candidate_n_clusters = tuple(
+        sorted(
+            {
+                int(k)
+                for k in _parse_candidate_n_clusters(config.ot.candidate_n_clusters)
+                if int(k) >= 2
+            }
+        )
+    )
     if not config.ot.candidate_n_clusters:
         raise ValueError("ot.candidate_n_clusters must contain at least one K >= 2")
     if config.ot.auto_k_max_score_subregions < 0:
@@ -296,16 +366,22 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
     if config.ot.auto_k_mds_components < 1:
         raise ValueError("ot.auto_k_mds_components must be at least 1")
     if config.ot.auto_k_pilot_n_init < 1 or config.ot.auto_k_pilot_max_iter < 1:
-        raise ValueError("ot.auto_k_pilot_n_init and ot.auto_k_pilot_max_iter must be at least 1")
+        raise ValueError(
+            "ot.auto_k_pilot_n_init and ot.auto_k_pilot_max_iter must be at least 1"
+        )
     if config.ot.min_subregions_per_cluster < 1:
         raise ValueError("ot.min_subregions_per_cluster must be at least 1")
 
     valid_methods = {"none", "autoencoder", "graph_autoencoder"}
     if config.deep.method not in valid_methods:
-        raise ValueError(f"deep.method must be one of {sorted(valid_methods)}, got '{config.deep.method}'")
+        raise ValueError(
+            f"deep.method must be one of {sorted(valid_methods)}, got '{config.deep.method}'"
+        )
     valid_validation = {"none", "spatial_block", "sample_holdout"}
     if config.deep.validation not in valid_validation:
-        raise ValueError(f"deep.validation must be one of {sorted(valid_validation)}, got '{config.deep.validation}'")
+        raise ValueError(
+            f"deep.validation must be one of {sorted(valid_validation)}, got '{config.deep.validation}'"
+        )
     valid_context_modes = {"inductive", "transductive"}
     if config.deep.validation_context_mode not in valid_context_modes:
         raise ValueError(
@@ -336,16 +412,22 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
         and config.deep.mid_radius_um is not None
         and config.deep.mid_radius_um < config.deep.short_radius_um
     ):
-        raise ValueError("deep.mid_radius_um must be >= deep.short_radius_um when both are set")
+        raise ValueError(
+            "deep.mid_radius_um must be >= deep.short_radius_um when both are set"
+        )
     valid_graph_aggr = {"mean"}
     if config.deep.graph_aggr not in valid_graph_aggr:
-        raise ValueError(f"deep.graph_aggr must be one of {sorted(valid_graph_aggr)}, got '{config.deep.graph_aggr}'")
+        raise ValueError(
+            f"deep.graph_aggr must be one of {sorted(valid_graph_aggr)}, got '{config.deep.graph_aggr}'"
+        )
     if config.deep.epochs < 1:
         raise ValueError("deep.epochs must be at least 1")
     if config.deep.batch_size < 1:
         raise ValueError("deep.batch_size must be at least 1")
     if config.deep.learning_rate <= 0 or config.deep.weight_decay < 0:
-        raise ValueError("deep.learning_rate must be > 0 and deep.weight_decay must be >= 0")
+        raise ValueError(
+            "deep.learning_rate must be > 0 and deep.weight_decay must be >= 0"
+        )
     if config.deep.count_layer is not None and not str(config.deep.count_layer).strip():
         raise ValueError("deep.count_layer must be a non-empty string when set")
     if config.deep.count_decoder_rank < 1:
@@ -366,15 +448,24 @@ def _validate_multilevel_experiment(config: MultilevelExperimentConfig) -> Multi
             raise ValueError(f"deep.{name} must be >= 0")
     valid_outputs = {"intrinsic", "context", "joint"}
     if config.deep.method != "none" and config.deep.output_embedding is None:
-        raise ValueError("deep.output_embedding must be set explicitly when deep.method is active")
-    if config.deep.output_embedding is not None and config.deep.output_embedding not in valid_outputs:
-        raise ValueError(f"deep.output_embedding must be one of {sorted(valid_outputs)}, got '{config.deep.output_embedding}'")
+        raise ValueError(
+            "deep.output_embedding must be set explicitly when deep.method is active"
+        )
+    if (
+        config.deep.output_embedding is not None
+        and config.deep.output_embedding not in valid_outputs
+    ):
+        raise ValueError(
+            f"deep.output_embedding must be one of {sorted(valid_outputs)}, got '{config.deep.output_embedding}'"
+        )
     if config.deep.early_stopping_patience < 1:
         raise ValueError("deep.early_stopping_patience must be at least 1")
     if config.deep.min_delta < 0:
         raise ValueError("deep.min_delta must be >= 0")
     if config.deep.pretrained_model and config.deep.method == "none":
-        raise ValueError("deep.pretrained_model requires deep.method to be an active encoder method")
+        raise ValueError(
+            "deep.pretrained_model requires deep.method to be an active encoder method"
+        )
     return config
 
 
@@ -386,12 +477,23 @@ def load_multilevel_config(path: str | Path) -> MultilevelExperimentConfig:
     if unknown_top:
         raise KeyError(f"Unknown top-level config sections: {', '.join(unknown_top)}")
     config = MultilevelExperimentConfig(
-        paths=_make_dataclass(MultilevelPathConfig, _validate_payload_keys("paths", MultilevelPathConfig, payload.get("paths"))),
-        ot=_make_dataclass(MultilevelOTConfig, _validate_payload_keys("ot", MultilevelOTConfig, payload.get("ot"))),
-        deep=_make_dataclass(DeepFeatureConfig, _validate_payload_keys("deep", DeepFeatureConfig, payload.get("deep"))),
+        paths=_make_dataclass(
+            MultilevelPathConfig,
+            _validate_payload_keys("paths", MultilevelPathConfig, payload.get("paths")),
+        ),
+        ot=_make_dataclass(
+            MultilevelOTConfig,
+            _validate_payload_keys("ot", MultilevelOTConfig, payload.get("ot")),
+        ),
+        deep=_make_dataclass(
+            DeepFeatureConfig,
+            _validate_payload_keys("deep", DeepFeatureConfig, payload.get("deep")),
+        ),
     )
     return _validate_multilevel_experiment(config)
 
 
-def validate_multilevel_config(config: MultilevelExperimentConfig) -> MultilevelExperimentConfig:
+def validate_multilevel_config(
+    config: MultilevelExperimentConfig,
+) -> MultilevelExperimentConfig:
     return _validate_multilevel_experiment(config)

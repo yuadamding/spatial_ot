@@ -347,10 +347,13 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     )
     assert 'exec bash "$SCRIPT_DIR/run.sh"' in prepared_gpu_sh
     assert "/storage/" not in prepared_gpu_sh
-    assert "cohort_multilevel_ot_deep_segmentation_vram9_" in deep_segmentation_sh
+    assert "cohort_multilevel_ot_joint_refinement_vram9_" in deep_segmentation_sh
     assert (
-        'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-deep_segmentation}"'
+        'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-joint_refinement}"'
         in deep_segmentation_sh
+    )
+    assert (
+        'JOINT_REFINEMENT_ITERS="${JOINT_REFINEMENT_ITERS:-2}"' in deep_segmentation_sh
     )
     assert (
         'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"'
@@ -390,11 +393,11 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         in optimal_search_sh
     )
     assert (
-        'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-pooled_subregion_latent}"'
+        'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-heterogeneity_ot_niche}"'
         in optimal_search_sh
     )
     assert (
-        'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-pooled_subregion_latent}"'
+        'SUBREGION_CLUSTERING_METHOD="${SUBREGION_CLUSTERING_METHOD:-heterogeneity_ot_niche}"'
         in run_sh
     )
     assert (
@@ -435,11 +438,12 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "min_cells = 25" in config_toml
     assert "max_subregions = 5000" in config_toml
     assert "allow_convex_hull_fallback = false" in config_toml
-    assert 'subregion_construction_method = "deep_segmentation"' in config_toml
-    assert 'subregion_clustering_method = "pooled_subregion_latent"' in config_toml
+    assert 'subregion_construction_method = "joint_refinement"' in config_toml
+    assert 'subregion_clustering_method = "heterogeneity_ot_niche"' in config_toml
     assert 'subregion_latent_embedding_mode = "mean_std_shrunk"' in config_toml
     assert "subregion_latent_heterogeneity_weight = 0.5" in config_toml
     assert "subregion_latent_sample_prior_weight = 0.5" in config_toml
+    assert "joint_refinement_max_move_fraction = 0.05" in config_toml
     assert "auto_n_clusters = false" in config_toml
     assert (
         "candidate_n_clusters = [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]"
