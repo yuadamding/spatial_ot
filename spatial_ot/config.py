@@ -89,6 +89,8 @@ class MultilevelOTConfig:
     heterogeneity_transport_feature_cost: str = "hellinger_codebook"
     heterogeneity_fused_ot_feature_weight: float = 0.5
     heterogeneity_fused_ot_coordinate_weight: float = 0.5
+    heterogeneity_fused_ot_solver: str = "emd"
+    heterogeneity_fused_ot_epsilon: float = 0.05
     heterogeneity_fgw_alpha: float = 0.5
     heterogeneity_fgw_solver: str = "conditional_gradient"
     heterogeneity_fgw_epsilon: float = 0.05
@@ -412,6 +414,15 @@ def _validate_multilevel_experiment(
             "or sqeuclidean"
         )
     if (
+        config.ot.heterogeneity_transport_feature_cost
+        in {"hellinger_codebook", "hellinger"}
+        and config.ot.heterogeneity_transport_feature_mode != "soft_codebook"
+    ):
+        raise ValueError(
+            "ot.heterogeneity_transport_feature_cost=hellinger requires "
+            "ot.heterogeneity_transport_feature_mode='soft_codebook'"
+        )
+    if (
         config.ot.heterogeneity_fused_ot_feature_weight < 0
         or config.ot.heterogeneity_fused_ot_coordinate_weight < 0
     ):
@@ -422,6 +433,18 @@ def _validate_multilevel_experiment(
         <= 1e-12
     ):
         raise ValueError("at least one fused-OT heterogeneity weight must be positive")
+    config.ot.heterogeneity_fused_ot_solver = (
+        str(config.ot.heterogeneity_fused_ot_solver).strip().lower()
+    )
+    if config.ot.heterogeneity_fused_ot_solver not in {
+        "emd",
+        "exact",
+        "sinkhorn",
+        "entropic",
+    }:
+        raise ValueError("ot.heterogeneity_fused_ot_solver must be emd or sinkhorn")
+    if config.ot.heterogeneity_fused_ot_epsilon <= 0:
+        raise ValueError("ot.heterogeneity_fused_ot_epsilon must be > 0")
     if not 0 <= config.ot.heterogeneity_fgw_alpha <= 1:
         raise ValueError("ot.heterogeneity_fgw_alpha must be in [0, 1]")
     config.ot.heterogeneity_fgw_solver = (

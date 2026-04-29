@@ -170,6 +170,9 @@ def test_candidate_command_preserves_pretrained_deep_model_and_regularization_fl
     assert command[command.index("--heterogeneity-fgw-alpha") + 1] == str(
         config.ot.heterogeneity_fgw_alpha
     )
+    assert command[command.index("--heterogeneity-fused-ot-solver") + 1] == str(
+        config.ot.heterogeneity_fused_ot_solver
+    )
     assert command[command.index("--heterogeneity-fgw-solver") + 1] == str(
         config.ot.heterogeneity_fgw_solver
     )

@@ -2264,6 +2264,7 @@ def _cluster_precomputed_transport_distances(
     medoids = _medoids_for(labels)
     costs = d[:, medoids].astype(np.float32)
     argmin_labels = np.argmin(costs, axis=1).astype(np.int32)
+    initial_non_nearest = labels != argmin_labels
     labels, forced_mask = _ensure_minimum_cluster_size(
         labels,
         costs,
@@ -2273,14 +2274,22 @@ def _cluster_precomputed_transport_distances(
     medoids = _medoids_for(labels)
     costs = d[:, medoids].astype(np.float32)
     argmin_labels = np.argmin(costs, axis=1).astype(np.int32)
-    inertia = float(np.sum(costs[np.arange(n), labels]))
+    non_nearest = labels != argmin_labels
+    assigned_medoid_distance_sum = float(np.sum(costs[np.arange(n), labels]))
     return {
         "labels": labels.astype(np.int32),
         "argmin_labels": argmin_labels.astype(np.int32),
         "costs": costs.astype(np.float32),
         "forced_label_mask": forced_mask.astype(bool),
         "medoid_indices": medoids.astype(np.int32),
-        "inertia": inertia,
+        "inertia": assigned_medoid_distance_sum,
+        "assigned_medoid_distance_sum": assigned_medoid_distance_sum,
+        "n_labels_not_nearest_medoid_initial": int(np.sum(initial_non_nearest)),
+        "fraction_labels_not_nearest_medoid_initial": float(np.mean(initial_non_nearest)),
+        "n_labels_not_nearest_medoid": int(np.sum(non_nearest)),
+        "fraction_labels_not_nearest_medoid": float(np.mean(non_nearest)),
+        "n_forced_by_min_size_repair": int(np.sum(forced_mask)),
+        "fraction_forced_by_min_size_repair": float(np.mean(forced_mask)),
     }
 
 
@@ -4110,6 +4119,8 @@ def fit_multilevel_ot(
     heterogeneity_transport_feature_cost: str = "hellinger_codebook",
     heterogeneity_fused_ot_feature_weight: float = 0.5,
     heterogeneity_fused_ot_coordinate_weight: float = 0.5,
+    heterogeneity_fused_ot_solver: str = "emd",
+    heterogeneity_fused_ot_epsilon: float = 0.05,
     heterogeneity_fgw_alpha: float = 0.5,
     heterogeneity_fgw_solver: str = "conditional_gradient",
     heterogeneity_fgw_epsilon: float = 0.05,
@@ -4233,12 +4244,24 @@ def fit_multilevel_ot(
     heterogeneity_transport_feature_cost = (
         str(heterogeneity_transport_feature_cost).strip().lower()
     )
+    if (
+        heterogeneity_transport_feature_cost in {"hellinger_codebook", "hellinger"}
+        and heterogeneity_transport_feature_mode != "soft_codebook"
+    ):
+        raise ValueError(
+            "Hellinger heterogeneity transport feature cost requires "
+            "heterogeneity_transport_feature_mode='soft_codebook'."
+        )
     heterogeneity_fused_ot_feature_weight = max(
         float(heterogeneity_fused_ot_feature_weight), 0.0
     )
     heterogeneity_fused_ot_coordinate_weight = max(
         float(heterogeneity_fused_ot_coordinate_weight), 0.0
     )
+    heterogeneity_fused_ot_solver = str(heterogeneity_fused_ot_solver).strip().lower()
+    if heterogeneity_fused_ot_solver not in {"emd", "exact", "sinkhorn", "entropic"}:
+        raise ValueError("heterogeneity_fused_ot_solver must be 'emd' or 'sinkhorn'")
+    heterogeneity_fused_ot_epsilon = max(float(heterogeneity_fused_ot_epsilon), 1e-8)
     if (
         heterogeneity_fused_ot_feature_weight
         + heterogeneity_fused_ot_coordinate_weight
@@ -5028,8 +5051,11 @@ def fit_multilevel_ot(
                     transport_measures,
                     mode=str(clustering_method),
                     max_subregions=int(heterogeneity_transport_max_subregions),
+                    random_state=int(seed),
                     fused_ot_feature_weight=heterogeneity_fused_ot_feature_weight,
                     fused_ot_coordinate_weight=heterogeneity_fused_ot_coordinate_weight,
+                    fused_ot_solver=heterogeneity_fused_ot_solver,
+                    fused_ot_epsilon=heterogeneity_fused_ot_epsilon,
                     feature_cost_kind=heterogeneity_transport_feature_cost,
                     fgw_alpha=heterogeneity_fgw_alpha,
                     fgw_solver=heterogeneity_fgw_solver,
@@ -5051,6 +5077,27 @@ def fit_multilevel_ot(
                 n_clusters=n_clusters,
                 min_subregions_per_cluster=int(min_subregions_per_cluster),
             )
+            subregion_latent_embedding_metadata["transport_clustering"] = {
+                "algorithm": "average_linkage_precomputed_distance_with_medoid_diagnostics",
+                "medoid_indices": np.asarray(
+                    latent_fit.get("medoid_indices", []), dtype=np.int32
+                ).tolist(),
+                "assigned_medoid_distance_sum": float(
+                    latent_fit.get("assigned_medoid_distance_sum", 0.0)
+                ),
+                "n_labels_not_nearest_medoid": int(
+                    latent_fit.get("n_labels_not_nearest_medoid", 0)
+                ),
+                "fraction_labels_not_nearest_medoid": float(
+                    latent_fit.get("fraction_labels_not_nearest_medoid", 0.0)
+                ),
+                "n_forced_by_min_size_repair": int(
+                    latent_fit.get("n_forced_by_min_size_repair", 0)
+                ),
+                "fraction_forced_by_min_size_repair": float(
+                    latent_fit.get("fraction_forced_by_min_size_repair", 0.0)
+                ),
+            }
         else:
             latent_fit = fit_kmeans_on_latent_embeddings(
                 subregion_latent_embeddings,

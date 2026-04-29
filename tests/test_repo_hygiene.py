@@ -54,12 +54,12 @@ def test_no_generated_files_tracked_when_git_metadata_is_available() -> None:
         assert not any(path.endswith(suffix) for suffix in forbidden_suffixes)
 
 
-def test_package_version_matches_0_2_4_state() -> None:
+def test_package_version_matches_0_2_5_state() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
     package_init = (repo_root / "spatial_ot" / "__init__.py").read_text()
-    assert 'version = "0.2.4"' in pyproject_toml
-    assert '__version__ = "0.2.4"' in package_init
+    assert 'version = "0.2.5"' in pyproject_toml
+    assert '__version__ = "0.2.5"' in package_init
 
 
 def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
@@ -419,6 +419,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         in run_sh
     )
     assert 'HETEROGENEITY_FGW_ALPHA="${HETEROGENEITY_FGW_ALPHA:-0.5}"' in run_sh
+    assert 'HETEROGENEITY_FUSED_OT_SOLVER="${HETEROGENEITY_FUSED_OT_SOLVER:-emd}"' in run_sh
     assert '--heterogeneity-composition-weight "$HETEROGENEITY_COMPOSITION_WEIGHT"' in run_sh
     assert '--heterogeneity-pair-graph-mode "$HETEROGENEITY_PAIR_GRAPH_MODE"' in run_sh
     assert (
@@ -426,6 +427,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         in run_sh
     )
     assert '--heterogeneity-fgw-alpha "$HETEROGENEITY_FGW_ALPHA"' in run_sh
+    assert '--heterogeneity-fused-ot-solver "$HETEROGENEITY_FUSED_OT_SOLVER"' in run_sh
     assert (
         '--heterogeneity-pair-bin-normalization "$HETEROGENEITY_PAIR_BIN_NORMALIZATION"'
         in run_sh
@@ -446,6 +448,10 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         in optimal_search_sh
     )
     assert '--heterogeneity-fgw-solver "$HETEROGENEITY_FGW_SOLVER"' in optimal_search_sh
+    assert (
+        '--heterogeneity-fused-ot-epsilon "$HETEROGENEITY_FUSED_OT_EPSILON"'
+        in optimal_search_sh
+    )
     assert (
         'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in optimal_search_sh
     )
@@ -481,6 +487,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'heterogeneity_transport_feature_mode = "soft_codebook"' in config_toml
     assert 'heterogeneity_transport_feature_cost = "hellinger_codebook"' in config_toml
     assert "heterogeneity_fgw_alpha = 0.5" in config_toml
+    assert 'heterogeneity_fused_ot_solver = "emd"' in config_toml
     assert 'heterogeneity_fgw_solver = "conditional_gradient"' in config_toml
     assert "joint_refinement_max_move_fraction = 0.05" in config_toml
     assert "auto_n_clusters = false" in config_toml

@@ -1215,6 +1215,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Canonical-coordinate part weight in heterogeneity_fused_ot_niche.",
     )
     multilevel.add_argument(
+        "--heterogeneity-fused-ot-solver",
+        default=None,
+        choices=["emd", "exact", "sinkhorn", "entropic"],
+        help="Solver for heterogeneity_fused_ot_niche.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-fused-ot-epsilon",
+        type=float,
+        default=None,
+        help="Entropic regularization used when fused-OT solver is sinkhorn.",
+    )
+    multilevel.add_argument(
         "--heterogeneity-fgw-alpha",
         type=float,
         default=None,
@@ -1756,6 +1768,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Canonical-coordinate part weight in heterogeneity_fused_ot_niche.",
     )
     optimal_search.add_argument(
+        "--heterogeneity-fused-ot-solver",
+        default=None,
+        choices=["emd", "exact", "sinkhorn", "entropic"],
+        help="Solver for heterogeneity_fused_ot_niche.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-fused-ot-epsilon",
+        type=float,
+        default=None,
+        help="Entropic regularization used when fused-OT solver is sinkhorn.",
+    )
+    optimal_search.add_argument(
         "--heterogeneity-fgw-alpha",
         type=float,
         default=None,
@@ -2007,6 +2031,8 @@ def _resolve_multilevel_config_from_args(
         "heterogeneity_transport_feature_cost",
         "heterogeneity_fused_ot_feature_weight",
         "heterogeneity_fused_ot_coordinate_weight",
+        "heterogeneity_fused_ot_solver",
+        "heterogeneity_fused_ot_epsilon",
         "heterogeneity_fgw_alpha",
         "heterogeneity_fgw_solver",
         "heterogeneity_fgw_epsilon",

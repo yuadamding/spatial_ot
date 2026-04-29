@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.5
+
+- Fit global transport cost scales across sampled subregion pairs for fused-OT/FGW distance matrices instead of re-normalizing each pair independently.
+- Reject Hellinger/codebook feature costs for signed or mixed whitened transport features; Hellinger is now limited to probability-valued `soft_codebook` features.
+- Expose fused-OT solver controls (`emd` or `sinkhorn`) and Sinkhorn epsilon through config, CLI, scripts, summaries, and optimal-search command generation.
+- Add an explicit `alpha=1` FGW structure-only GW branch, while keeping `alpha=0` as feature-only OT.
+- Add transport clustering diagnostics for average-linkage labels versus nearest-medoid assignments and min-size repair fractions.
+- Record transport cost-scale metadata, pairwise solve counts, FGW distance family, finite-distance status, partial-FGW requested mass, and coupling mass when couplings are audited.
+- Align package metadata with the local `0.2.5` state.
+
 ## 0.2.4
 
 - Add true transport-defined heterogeneity clustering modes: `heterogeneity_fused_ot_niche` uses balanced OT on a fused feature-plus-canonical-coordinate ground cost, and `heterogeneity_fgw_niche` uses POT fused Gromov-Wasserstein on measured attributed subregion support objects.

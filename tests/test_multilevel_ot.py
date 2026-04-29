@@ -33,7 +33,9 @@ from spatial_ot.multilevel.heterogeneity import (
     SubregionFGWMeasure,
     build_internal_heterogeneity_embeddings,
     build_subregion_fgw_measures,
+    feature_cost,
     fgw_distance,
+    fit_transport_cost_scales,
     fused_ot_distance,
     pairwise_transport_distance_matrix,
 )
@@ -1909,6 +1911,31 @@ def test_fgw_structure_only_limit_ignores_feature_distribution() -> None:
     assert meta["target_marginal_error"] < 1e-6
 
 
+def test_hellinger_feature_cost_rejects_signed_whitened_features() -> None:
+    coords = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64)
+    left = _fgw_measure(coords, np.array([[-1.0, 0.5], [0.2, -0.4]]))
+    right = _fgw_measure(coords, np.array([[0.3, -0.1], [-0.5, 0.7]]))
+    left = SubregionFGWMeasure(
+        coords=left.coords,
+        features=left.features,
+        weights=left.weights,
+        structure=left.structure,
+        feature_mode="whitened_features",
+        n_whitened_features=2,
+    )
+    right = SubregionFGWMeasure(
+        coords=right.coords,
+        features=right.features,
+        weights=right.weights,
+        structure=right.structure,
+        feature_mode="whitened_features",
+        n_whitened_features=2,
+    )
+
+    with pytest.raises(ValueError, match="Hellinger feature cost requires"):
+        feature_cost(left, right, feature_cost_kind="hellinger_codebook")
+
+
 def test_fused_ot_distance_uses_cross_coordinate_cost() -> None:
     features = np.tile(np.array([[1.0, 0.0]], dtype=np.float64), (3, 1))
     left = _fgw_measure(
@@ -1999,6 +2026,9 @@ def test_build_subregion_fgw_measures_and_pairwise_transport_cap() -> None:
     assert distances.shape == (2, 2)
     assert np.allclose(np.diag(distances), 0.0)
     assert distance_meta["uses_ot_costs"] is True
+    assert distance_meta["n_pairwise_solves"] == 1
+    assert distance_meta["transport_cost_scales"]["feature_scale"] > 0
+    assert distance_meta["transport_cost_scales"]["coordinate_scale"] > 0
 
     with pytest.raises(ValueError, match="exceeds heterogeneity_transport_max_subregions"):
         pairwise_transport_distance_matrix(
@@ -2006,6 +2036,26 @@ def test_build_subregion_fgw_measures_and_pairwise_transport_cap() -> None:
             mode=HETEROGENEITY_FGW_MODE,
             max_subregions=1,
         )
+
+
+def test_transport_cost_scales_are_global_not_pair_local() -> None:
+    base_coords = np.array([[0.0, 0.0], [0.1, 0.0]], dtype=np.float64)
+    measures = [
+        _fgw_measure(base_coords, np.array([[0.0], [1.0]], dtype=np.float64)),
+        _fgw_measure(base_coords, np.array([[10.0], [11.0]], dtype=np.float64)),
+        _fgw_measure(base_coords, np.array([[100.0], [101.0]], dtype=np.float64)),
+    ]
+
+    scales, metadata = fit_transport_cost_scales(
+        measures,
+        feature_cost_kind="sqeuclidean",
+        max_pair_samples=10,
+        random_state=99,
+    )
+
+    assert scales.feature_scale > 1.0
+    assert scales.coordinate_scale > 0.0
+    assert metadata["scale_source"] == "sampled_global_median_positive_cost"
 
 
 def test_fit_multilevel_ot_fgw_mode_uses_precomputed_transport_matrix() -> None:
@@ -2081,6 +2131,8 @@ def test_fit_multilevel_ot_fgw_mode_uses_precomputed_transport_matrix() -> None:
     assert metadata["uses_ot_costs"] is True
     assert metadata["transport_distance"]["mode"] == HETEROGENEITY_FGW_MODE
     assert metadata["transport_distance"]["uses_ot_costs"] is True
+    assert "transport_cost_scales" in metadata["transport_distance"]
+    assert metadata["transport_clustering"]["algorithm"].startswith("average_linkage")
 
 
 def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution() -> (

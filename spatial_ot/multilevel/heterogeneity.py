@@ -38,6 +38,18 @@ class SubregionFGWMeasure:
     structure: np.ndarray
     sample_id: str | None = None
     subregion_id: int | None = None
+    feature_mode: str = "soft_codebook"
+    n_whitened_features: int = 0
+    n_codebook_features: int = 0
+
+
+@dataclass(frozen=True)
+class TransportCostScales:
+    feature_scale: float
+    coordinate_scale: float
+    structure_scale: float
+    n_pair_samples: int
+    scale_source: str = "sampled_global_median_positive_cost"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -210,23 +222,62 @@ def hellinger_cost(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     return 0.5 * np.sum(diff * diff, axis=2)
 
 
+def _validate_feature_cost_mode(
+    left: SubregionFGWMeasure,
+    right: SubregionFGWMeasure,
+    *,
+    feature_cost_kind: str,
+) -> None:
+    requested = str(feature_cost_kind or "hellinger_codebook").strip().lower()
+    if requested not in {"hellinger", "hellinger_codebook", "codebook_hellinger"}:
+        return
+    left_mode = str(getattr(left, "feature_mode", "soft_codebook"))
+    right_mode = str(getattr(right, "feature_mode", "soft_codebook"))
+    if left_mode != "soft_codebook" or right_mode != "soft_codebook":
+        raise ValueError(
+            "Hellinger feature cost requires probability-valued "
+            "feature_mode='soft_codebook'. Use sqeuclidean for whitened_features "
+            "or whitened_features_plus_soft_codebook."
+        )
+    if np.any(np.asarray(left.features) < -1e-10) or np.any(
+        np.asarray(right.features) < -1e-10
+    ):
+        raise ValueError("Hellinger feature cost cannot be applied to signed features.")
+
+
+def _raw_feature_cost(
+    left: SubregionFGWMeasure,
+    right: SubregionFGWMeasure,
+    *,
+    feature_cost_kind: str,
+) -> np.ndarray:
+    requested = str(feature_cost_kind or "hellinger_codebook").strip().lower()
+    if requested in {"hellinger", "hellinger_codebook", "codebook_hellinger"}:
+        _validate_feature_cost_mode(
+            left,
+            right,
+            feature_cost_kind=requested,
+        )
+        return hellinger_cost(left.features, right.features)
+    if requested in {"sqeuclidean", "squared_euclidean", "euclidean"}:
+        return _pairwise_sqeuclidean(left.features, right.features)
+    raise ValueError(
+        "feature_cost_kind must be 'hellinger_codebook' or 'sqeuclidean', "
+        f"got '{feature_cost_kind}'."
+    )
+
+
 def feature_cost(
     left: SubregionFGWMeasure,
     right: SubregionFGWMeasure,
     *,
     feature_cost_kind: str = "hellinger_codebook",
     normalize: bool = True,
+    scale: float | None = None,
 ) -> np.ndarray:
-    requested = str(feature_cost_kind or "hellinger_codebook").strip().lower()
-    if requested in {"hellinger", "hellinger_codebook", "codebook_hellinger"}:
-        cost = hellinger_cost(left.features, right.features)
-    elif requested in {"sqeuclidean", "squared_euclidean", "euclidean"}:
-        cost = _pairwise_sqeuclidean(left.features, right.features)
-    else:
-        raise ValueError(
-            "feature_cost_kind must be 'hellinger_codebook' or 'sqeuclidean', "
-            f"got '{feature_cost_kind}'."
-        )
+    cost = _raw_feature_cost(left, right, feature_cost_kind=feature_cost_kind)
+    if scale is not None:
+        return np.asarray(cost / max(float(scale), 1e-12), dtype=np.float64)
     return (
         _normalize_cost_matrix(cost)
         if bool(normalize)
@@ -487,7 +538,10 @@ def _pair_cooccurrence(
         right = q[cols[mask]].astype(np.float64)
         weights_bin = pair_w[mask]
         mat = left.T @ (right * weights_bin[:, None])
-        out[bin_idx] = mat + mat.T
+        sym = mat + mat.T
+        diag = np.diag_indices_from(sym)
+        sym[diag] = mat[diag]
+        out[bin_idx] = sym
     requested = str(normalization or "observed_over_expected").strip().lower()
     if requested in {"observed_over_expected", "enrichment", "oe"}:
         composition = np.sum(q.astype(np.float64) * w.astype(np.float64)[:, None], axis=0)
@@ -617,10 +671,16 @@ def build_subregion_fgw_measures(
         code_entropy_values.append(entropy.astype(np.float32))
         if requested_feature_mode == "soft_codebook":
             node_features = probs.astype(np.float64)
+            n_whitened = 0
+            n_codebook = int(probs.shape[1])
         elif requested_feature_mode == "whitened_features":
             node_features = z.astype(np.float64)
+            n_whitened = int(z.shape[1])
+            n_codebook = 0
         else:
             node_features = np.hstack([z.astype(np.float64), probs.astype(np.float64)])
+            n_whitened = int(z.shape[1])
+            n_codebook = int(probs.shape[1])
         structure = structure_cost(
             coords,
             scale=float(resolved_structure_scale),
@@ -634,6 +694,9 @@ def build_subregion_fgw_measures(
                 structure=structure,
                 sample_id=sample_values[idx],
                 subregion_id=int(measure.subregion_id),
+                feature_mode=requested_feature_mode,
+                n_whitened_features=n_whitened,
+                n_codebook_features=n_codebook,
             )
         )
         support_sizes.append(int(coords.shape[0]))
@@ -673,12 +736,24 @@ def fused_ot_distance(
     feature_cost_kind: str = "hellinger_codebook",
     solver: str = "emd",
     epsilon: float = 0.05,
+    feature_scale: float | None = None,
+    coordinate_scale: float | None = None,
     return_coupling: bool = False,
 ) -> tuple[float, np.ndarray | None, dict[str, object]]:
     p = _normalize_mass(left.weights)
     q = _normalize_mass(right.weights)
-    m_feature = feature_cost(left, right, feature_cost_kind=feature_cost_kind)
-    m_coord = _normalize_cost_matrix(_pairwise_sqeuclidean(left.coords, right.coords))
+    m_feature = feature_cost(
+        left,
+        right,
+        feature_cost_kind=feature_cost_kind,
+        scale=feature_scale,
+    )
+    raw_coord = _pairwise_sqeuclidean(left.coords, right.coords)
+    m_coord = (
+        np.asarray(raw_coord / max(float(coordinate_scale), 1e-12), dtype=np.float64)
+        if coordinate_scale is not None
+        else _normalize_cost_matrix(raw_coord)
+    )
     fw = max(float(feature_weight), 0.0)
     cw = max(float(coordinate_weight), 0.0)
     total = max(fw + cw, 1e-12)
@@ -700,6 +775,10 @@ def fused_ot_distance(
         "feature_weight": float(fw / total),
         "coordinate_weight": float(cw / total),
         "feature_cost": str(feature_cost_kind),
+        "feature_scale": None if feature_scale is None else float(feature_scale),
+        "coordinate_scale": None
+        if coordinate_scale is None
+        else float(coordinate_scale),
         "n_source": int(p.size),
         "n_target": int(q.size),
         "distance": distance,
@@ -721,13 +800,19 @@ def fgw_distance(
     partial: bool = False,
     partial_mass: float = 0.85,
     partial_reg: float = 0.05,
+    feature_scale: float | None = None,
     return_coupling: bool = False,
 ) -> tuple[float, np.ndarray | None, dict[str, object]]:
     p = _normalize_mass(left.weights)
     q = _normalize_mass(right.weights)
     c1 = np.asarray(left.structure, dtype=np.float64)
     c2 = np.asarray(right.structure, dtype=np.float64)
-    m = feature_cost(left, right, feature_cost_kind=feature_cost_kind)
+    m = feature_cost(
+        left,
+        right,
+        feature_cost_kind=feature_cost_kind,
+        scale=feature_scale,
+    )
     a = float(np.clip(float(alpha), 0.0, 1.0))
     requested_solver = str(solver or "conditional_gradient").strip().lower()
     if a <= 1e-12 and not bool(partial):
@@ -738,6 +823,50 @@ def fgw_distance(
             coupling = None
             distance = ot.emd2(p, q, m)
         solver_name = "ot.emd_feature_only_fgw_limit"
+        distance_family = "feature_only_ot"
+    elif a >= 1.0 - 1e-12 and not bool(partial):
+        if return_coupling:
+            coupling = ot.gromov.gromov_wasserstein(
+                c1,
+                c2,
+                p=p,
+                q=q,
+                loss_fun=str(loss_fun),
+                symmetric=True,
+                max_iter=int(max_iter),
+                tol_rel=float(tol),
+                tol_abs=float(tol),
+                log=False,
+            )
+            distance = ot.gromov.gromov_wasserstein2(
+                c1,
+                c2,
+                p=p,
+                q=q,
+                loss_fun=str(loss_fun),
+                symmetric=True,
+                G0=coupling,
+                max_iter=int(max_iter),
+                tol_rel=float(tol),
+                tol_abs=float(tol),
+                log=False,
+            )
+        else:
+            coupling = None
+            distance = ot.gromov.gromov_wasserstein2(
+                c1,
+                c2,
+                p=p,
+                q=q,
+                loss_fun=str(loss_fun),
+                symmetric=True,
+                max_iter=int(max_iter),
+                tol_rel=float(tol),
+                tol_abs=float(tol),
+                log=False,
+            )
+        solver_name = "ot.gromov.gromov_wasserstein2_structure_only_limit"
+        distance_family = "structure_only_gw"
     elif bool(partial):
         distance = ot.gromov.entropic_partial_fused_gromov_wasserstein2(
             m,
@@ -756,6 +885,7 @@ def fgw_distance(
         )
         coupling = None
         solver_name = "ot.gromov.entropic_partial_fused_gromov_wasserstein2"
+        distance_family = "entropic_partial_fgw"
     elif requested_solver in {"entropic", "pgd", "ppa"}:
         distance = ot.gromov.entropic_fused_gromov_wasserstein2(
             m,
@@ -774,6 +904,7 @@ def fgw_distance(
         )
         coupling = None
         solver_name = "ot.gromov.entropic_fused_gromov_wasserstein2"
+        distance_family = "entropic_balanced_fgw"
     elif requested_solver in {"conditional_gradient", "cg", "exact", "non_entropic"}:
         distance = ot.gromov.fused_gromov_wasserstein2(
             m,
@@ -806,6 +937,7 @@ def fgw_distance(
                 tol_abs=float(tol),
                 log=False,
             )
+        distance_family = "balanced_fgw"
     else:
         raise ValueError(
             "fgw solver must be conditional_gradient, entropic, ppa, or partial."
@@ -817,16 +949,105 @@ def fgw_distance(
         "solver": solver_name,
         "alpha": a,
         "feature_cost": str(feature_cost_kind),
+        "feature_scale": None if feature_scale is None else float(feature_scale),
         "loss_fun": str(loss_fun),
         "partial": bool(partial),
+        "distance_family": distance_family,
+        "distance_is_finite": bool(np.isfinite(distance_float)),
         "n_source": int(p.size),
         "n_target": int(q.size),
         "distance": distance_float,
     }
+    if bool(partial):
+        meta["requested_partial_mass"] = float(np.clip(float(partial_mass), 1e-8, 1.0))
+        meta["partial_reg"] = float(partial_reg)
     if coupling is not None:
         meta["source_marginal_error"] = float(np.max(np.abs(coupling.sum(axis=1) - p)))
         meta["target_marginal_error"] = float(np.max(np.abs(coupling.sum(axis=0) - q)))
+        meta["coupling_mass"] = float(np.sum(coupling))
     return distance_float, coupling, meta
+
+
+def fit_transport_cost_scales(
+    measures: list[SubregionFGWMeasure],
+    *,
+    feature_cost_kind: str = "hellinger_codebook",
+    max_pair_samples: int = 2000,
+    random_state: int = 1337,
+) -> tuple[TransportCostScales, dict[str, object]]:
+    n = int(len(measures))
+    if n < 2:
+        scales = TransportCostScales(
+            feature_scale=1.0,
+            coordinate_scale=1.0,
+            structure_scale=1.0,
+            n_pair_samples=0,
+        )
+        return scales, {
+            "scale_source": scales.scale_source,
+            "n_pair_samples": 0,
+            "feature_scale": 1.0,
+            "coordinate_scale": 1.0,
+            "structure_scale": 1.0,
+        }
+    pair_indices = np.asarray(
+        [(left, right) for left in range(n) for right in range(left + 1, n)],
+        dtype=np.int64,
+    )
+    cap = max(int(max_pair_samples), 1)
+    if pair_indices.shape[0] > cap:
+        rng = np.random.default_rng(int(random_state))
+        take = rng.choice(pair_indices.shape[0], size=cap, replace=False)
+        pair_indices = pair_indices[np.sort(take)]
+    feature_values: list[np.ndarray] = []
+    coordinate_values: list[np.ndarray] = []
+    for left_idx, right_idx in pair_indices.tolist():
+        left = measures[int(left_idx)]
+        right = measures[int(right_idx)]
+        raw_feature = _raw_feature_cost(
+            left,
+            right,
+            feature_cost_kind=feature_cost_kind,
+        )
+        raw_coord = _pairwise_sqeuclidean(left.coords, right.coords)
+        feature_values.append(raw_feature.reshape(-1))
+        coordinate_values.append(raw_coord.reshape(-1))
+
+    def _median_positive(chunks: list[np.ndarray]) -> float:
+        if not chunks:
+            return 1.0
+        values = np.concatenate(chunks).astype(np.float64, copy=False)
+        values = values[np.isfinite(values) & (values > 1e-12)]
+        if values.size == 0:
+            return 1.0
+        return max(float(np.median(values)), 1e-12)
+
+    structure_positive = []
+    for measure in measures:
+        values = np.asarray(measure.structure, dtype=np.float64).reshape(-1)
+        structure_positive.append(values[np.isfinite(values) & (values > 1e-12)])
+    structure_scale = _median_positive(structure_positive)
+    scales = TransportCostScales(
+        feature_scale=_median_positive(feature_values),
+        coordinate_scale=_median_positive(coordinate_values),
+        structure_scale=structure_scale,
+        n_pair_samples=int(pair_indices.shape[0]),
+    )
+    metadata = {
+        "scale_source": scales.scale_source,
+        "n_pair_samples": int(pair_indices.shape[0]),
+        "feature_scale": float(scales.feature_scale),
+        "coordinate_scale": float(scales.coordinate_scale),
+        "structure_scale": float(scales.structure_scale),
+        "feature_cost": str(feature_cost_kind),
+        "feature_cost_scale_summary": _numeric_summary(
+            np.concatenate(feature_values) if feature_values else []
+        ),
+        "coordinate_cost_scale_summary": _numeric_summary(
+            np.concatenate(coordinate_values) if coordinate_values else []
+        ),
+    }
+    return scales, metadata
 
 
 def pairwise_transport_distance_matrix(
@@ -834,8 +1055,12 @@ def pairwise_transport_distance_matrix(
     *,
     mode: str,
     max_subregions: int = 800,
+    max_scale_pair_samples: int = 2000,
+    random_state: int = 1337,
     fused_ot_feature_weight: float = 0.5,
     fused_ot_coordinate_weight: float = 0.5,
+    fused_ot_solver: str = "emd",
+    fused_ot_epsilon: float = 0.05,
     feature_cost_kind: str = "hellinger_codebook",
     fgw_alpha: float = 0.5,
     fgw_solver: str = "conditional_gradient",
@@ -860,6 +1085,12 @@ def pairwise_transport_distance_matrix(
             f"n_subregions={n} exceeds heterogeneity_transport_max_subregions={cap}. "
             "Use descriptor clustering, reduce/landmark subregions, or raise the cap intentionally."
         )
+    scales, scale_metadata = fit_transport_cost_scales(
+        measures,
+        feature_cost_kind=feature_cost_kind,
+        max_pair_samples=int(max_scale_pair_samples),
+        random_state=int(random_state),
+    )
     distances = np.zeros((n, n), dtype=np.float32)
     solved: list[float] = []
     for left_idx in range(n):
@@ -871,7 +1102,10 @@ def pairwise_transport_distance_matrix(
                     feature_weight=fused_ot_feature_weight,
                     coordinate_weight=fused_ot_coordinate_weight,
                     feature_cost_kind=feature_cost_kind,
-                    solver="emd",
+                    solver=fused_ot_solver,
+                    epsilon=fused_ot_epsilon,
+                    feature_scale=scales.feature_scale,
+                    coordinate_scale=scales.coordinate_scale,
                     return_coupling=False,
                 )
             else:
@@ -880,6 +1114,7 @@ def pairwise_transport_distance_matrix(
                     measures[right_idx],
                     alpha=fgw_alpha,
                     feature_cost_kind=feature_cost_kind,
+                    feature_scale=scales.feature_scale,
                     solver=fgw_solver,
                     epsilon=fgw_epsilon,
                     loss_fun=fgw_loss_fun,
@@ -900,6 +1135,8 @@ def pairwise_transport_distance_matrix(
         "distance_summary": _numeric_summary(solved),
         "feature_cost": str(feature_cost_kind),
         "max_subregions": int(max_subregions),
+        "n_pairwise_solves": int(n * (n - 1) // 2),
+        "transport_cost_scales": scale_metadata,
     }
     if requested == HETEROGENEITY_FUSED_OT_MODE:
         total = max(
@@ -909,7 +1146,11 @@ def pairwise_transport_distance_matrix(
         )
         metadata.update(
             {
-                "solver": "ot.emd",
+                "solver": "ot.sinkhorn"
+                if str(fused_ot_solver).strip().lower() in {"sinkhorn", "entropic"}
+                else "ot.emd",
+                "requested_solver": str(fused_ot_solver),
+                "epsilon": float(fused_ot_epsilon),
                 "feature_weight": float(max(float(fused_ot_feature_weight), 0.0) / total),
                 "coordinate_weight": float(max(float(fused_ot_coordinate_weight), 0.0) / total),
             }
