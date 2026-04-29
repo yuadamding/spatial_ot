@@ -354,11 +354,12 @@ The report also includes a `validation_suite` block with executable commands for
 ```bash
 ../.venv/bin/python -m spatial_ot spatial-niche-validation \
   --run-dir ../outputs/spatial_ot/cohort_multilevel_ot \
+  --sample-obs-key sample_id \
   --max-subregions 50000 \
   --knn 6
 ```
 
-This writes `spatial_niche_validation.json` and `spatial_niche_cluster_statistics.csv`, including per-cluster cell-count/area/shrinkage summaries, sample mixing, and within-sample kNN label homophily. Primary biological claims should be made only after the coordinate-only baseline, leakage/null checks, OT cost-comparability checks, fixed-K stability runs, shrinkage/heterogeneity/codebook sensitivity, and spatial organization checks agree.
+This writes `spatial_niche_validation.json` and `spatial_niche_cluster_statistics.csv`, including per-cluster cell-count/area/shrinkage summaries, sample mixing, within-sample kNN label homophily with permutation p-values/z-scores, and connected-component fragmentation summaries. Primary biological claims should be made only after the coordinate-only baseline, leakage/null checks, OT cost-comparability checks, fixed-K stability runs, shrinkage/heterogeneity/codebook sensitivity, and spatial organization checks agree.
 
 ## Config notes
 

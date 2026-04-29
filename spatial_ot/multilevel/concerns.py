@@ -64,12 +64,16 @@ def _deep_model_path(summary: dict[str, object], run_dir: Path) -> Path | None:
     if isinstance(deep_summary, dict) and deep_summary.get("model_path"):
         model_path = Path(str(deep_summary["model_path"]))
     if model_path is None:
-        candidate = Path(str(summary.get("output_dir", run_dir))) / "deep_feature_model.pt"
+        candidate = (
+            Path(str(summary.get("output_dir", run_dir))) / "deep_feature_model.pt"
+        )
         model_path = candidate if candidate.exists() else None
     return model_path if model_path is not None and model_path.exists() else None
 
 
-def _common_run_env(summary: dict[str, object], run_dir: Path, *, omit: set[str] | None = None) -> list[str]:
+def _common_run_env(
+    summary: dict[str, object], run_dir: Path, *, omit: set[str] | None = None
+) -> list[str]:
     omit = omit or set()
     construction = summary.get("subregion_construction")
     construction = construction if isinstance(construction, dict) else {}
@@ -79,7 +83,10 @@ def _common_run_env(summary: dict[str, object], run_dir: Path, *, omit: set[str]
     deep_segmentation = deep_segmentation if isinstance(deep_segmentation, dict) else {}
     latent_metadata = summary.get("subregion_latent_embedding_metadata")
     latent_metadata = latent_metadata if isinstance(latent_metadata, dict) else {}
-    min_cluster_size = summary.get("effective_min_subregions_per_cluster", summary.get("min_subregions_per_cluster"))
+    min_cluster_size = summary.get(
+        "effective_min_subregions_per_cluster",
+        summary.get("min_subregions_per_cluster"),
+    )
     env_items = [
         ("SAMPLE_OBS_KEY", summary.get("sample_obs_key")),
         ("BASIC_NICHE_SIZE_UM", construction.get("basic_niche_size_um")),
@@ -95,17 +102,38 @@ def _common_run_env(summary: dict[str, object], run_dir: Path, *, omit: set[str]
         ("DEEP_SEGMENTATION_FEATURE_DIMS", deep_segmentation.get("feature_dims")),
         ("DEEP_SEGMENTATION_FEATURE_WEIGHT", deep_segmentation.get("feature_weight")),
         ("DEEP_SEGMENTATION_SPATIAL_WEIGHT", deep_segmentation.get("spatial_weight")),
-        ("DEEP_SEGMENTATION_REFINEMENT_ITERS", deep_segmentation.get("refinement_iters")),
+        (
+            "DEEP_SEGMENTATION_REFINEMENT_ITERS",
+            deep_segmentation.get("refinement_iters"),
+        ),
         ("MAX_SPOT_LATENT_PLOT_OCCURRENCES", 0),
         ("COMPUTE_SPOT_LATENT", 0),
         ("PLOT_SAMPLE_SPOT_LATENT", 0),
         ("SUBREGION_CLUSTERING_METHOD", summary.get("subregion_clustering_method")),
-        ("SUBREGION_LATENT_EMBEDDING_MODE", summary.get("subregion_latent_embedding_mode")),
-        ("SUBREGION_LATENT_SHRINKAGE_TAU", summary.get("subregion_latent_shrinkage_tau")),
-        ("SUBREGION_LATENT_HETEROGENEITY_WEIGHT", latent_metadata.get("heterogeneity_block_weight")),
-        ("SUBREGION_LATENT_SAMPLE_PRIOR_WEIGHT", latent_metadata.get("sample_prior_weight")),
-        ("SUBREGION_LATENT_CODEBOOK_SIZE", summary.get("subregion_latent_codebook_size")),
-        ("SUBREGION_LATENT_CODEBOOK_SAMPLE_SIZE", summary.get("subregion_latent_codebook_sample_size")),
+        (
+            "SUBREGION_LATENT_EMBEDDING_MODE",
+            summary.get("subregion_latent_embedding_mode"),
+        ),
+        (
+            "SUBREGION_LATENT_SHRINKAGE_TAU",
+            summary.get("subregion_latent_shrinkage_tau"),
+        ),
+        (
+            "SUBREGION_LATENT_HETEROGENEITY_WEIGHT",
+            latent_metadata.get("heterogeneity_block_weight"),
+        ),
+        (
+            "SUBREGION_LATENT_SAMPLE_PRIOR_WEIGHT",
+            latent_metadata.get("sample_prior_weight"),
+        ),
+        (
+            "SUBREGION_LATENT_CODEBOOK_SIZE",
+            summary.get("subregion_latent_codebook_size"),
+        ),
+        (
+            "SUBREGION_LATENT_CODEBOOK_SAMPLE_SIZE",
+            summary.get("subregion_latent_codebook_sample_size"),
+        ),
     ]
     tokens = [_env_token(key, value) for key, value in env_items if key not in omit]
     deep_model = _deep_model_path(summary, run_dir)
@@ -116,7 +144,10 @@ def _common_run_env(summary: dict[str, object], run_dir: Path, *, omit: set[str]
 
 def _run_script_for_construction(summary: dict[str, object]) -> str:
     construction = summary.get("subregion_construction")
-    if isinstance(construction, dict) and construction.get("construction_method") == "deep_segmentation":
+    if (
+        isinstance(construction, dict)
+        and construction.get("construction_method") == "deep_segmentation"
+    ):
         return "scripts/run_deep_segmentation_cohort_gpu.sh"
     return "scripts/run_prepared_cohort_gpu.sh"
 
@@ -152,7 +183,10 @@ def _suggest_coordinate_only_command(summary: dict[str, object], run_dir: Path) 
         _env_token("SUBREGION_CONSTRUCTION_METHOD", "data_driven"),
         _env_token("SUBREGION_FEATURE_WEIGHT", 0),
     ]
-    return " ".join(token for token in tokens if token is not None) + " bash scripts/run_prepared_cohort_gpu.sh"
+    return (
+        " ".join(token for token in tokens if token is not None)
+        + " bash scripts/run_prepared_cohort_gpu.sh"
+    )
 
 
 def _suggest_stability_commands(summary: dict[str, object], run_dir: Path) -> list[str]:
@@ -177,11 +211,16 @@ def _suggest_stability_commands(summary: dict[str, object], run_dir: Path) -> li
                 ),
             ),
         ]
-        commands.append(" ".join(token for token in tokens if token is not None) + f" bash {_run_script_for_construction(summary)}")
+        commands.append(
+            " ".join(token for token in tokens if token is not None)
+            + f" bash {_run_script_for_construction(summary)}"
+        )
     return commands
 
 
-def _suggest_leakage_ablation_commands(summary: dict[str, object], run_dir: Path, kind: str) -> list[str]:
+def _suggest_leakage_ablation_commands(
+    summary: dict[str, object], run_dir: Path, kind: str
+) -> list[str]:
     selected_k = _selected_k(summary)
     construction = summary.get("subregion_construction")
     construction = construction if isinstance(construction, dict) else {}
@@ -210,9 +249,15 @@ def _suggest_leakage_ablation_commands(summary: dict[str, object], run_dir: Path
                 else "data_driven"
             ),
         ),
-        _env_token("SUBREGION_FEATURE_WEIGHT", 0 if kind == "density" else construction.get("partition_feature_weight")),
+        _env_token(
+            "SUBREGION_FEATURE_WEIGHT",
+            0 if kind == "density" else construction.get("partition_feature_weight"),
+        ),
     ]
-    return [" ".join(token for token in tokens if token is not None) + f" bash {_run_script_for_construction(summary)}"]
+    return [
+        " ".join(token for token in tokens if token is not None)
+        + f" bash {_run_script_for_construction(summary)}"
+    ]
 
 
 def _suffix_value(value: object) -> str:
@@ -238,21 +283,33 @@ def _suggest_fixed_parameter_commands(
     omit = {env_name, *extra_env.keys()}
     for value in values:
         tokens = [
-            _env_token("OUTPUT_DIR", f"{run_dir.as_posix()}_{suite_name}_{_suffix_value(value)}_fixed_k{selected_k}"),
+            _env_token(
+                "OUTPUT_DIR",
+                f"{run_dir.as_posix()}_{suite_name}_{_suffix_value(value)}_fixed_k{selected_k}",
+            ),
             _env_token("AUTO_N_CLUSTERS", 0),
             _env_token("N_CLUSTERS", selected_k),
             _env_token("SEED", int(summary.get("seed", 1337)) + 1),
             *_common_run_env(summary, run_dir, omit=omit),
             _env_token(env_name, value),
             *[_env_token(key, env_value) for key, env_value in extra_env.items()],
-            _env_token("SUBREGION_CONSTRUCTION_METHOD", construction.get("construction_method")),
+            _env_token(
+                "SUBREGION_CONSTRUCTION_METHOD", construction.get("construction_method")
+            ),
         ]
-        commands.append(" ".join(token for token in tokens if token is not None) + f" bash {_run_script_for_construction(summary)}")
+        commands.append(
+            " ".join(token for token in tokens if token is not None)
+            + f" bash {_run_script_for_construction(summary)}"
+        )
     return commands
 
 
-def _validation_suite_commands(summary: dict[str, object], run_dir: Path) -> dict[str, object]:
-    latent_mode = str(summary.get("subregion_latent_embedding_mode") or "mean_std_shrunk")
+def _validation_suite_commands(
+    summary: dict[str, object], run_dir: Path
+) -> dict[str, object]:
+    latent_mode = str(
+        summary.get("subregion_latent_embedding_mode") or "mean_std_shrunk"
+    )
     selected_k = _selected_k(summary)
     fixed_k_commands = _suggest_stability_commands(summary, run_dir)
     suite = {
@@ -295,16 +352,24 @@ def _validation_suite_commands(summary: dict[str, object], run_dir: Path) -> dic
                 else "mean_std_codebook"
             },
         ),
-        "shape_leakage_ablation": _suggest_leakage_ablation_commands(summary, run_dir, "shape"),
-        "density_leakage_ablation": _suggest_leakage_ablation_commands(summary, run_dir, "density"),
+        "shape_leakage_ablation": _suggest_leakage_ablation_commands(
+            summary, run_dir, "shape"
+        ),
+        "density_leakage_ablation": _suggest_leakage_ablation_commands(
+            summary, run_dir, "density"
+        ),
         "spatial_niche_validation": [
-            f"../.venv/bin/python -m spatial_ot spatial-niche-validation --run-dir {_shell_value(run_dir.as_posix())}"
+            "../.venv/bin/python -m spatial_ot spatial-niche-validation "
+            f"--run-dir {_shell_value(run_dir.as_posix())} "
+            f"--sample-obs-key {_shell_value(str(summary.get('sample_obs_key') or 'sample_id'))}"
         ],
         "refresh_concern_report": [
             f"../.venv/bin/python -m spatial_ot validate-run-concerns --run-dir {_shell_value(run_dir.as_posix())} --no-strict"
         ],
     }
-    suite["command_count"] = int(sum(len(value) for value in suite.values() if isinstance(value, list)))
+    suite["command_count"] = int(
+        sum(len(value) for value in suite.values() if isinstance(value, list))
+    )
     return suite
 
 
@@ -325,9 +390,13 @@ def _leakage_ablation_evidence(
                 "n_subregions": summary.get("n_subregions"),
                 "n_clusters": summary.get("n_clusters"),
                 "coverage_fraction": summary.get("cell_subregion_coverage_fraction"),
-                "subregion_cluster_count_min": summary.get("subregion_cluster_count_min"),
+                "subregion_cluster_count_min": summary.get(
+                    "subregion_cluster_count_min"
+                ),
                 "construction_method": construction.get("construction_method"),
-                "coordinate_only_baseline": construction.get("coordinate_only_baseline"),
+                "coordinate_only_baseline": construction.get(
+                    "coordinate_only_baseline"
+                ),
                 "basic_niche_size_um": construction.get("basic_niche_size_um"),
                 "diagnostics": diagnostics if isinstance(diagnostics, dict) else None,
             }
@@ -346,31 +415,51 @@ def _leakage_status(
     codes = _warning_codes(summary)
     warning_code = f"{kind}_descriptors_predict_subregion_clusters"
     if not isinstance(diagnostics, dict):
-        return "not_run", False, {"diagnostics": None, "thresholds": thresholds, "ablation_runs": []}
+        return (
+            "not_run",
+            False,
+            {"diagnostics": None, "thresholds": thresholds, "ablation_runs": []},
+        )
     ablation_runs = _leakage_ablation_evidence(leakage_ablation_summaries, kind)
     if warning_code not in codes:
         return (
             "passed_current_thresholds",
             False,
-            {"diagnostics": diagnostics, "thresholds": thresholds, "ablation_runs": ablation_runs},
+            {
+                "diagnostics": diagnostics,
+                "thresholds": thresholds,
+                "ablation_runs": ablation_runs,
+            },
         )
     if not ablation_runs:
         return (
             "needs_leakage_ablation",
             True,
-            {"diagnostics": diagnostics, "thresholds": thresholds, "ablation_runs": ablation_runs},
+            {
+                "diagnostics": diagnostics,
+                "thresholds": thresholds,
+                "ablation_runs": ablation_runs,
+            },
         )
     warning_flags = [bool(item["warning_present"]) for item in ablation_runs]
     if any(warning_flags):
         return (
             "leakage_persists_after_ablation",
             True,
-            {"diagnostics": diagnostics, "thresholds": thresholds, "ablation_runs": ablation_runs},
+            {
+                "diagnostics": diagnostics,
+                "thresholds": thresholds,
+                "ablation_runs": ablation_runs,
+            },
         )
     return (
         "ablation_runs_passed_current_thresholds",
         False,
-        {"diagnostics": diagnostics, "thresholds": thresholds, "ablation_runs": ablation_runs},
+        {
+            "diagnostics": diagnostics,
+            "thresholds": thresholds,
+            "ablation_runs": ablation_runs,
+        },
     )
 
 
@@ -381,7 +470,9 @@ def _float_or_zero(value: object) -> float:
         return 0.0
 
 
-def _ot_cost_comparability_status(summary: dict[str, object]) -> tuple[str, bool, dict[str, object]]:
+def _ot_cost_comparability_status(
+    summary: dict[str, object],
+) -> tuple[str, bool, dict[str, object]]:
     reliability = summary.get("cost_reliability")
     if not isinstance(reliability, dict):
         fallback_fraction = _float_or_zero(summary.get("assigned_ot_fallback_fraction"))
@@ -394,8 +485,12 @@ def _ot_cost_comparability_status(summary: dict[str, object]) -> tuple[str, bool
                 "note": "Full candidate effective-epsilon diagnostics were not available in this summary.",
             },
         )
-    mixed_eps = _float_or_zero(reliability.get("mixed_candidate_effective_eps_fraction"))
-    mixed_fallback = _float_or_zero(reliability.get("mixed_candidate_fallback_fraction"))
+    mixed_eps = _float_or_zero(
+        reliability.get("mixed_candidate_effective_eps_fraction")
+    )
+    mixed_fallback = _float_or_zero(
+        reliability.get("mixed_candidate_fallback_fraction")
+    )
     fallback_all = _float_or_zero(reliability.get("fallback_fraction_all_costs"))
     fallback_assigned = _float_or_zero(reliability.get("fallback_fraction_assigned"))
     blocking = mixed_eps > 0 or mixed_fallback > 0
@@ -408,16 +503,23 @@ def _ot_cost_comparability_status(summary: dict[str, object]) -> tuple[str, bool
     return status, blocking, {"cost_reliability": reliability}
 
 
-def _spot_latent_visualization_status(summary: dict[str, object]) -> tuple[str, dict[str, object]]:
+def _spot_latent_visualization_status(
+    summary: dict[str, object],
+) -> tuple[str, dict[str, object]]:
     spot_latent = summary.get("spot_level_latent")
     if not isinstance(spot_latent, dict) or not bool(spot_latent.get("implemented")):
         return "not_computed", {"spot_level_latent": spot_latent}
     spot_latent_evidence = dict(spot_latent)
-    if "chart_learning_mode" not in spot_latent_evidence and "fisher" in str(
-        spot_latent_evidence.get("projection", "")
-    ).lower():
-        spot_latent_evidence["chart_learning_mode"] = "supervised_by_fitted_ot_subregion_labels"
-    spot_latent_evidence.setdefault("validation_role", "diagnostic_visualization_not_independent_evidence")
+    if (
+        "chart_learning_mode" not in spot_latent_evidence
+        and "fisher" in str(spot_latent_evidence.get("projection", "")).lower()
+    ):
+        spot_latent_evidence["chart_learning_mode"] = (
+            "supervised_by_fitted_ot_subregion_labels"
+        )
+    spot_latent_evidence.setdefault(
+        "validation_role", "diagnostic_visualization_not_independent_evidence"
+    )
     chart_mode = str(spot_latent_evidence.get("chart_learning_mode", "")).lower()
     projection = str(spot_latent_evidence.get("projection", "")).lower()
     if "supervised" not in chart_mode and "fisher" not in projection:
@@ -476,22 +578,30 @@ def _float_or_none(value: object) -> float | None:
     return out if out == out else None
 
 
-def _within_niche_latent_claim_status(summary: dict[str, object]) -> tuple[str, bool, dict[str, object]]:
+def _within_niche_latent_claim_status(
+    summary: dict[str, object],
+) -> tuple[str, bool, dict[str, object]]:
     spot = summary.get("spot_level_latent")
     if not isinstance(spot, dict) or not bool(spot.get("implemented")):
         return "spot_latent_not_computed", True, {"spot_level_latent": spot}
     blockers: list[str] = []
     feature_source = summary.get("feature_source")
     feature_source = feature_source if isinstance(feature_source, dict) else {}
-    feature_warning = summary.get("feature_embedding_warning") or feature_source.get("feature_embedding_warning")
+    feature_warning = summary.get("feature_embedding_warning") or feature_source.get(
+        "feature_embedding_warning"
+    )
     feature_kind = feature_source.get("feature_space_kind")
     if feature_warning == "umap_exploratory" or feature_kind == "umap_embedding":
         blockers.append("umap_feature_space")
     anchor_method = str(spot.get("cluster_anchor_distance_method", "")).lower()
     if anchor_method not in {"balanced_ot", "sinkhorn_ot"}:
         blockers.append("non_ot_cluster_anchor_distance")
-    anchor_effective = str(spot.get("cluster_anchor_distance_effective_method", anchor_method)).lower()
-    anchor_fallback_fraction = _float_or_none(spot.get("cluster_anchor_ot_fallback_fraction")) or 0.0
+    anchor_effective = str(
+        spot.get("cluster_anchor_distance_effective_method", anchor_method)
+    ).lower()
+    anchor_fallback_fraction = (
+        _float_or_none(spot.get("cluster_anchor_ot_fallback_fraction")) or 0.0
+    )
     if anchor_fallback_fraction > 0.0 or "fallback" in anchor_effective:
         blockers.append("anchor_ot_fallback_used")
     stress = spot.get("cluster_anchor_mds_stress")
@@ -503,10 +613,14 @@ def _within_niche_latent_claim_status(summary: dict[str, object]) -> tuple[str, 
         blockers.append("missing_cluster_anchor_mds_stress")
     elif stress_value > 0.20:
         blockers.append("high_cluster_anchor_mds_stress")
-    positive_mass = _float_or_none(spot.get("cluster_anchor_mds_positive_eigenvalue_mass_2d"))
+    positive_mass = _float_or_none(
+        spot.get("cluster_anchor_mds_positive_eigenvalue_mass_2d")
+    )
     if positive_mass is not None and positive_mass < 0.70:
         blockers.append("low_cluster_anchor_mds_positive_eigenvalue_mass")
-    negative_mass = _float_or_none(spot.get("cluster_anchor_mds_negative_eigenvalue_mass_fraction"))
+    negative_mass = _float_or_none(
+        spot.get("cluster_anchor_mds_negative_eigenvalue_mass_fraction")
+    )
     if negative_mass is not None and negative_mass > 0.10:
         blockers.append("non_euclidean_cluster_anchor_distance_geometry")
     atom_stress_max = _summary_max(spot, "atom_mds_stress_summary")
@@ -526,7 +640,11 @@ def _within_niche_latent_claim_status(summary: dict[str, object]) -> tuple[str, 
         blockers.append("missing_unsupervised_latent_baseline")
     if not bool(spot.get("marker_axis_interpretation_available", False)):
         blockers.append("missing_marker_or_cell_type_axis_interpretation")
-    status = "passed_within_niche_latent_claim_checks" if not blockers else "blocked_for_within_niche_latent_claim"
+    status = (
+        "passed_within_niche_latent_claim_checks"
+        if not blockers
+        else "blocked_for_within_niche_latent_claim"
+    )
     return (
         status,
         bool(blockers),
@@ -557,7 +675,11 @@ def build_concern_resolution_report(
 ) -> dict[str, object]:
     run_path = Path(run_dir)
     primary = _read_summary(run_path)
-    baseline = _read_summary(coordinate_baseline_run_dir) if coordinate_baseline_run_dir is not None else None
+    baseline = (
+        _read_summary(coordinate_baseline_run_dir)
+        if coordinate_baseline_run_dir is not None
+        else None
+    )
     warning_codes = _warning_codes(primary)
     primary_is_coordinate_only = _is_coordinate_only_baseline(primary)
     baseline_ok = _is_coordinate_only_baseline(baseline)
@@ -582,7 +704,8 @@ def build_concern_resolution_report(
             ),
             "blocking_for_primary_claim": not coordinate_boundary_ok,
             "evidence": {
-                "warning_present": "feature_aware_boundary_circularity_risk" in warning_codes,
+                "warning_present": "feature_aware_boundary_circularity_risk"
+                in warning_codes,
                 "subregion_construction": primary.get("subregion_construction"),
                 "baseline_comparison": baseline_comparison,
             },
@@ -590,7 +713,9 @@ def build_concern_resolution_report(
                 "Run a coordinate-only boundary baseline using the same OT feature view and selected K, then compare "
                 "cluster enrichments, sample composition, subregion statistics, and biological conclusions."
             ),
-            "suggested_commands": [_suggest_coordinate_only_command(primary, run_path)] if not coordinate_boundary_ok else [],
+            "suggested_commands": [_suggest_coordinate_only_command(primary, run_path)]
+            if not coordinate_boundary_ok
+            else [],
         }
     )
     concerns.append(
@@ -643,12 +768,15 @@ def build_concern_resolution_report(
         concerns.append(
             {
                 "code": "density_aware_subregion_latent_mode",
-                "status": "accepted_density_controls_passed" if density_ok else "needs_density_leakage_controls",
+                "status": "accepted_density_controls_passed"
+                if density_ok
+                else "needs_density_leakage_controls",
                 "blocking_for_primary_claim": not density_ok,
                 "evidence": {
                     "subregion_latent_embedding_mode": latent_mode,
                     "density_leakage_status": leakage_statuses.get("density"),
-                    "warning_present": "density_aware_subregion_latent_mode" in warning_codes,
+                    "warning_present": "density_aware_subregion_latent_mode"
+                    in warning_codes,
                 },
                 "required_fix": (
                     "The mean_std_skew_count latent directly includes cell-count-derived features. "
@@ -672,7 +800,9 @@ def build_concern_resolution_report(
     )
 
     spot_status, spot_evidence = _spot_latent_visualization_status(primary)
-    latent_claim_status, latent_claim_blocking, latent_claim_evidence = _within_niche_latent_claim_status(primary)
+    latent_claim_status, latent_claim_blocking, latent_claim_evidence = (
+        _within_niche_latent_claim_status(primary)
+    )
     spot_concern_code = (
         "spot_latent_supervised_visualization"
         if "supervised" in spot_status
@@ -723,7 +853,9 @@ def build_concern_resolution_report(
     concerns.append(
         {
             "code": "auto_k_exploratory",
-            "status": "fixed_k_stability_runs_available" if has_fixed_selected_k else "needs_fixed_k_stability",
+            "status": "fixed_k_stability_runs_available"
+            if has_fixed_selected_k
+            else "needs_fixed_k_stability",
             "blocking_for_primary_claim": not has_fixed_selected_k,
             "evidence": {
                 "selected_k": selected_k,
@@ -738,18 +870,30 @@ def build_concern_resolution_report(
                 "Use auto-K as a shortlist only. Refit fixed K values around the selected K across seeds, then compare "
                 "co-assignment stability, cluster-size repairs, leakage diagnostics, and biological enrichments."
             ),
-            "suggested_commands": _suggest_stability_commands(primary, run_path) if not has_fixed_selected_k else [],
+            "suggested_commands": _suggest_stability_commands(primary, run_path)
+            if not has_fixed_selected_k
+            else [],
         }
     )
 
-    blocking = [item["code"] for item in concerns if item.get("blocking_for_primary_claim")]
-    latent_blocking = [item["code"] for item in concerns if item.get("blocking_for_within_niche_latent_claim")]
+    blocking = [
+        item["code"] for item in concerns if item.get("blocking_for_primary_claim")
+    ]
+    latent_blocking = [
+        item["code"]
+        for item in concerns
+        if item.get("blocking_for_within_niche_latent_claim")
+    ]
     report = {
         "run_dir": str(run_path),
         "summary_json": str(run_path / "summary.json"),
-        "overall_status": "needs_validation" if blocking else "validation_concerns_addressed",
+        "overall_status": "needs_validation"
+        if blocking
+        else "validation_concerns_addressed",
         "strict_validation_passed": not blocking,
-        "primary_claim_status": "blocked_by_validation_concerns" if blocking else "ready_after_current_validation",
+        "primary_claim_status": "blocked_by_validation_concerns"
+        if blocking
+        else "ready_after_current_validation",
         "claim_validation": {
             "subregion_niche_clustering": {
                 "blocking_concerns": blocking,
@@ -757,7 +901,9 @@ def build_concern_resolution_report(
             },
             "within_niche_latent_heterogeneity": {
                 "blocking_concerns": latent_blocking,
-                "status": "blocked" if latent_blocking else "ready_after_current_validation",
+                "status": "blocked"
+                if latent_blocking
+                else "ready_after_current_validation",
             },
         },
         "blocking_concerns": blocking,
@@ -788,8 +934,16 @@ def write_concern_resolution_report(
         leakage_ablation_run_dirs=leakage_ablation_run_dirs,
     )
     run_path = Path(run_dir)
-    json_path = Path(output_json) if output_json is not None else run_path / "concern_resolution_report.json"
-    md_path = Path(output_md) if output_md is not None else run_path / "concern_resolution_report.md"
+    json_path = (
+        Path(output_json)
+        if output_json is not None
+        else run_path / "concern_resolution_report.json"
+    )
+    md_path = (
+        Path(output_md)
+        if output_md is not None
+        else run_path / "concern_resolution_report.md"
+    )
     json_path.write_text(json.dumps(report, indent=2))
     lines = [
         "# Concern Resolution Report",

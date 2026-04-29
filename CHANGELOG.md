@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.15
+## 0.1.16
 
 - Change the primary subregion clustering step to `pooled_subregion_latent`: each fitted subregion now gets a raw member-cell feature-distribution latent embedding, all cohort subregion embeddings are pooled, and KMeans/model selection clusters that pooled matrix without using spatial coordinates, subregion centers, overlap edges, compressed OT supports, or OT candidate costs.
 - Upgrade the pooled subregion latent from a fixed mean/std-only summary to configurable distributional modes: `mean_std_shrunk` default reliability shrinkage, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`.
@@ -8,7 +8,7 @@
 - Expose `subregion_latent_heterogeneity_weight` and `subregion_latent_sample_prior_weight` through config, CLI, scripts, summaries, and diagnostics.
 - Change codebook histogram modes to whiten features before fitting the cell-state codebook and use soft code assignments rather than hard nearest-centroid counts.
 - Add executable validation-suite planning to concern reports, including fixed-K, shrinkage, heterogeneity-weight, codebook-size, spatial-scale/leakage, and spatial-niche validation commands.
-- Add a lightweight `spatial-niche-validation` command that summarizes cluster-level subregion statistics, sample mixing, and spatial adjacency homophily from a finished run.
+- Add a lightweight `spatial-niche-validation` command that summarizes cluster-level subregion statistics, sample mixing, spatial adjacency homophily with permutation p-values/z-scores, and connected-component fragmentation from a finished run.
 - Keep the historical OT-dictionary assignment available as `subregion_clustering_method="ot_dictionary"` while using fixed-label OT atoms/projections as diagnostics for pooled-latent labels.
 - Save raw-member feature-distribution subregion latent embeddings and clustering-method metadata in summaries, H5AD metadata, subregion tables, and candidate diagnostic NPZ outputs.
 - Make spot-latent cluster-anchor OT fallbacks explicit: occurrence NPZ and `summary.json` now record requested/effective anchor-distance methods, fallback matrices, fallback fractions, and solver status codes.

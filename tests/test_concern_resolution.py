@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 import pandas as pd
+import pytest
 
 from spatial_ot.multilevel.concerns import (
     build_concern_resolution_report,
@@ -14,10 +15,16 @@ from spatial_ot.multilevel.concerns import (
 from spatial_ot.multilevel.validation import spatial_niche_validation_report
 
 
-def _write_summary(path: Path, *, coordinate_only: bool, warnings: list[str], auto_k: bool = True) -> None:
+def _write_summary(
+    path: Path, *, coordinate_only: bool, warnings: list[str], auto_k: bool = True
+) -> None:
     path.mkdir(parents=True, exist_ok=True)
     construction_method = "data_driven"
-    mode = "generated_data_driven_coordinate_partition" if coordinate_only else "generated_deep_graph_segmentation"
+    mode = (
+        "generated_data_driven_coordinate_partition"
+        if coordinate_only
+        else "generated_deep_graph_segmentation"
+    )
     summary = {
         "output_dir": str(path),
         "n_cells": 100,
@@ -25,7 +32,9 @@ def _write_summary(path: Path, *, coordinate_only: bool, warnings: list[str], au
         "n_clusters": 4,
         "seed": 11,
         "auto_n_clusters": auto_k,
-        "auto_k_selection": {"selected_k": 4, "criterion_votes": {"silhouette": 4}} if auto_k else None,
+        "auto_k_selection": {"selected_k": 4, "criterion_votes": {"silhouette": 4}}
+        if auto_k
+        else None,
         "cell_subregion_coverage_fraction": 1.0,
         "subregion_construction": {
             "mode": mode,
@@ -35,11 +44,21 @@ def _write_summary(path: Path, *, coordinate_only: bool, warnings: list[str], au
         },
         "shape_leakage_diagnostics": {
             "balanced_accuracy": 0.2,
-            "permutation": {"observed": 0.2, "perm_mean": 0.1, "perm_p95": 0.12, "excess": 0.1},
+            "permutation": {
+                "observed": 0.2,
+                "perm_mean": 0.1,
+                "perm_p95": 0.12,
+                "excess": 0.1,
+            },
         },
         "density_leakage_diagnostics": {
             "balanced_accuracy": 0.08,
-            "permutation": {"observed": 0.08, "perm_mean": 0.07, "perm_p95": 0.09, "excess": 0.01},
+            "permutation": {
+                "observed": 0.08,
+                "perm_mean": 0.07,
+                "perm_p95": 0.09,
+                "excess": 0.01,
+            },
         },
         "leakage_qc_thresholds": {
             "balanced_accuracy_warning": 0.1,
@@ -62,7 +81,9 @@ def _write_summary(path: Path, *, coordinate_only: bool, warnings: list[str], au
     (path / "summary.json").write_text(json.dumps(summary))
 
 
-def test_concern_report_requires_baseline_and_stability_for_feature_boundaries(tmp_path: Path) -> None:
+def test_concern_report_requires_baseline_and_stability_for_feature_boundaries(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     _write_summary(
         run_dir,
@@ -80,25 +101,47 @@ def test_concern_report_requires_baseline_and_stability_for_feature_boundaries(t
     assert "shape_leakage" in report["blocking_concerns"]
     assert "auto_k_exploratory" in report["blocking_concerns"]
     assert report["strict_validation_passed"] is False
-    feature = next(item for item in report["concerns"] if item["code"] == "feature_boundary_circularity")
+    feature = next(
+        item
+        for item in report["concerns"]
+        if item["code"] == "feature_boundary_circularity"
+    )
     assert feature["status"] == "needs_coordinate_only_baseline"
     assert feature["suggested_commands"]
-    cost = next(item for item in report["concerns"] if item["code"] == "ot_cost_comparability")
+    cost = next(
+        item for item in report["concerns"] if item["code"] == "ot_cost_comparability"
+    )
     assert cost["status"] == "passed_common_epsilon_checks"
-    spot = next(item for item in report["concerns"] if item["code"] == "spot_latent_supervised_visualization")
+    spot = next(
+        item
+        for item in report["concerns"]
+        if item["code"] == "spot_latent_supervised_visualization"
+    )
     assert spot["status"] == "diagnostic_only_supervised_by_fitted_ot_labels"
-    latent_claim = next(item for item in report["concerns"] if item["code"] == "within_niche_latent_heterogeneity_claim")
+    latent_claim = next(
+        item
+        for item in report["concerns"]
+        if item["code"] == "within_niche_latent_heterogeneity_claim"
+    )
     assert latent_claim["blocking_for_primary_claim"] is False
     assert latent_claim["blocking_for_within_niche_latent_claim"] is True
-    assert "within_niche_latent_heterogeneity_claim" in report["within_niche_latent_blocking_concerns"]
+    assert (
+        "within_niche_latent_heterogeneity_claim"
+        in report["within_niche_latent_blocking_concerns"]
+    )
     suite = report["validation_suite"]
     assert suite["shrinkage_tau_sensitivity"]
     assert suite["heterogeneity_weight_sensitivity"]
     assert suite["codebook_size_sensitivity"]
-    assert suite["spatial_niche_validation"][0].endswith("spatial-niche-validation --run-dir " + f'"{run_dir.as_posix()}"')
+    assert suite["spatial_niche_validation"][0].endswith(
+        "spatial-niche-validation --run-dir "
+        + f'"{run_dir.as_posix()}" --sample-obs-key "sample_id"'
+    )
 
 
-def test_concern_report_accepts_coordinate_baseline_and_writes_outputs(tmp_path: Path) -> None:
+def test_concern_report_accepts_coordinate_baseline_and_writes_outputs(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     baseline_dir = tmp_path / "baseline"
     stability_dir = tmp_path / "fixed_k"
@@ -115,11 +158,21 @@ def test_concern_report_accepts_coordinate_baseline_and_writes_outputs(tmp_path:
     assert report["outputs"]["json"].endswith("concern_resolution_report.json")
     assert Path(report["outputs"]["json"]).exists()
     assert Path(report["outputs"]["markdown"]).exists()
-    feature = next(item for item in report["concerns"] if item["code"] == "feature_boundary_circularity")
+    feature = next(
+        item
+        for item in report["concerns"]
+        if item["code"] == "feature_boundary_circularity"
+    )
     assert feature["status"] == "addressed_by_coordinate_only_baseline"
-    baseline = next(item for item in report["concerns"] if item["code"] == "coordinate_only_boundary_baseline")
+    baseline = next(
+        item
+        for item in report["concerns"]
+        if item["code"] == "coordinate_only_boundary_baseline"
+    )
     assert baseline["status"] == "available"
-    auto_k = next(item for item in report["concerns"] if item["code"] == "auto_k_exploratory")
+    auto_k = next(
+        item for item in report["concerns"] if item["code"] == "auto_k_exploratory"
+    )
     assert auto_k["status"] == "fixed_k_stability_runs_available"
 
 
@@ -136,10 +189,14 @@ def test_concern_report_tracks_leakage_ablation_status(tmp_path: Path) -> None:
     )
     _write_summary(ablation_dir, coordinate_only=True, warnings=[])
 
-    report = build_concern_resolution_report(run_dir, leakage_ablation_run_dirs=[ablation_dir])
+    report = build_concern_resolution_report(
+        run_dir, leakage_ablation_run_dirs=[ablation_dir]
+    )
 
     shape = next(item for item in report["concerns"] if item["code"] == "shape_leakage")
-    density = next(item for item in report["concerns"] if item["code"] == "density_leakage")
+    density = next(
+        item for item in report["concerns"] if item["code"] == "density_leakage"
+    )
     assert shape["status"] == "ablation_runs_passed_current_thresholds"
     assert shape["blocking_for_primary_claim"] is False
     assert density["status"] == "ablation_runs_passed_current_thresholds"
@@ -154,14 +211,20 @@ def test_concern_report_blocks_mixed_candidate_costs(tmp_path: Path) -> None:
     summary["cost_reliability"]["mixed_candidate_effective_eps_fraction"] = 0.1
     summary_path.write_text(json.dumps(summary))
 
-    report = build_concern_resolution_report(run_dir, coordinate_baseline_run_dir=run_dir, stability_run_dirs=[run_dir])
+    report = build_concern_resolution_report(
+        run_dir, coordinate_baseline_run_dir=run_dir, stability_run_dirs=[run_dir]
+    )
 
     assert "ot_cost_comparability" in report["blocking_concerns"]
-    cost = next(item for item in report["concerns"] if item["code"] == "ot_cost_comparability")
+    cost = next(
+        item for item in report["concerns"] if item["code"] == "ot_cost_comparability"
+    )
     assert cost["status"] == "mixed_candidate_costs_remaining"
 
 
-def test_concern_report_allows_clustering_but_blocks_unvalidated_latent_claim(tmp_path: Path) -> None:
+def test_concern_report_allows_clustering_but_blocks_unvalidated_latent_claim(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     _write_summary(run_dir, coordinate_only=True, warnings=[], auto_k=False)
     summary_path = run_dir / "summary.json"
@@ -177,16 +240,30 @@ def test_concern_report_allows_clustering_but_blocks_unvalidated_latent_claim(tm
     }
     summary_path.write_text(json.dumps(summary))
 
-    report = build_concern_resolution_report(run_dir, coordinate_baseline_run_dir=run_dir, stability_run_dirs=[run_dir])
+    report = build_concern_resolution_report(
+        run_dir, coordinate_baseline_run_dir=run_dir, stability_run_dirs=[run_dir]
+    )
 
-    assert report["claim_validation"]["subregion_niche_clustering"]["status"] == "ready_after_current_validation"
-    assert report["claim_validation"]["within_niche_latent_heterogeneity"]["status"] == "blocked"
-    latent_claim = next(item for item in report["concerns"] if item["code"] == "within_niche_latent_heterogeneity_claim")
+    assert (
+        report["claim_validation"]["subregion_niche_clustering"]["status"]
+        == "ready_after_current_validation"
+    )
+    assert (
+        report["claim_validation"]["within_niche_latent_heterogeneity"]["status"]
+        == "blocked"
+    )
+    latent_claim = next(
+        item
+        for item in report["concerns"]
+        if item["code"] == "within_niche_latent_heterogeneity_claim"
+    )
     assert latent_claim["status"] == "blocked_for_within_niche_latent_claim"
     assert "missing_held_out_sample_projection" in latent_claim["evidence"]["blockers"]
 
 
-def test_concern_report_blocks_latent_claim_on_anchor_ot_fallback(tmp_path: Path) -> None:
+def test_concern_report_blocks_latent_claim_on_anchor_ot_fallback(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     _write_summary(run_dir, coordinate_only=True, warnings=[], auto_k=False)
     summary_path = run_dir / "summary.json"
@@ -208,19 +285,39 @@ def test_concern_report_blocks_latent_claim_on_anchor_ot_fallback(tmp_path: Path
     }
     summary_path.write_text(json.dumps(summary))
 
-    report = build_concern_resolution_report(run_dir, coordinate_baseline_run_dir=run_dir, stability_run_dirs=[run_dir])
+    report = build_concern_resolution_report(
+        run_dir, coordinate_baseline_run_dir=run_dir, stability_run_dirs=[run_dir]
+    )
 
-    latent_claim = next(item for item in report["concerns"] if item["code"] == "within_niche_latent_heterogeneity_claim")
+    latent_claim = next(
+        item
+        for item in report["concerns"]
+        if item["code"] == "within_niche_latent_heterogeneity_claim"
+    )
     assert "anchor_ot_fallback_used" in latent_claim["evidence"]["blockers"]
     assert latent_claim["evidence"]["anchor_ot_fallback_fraction"] == 0.25
 
 
-def test_validate_run_concerns_strict_exits_nonzero_for_blockers(tmp_path: Path) -> None:
+def test_validate_run_concerns_strict_exits_nonzero_for_blockers(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
-    _write_summary(run_dir, coordinate_only=False, warnings=["shape_descriptors_predict_subregion_clusters"])
+    _write_summary(
+        run_dir,
+        coordinate_only=False,
+        warnings=["shape_descriptors_predict_subregion_clusters"],
+    )
 
     completed = subprocess.run(
-        [sys.executable, "-m", "spatial_ot", "validate-run-concerns", "--run-dir", str(run_dir), "--strict"],
+        [
+            sys.executable,
+            "-m",
+            "spatial_ot",
+            "validate-run-concerns",
+            "--run-dir",
+            str(run_dir),
+            "--strict",
+        ],
         capture_output=True,
         text=True,
     )
@@ -229,7 +326,9 @@ def test_validate_run_concerns_strict_exits_nonzero_for_blockers(tmp_path: Path)
     assert "blocking_concerns" in completed.stdout
 
 
-def test_spatial_niche_validation_reports_cluster_and_homophily_qc(tmp_path: Path) -> None:
+def test_spatial_niche_validation_reports_cluster_and_homophily_qc(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     _write_summary(run_dir, coordinate_only=True, warnings=[], auto_k=False)
     table = pd.DataFrame(
@@ -247,13 +346,58 @@ def test_spatial_niche_validation_reports_cluster_and_homophily_qc(tmp_path: Pat
     )
     table.to_parquet(run_dir / "subregions_multilevel_ot.parquet", index=False)
 
-    report = spatial_niche_validation_report(run_dir, max_subregions=0, knn=1, n_permutations=2)
+    report = spatial_niche_validation_report(
+        run_dir,
+        max_subregions=0,
+        knn=1,
+        n_permutations=2,
+        sample_obs_key="sample_id",
+    )
 
     assert report["n_subregions"] == 6
     assert report["n_clusters"] == 2
+    assert report["sample_column"] == "sample_id"
     assert report["spatial_adjacency_homophily"]["available"] is True
     assert report["spatial_adjacency_homophily"]["observed"] is not None
+    assert "permutation_p_value_greater" in report["spatial_adjacency_homophily"]
+    assert "permutation_z_score" in report["spatial_adjacency_homophily"]
+    assert report["spatial_adjacency_homophily"]["per_cluster"]
+    assert report["spatial_fragmentation"]["available"] is True
+    assert report["spatial_fragmentation"]["per_cluster"]
     assert Path(report["outputs"]["json"]).exists()
     assert Path(report["outputs"]["cluster_csv"]).exists()
-    cluster_zero = next(row for row in report["cluster_statistics"] if row["cluster"] == 0)
+    cluster_zero = next(
+        row for row in report["cluster_statistics"] if row["cluster"] == 0
+    )
     assert cluster_zero["subregion_latent_shrinkage_alpha"]["median"] == 0.15
+
+
+def test_spatial_niche_validation_uses_summary_sample_key_and_fails_when_missing(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    _write_summary(run_dir, coordinate_only=True, warnings=[], auto_k=False)
+    summary = json.loads((run_dir / "summary.json").read_text())
+    summary["sample_obs_key"] = "slide_id"
+    (run_dir / "summary.json").write_text(json.dumps(summary))
+    table = pd.DataFrame(
+        {
+            "subregion_id": [0, 1, 2, 3],
+            "center_x_um": [0.0, 1.0, 10.0, 11.0],
+            "center_y_um": [0.0, 0.0, 0.0, 0.0],
+            "slide_id": ["slide_a", "slide_a", "slide_b", "slide_b"],
+            "cluster_int": [0, 0, 1, 1],
+            "n_cells": [10, 11, 12, 13],
+        }
+    )
+    table.to_parquet(run_dir / "subregions_multilevel_ot.parquet", index=False)
+
+    report = spatial_niche_validation_report(
+        run_dir, max_subregions=0, knn=1, n_permutations=1
+    )
+
+    assert report["sample_column"] == "slide_id"
+    assert set(report["sample_counts"]) == {"slide_a", "slide_b"}
+
+    with pytest.raises(ValueError, match="Requested sample obs key"):
+        spatial_niche_validation_report(run_dir, sample_obs_key="missing_sample_key")

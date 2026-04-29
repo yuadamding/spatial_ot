@@ -49,7 +49,9 @@ def _entropy_from_counts(counts: np.ndarray) -> tuple[float, float]:
     return entropy, float(entropy / np.log(probs.size))
 
 
-def _cluster_stats(table: pd.DataFrame, label_col: str, sample_col: str | None) -> tuple[list[dict[str, object]], pd.DataFrame]:
+def _cluster_stats(
+    table: pd.DataFrame, label_col: str, sample_col: str | None
+) -> tuple[list[dict[str, object]], pd.DataFrame]:
     rows: list[dict[str, object]] = []
     csv_rows: list[dict[str, object]] = []
     for label, group in table.groupby(label_col, sort=True):
@@ -59,7 +61,9 @@ def _cluster_stats(table: pd.DataFrame, label_col: str, sample_col: str | None) 
             else pd.Series({"cohort": int(len(group))}, dtype=np.int64)
         )
         _, normalized_entropy = _entropy_from_counts(sample_counts.to_numpy())
-        dominant_fraction = float(sample_counts.max() / max(int(sample_counts.sum()), 1))
+        dominant_fraction = float(
+            sample_counts.max() / max(int(sample_counts.sum()), 1)
+        )
         row: dict[str, object] = {
             "cluster": int(label),
             "n_subregions": int(len(group)),
@@ -97,10 +101,74 @@ def _cluster_stats(table: pd.DataFrame, label_col: str, sample_col: str | None) 
     return rows, pd.DataFrame(csv_rows)
 
 
-def _subsample_table(table: pd.DataFrame, *, max_subregions: int, random_state: int) -> pd.DataFrame:
+def _subsample_table(
+    table: pd.DataFrame, *, max_subregions: int, random_state: int
+) -> pd.DataFrame:
     if max_subregions <= 0 or len(table) <= max_subregions:
         return table
-    return table.sample(n=int(max_subregions), random_state=int(random_state)).sort_index()
+    return table.sample(
+        n=int(max_subregions), random_state=int(random_state)
+    ).sort_index()
+
+
+def _resolve_sample_column(
+    table: pd.DataFrame,
+    summary: dict[str, object],
+    *,
+    sample_obs_key: str | None,
+    allow_missing_sample_key: bool,
+) -> str | None:
+    requested = (
+        str(sample_obs_key).strip()
+        if sample_obs_key is not None and str(sample_obs_key).strip()
+        else ""
+    )
+    if not requested:
+        summary_key = summary.get("sample_obs_key")
+        requested = (
+            str(summary_key).strip()
+            if summary_key is not None and str(summary_key).strip()
+            else "sample_id"
+        )
+    if requested in table.columns:
+        return requested
+    if allow_missing_sample_key:
+        return None
+    raise ValueError(
+        f"Requested sample obs key {requested!r} is not present in subregion table columns. "
+        "Pass --sample-obs-key with the correct column or --allow-missing-sample-key for cohort-wide validation."
+    )
+
+
+def _permutation_summary(
+    observed: float | None, values: list[float]
+) -> dict[str, float | int | None]:
+    if observed is None or not values:
+        return {
+            "permutation_mean": None,
+            "permutation_std": None,
+            "permutation_p95": None,
+            "permutation_p_value_greater": None,
+            "permutation_z_score": None,
+            "excess_over_permutation_mean": None,
+            "n_permutations": int(len(values)),
+        }
+    arr = np.asarray(values, dtype=np.float64)
+    mean = float(np.mean(arr))
+    std = float(np.std(arr))
+    return {
+        "permutation_mean": mean,
+        "permutation_std": std,
+        "permutation_p95": float(np.quantile(arr, 0.95)),
+        "permutation_p_value_greater": float(
+            (1 + np.sum(arr >= float(observed))) / (arr.size + 1)
+        ),
+        "permutation_z_score": float((float(observed) - mean) / std)
+        if std > 0
+        else None,
+        "excess_over_permutation_mean": float(float(observed) - mean),
+        "n_permutations": int(arr.size),
+    }
 
 
 def _knn_label_homophily(
@@ -124,14 +192,22 @@ def _knn_label_homophily(
 
     rng = np.random.default_rng(int(random_state))
     group_key = sample_col if sample_col is not None and sample_col in table else None
-    groups = table.groupby(group_key, sort=True) if group_key is not None else [("cohort", table)]
+    groups = (
+        table.groupby(group_key, sort=True)
+        if group_key is not None
+        else [("cohort", table)]
+    )
+    records: list[dict[str, object]] = []
     per_sample: list[dict[str, object]] = []
     same_total = 0
     edge_total = 0
-    permuted_values: list[float] = []
+    per_cluster_edges: dict[int, int] = {}
+    per_cluster_same: dict[int, int] = {}
 
     for sample_id, group in groups:
-        coords = group[["center_x_um", "center_y_um"]].to_numpy(dtype=np.float64, copy=False)
+        coords = group[["center_x_um", "center_y_um"]].to_numpy(
+            dtype=np.float64, copy=False
+        )
         labels = group[label_col].to_numpy(dtype=np.int64, copy=False)
         finite = np.isfinite(coords).all(axis=1)
         coords = coords[finite]
@@ -143,8 +219,7 @@ def _knn_label_homophily(
                     "sample_id": str(sample_id),
                     "n_subregions": n,
                     "homophily": None,
-                    "permutation_mean": None,
-                    "permutation_p95": None,
+                    **_permutation_summary(None, []),
                 }
             )
             continue
@@ -157,36 +232,211 @@ def _knn_label_homophily(
         homophily = float(same / max(edges, 1))
         same_total += same
         edge_total += edges
-
-        local_perm: list[float] = []
-        for _ in range(max(int(n_permutations), 0)):
-            perm_labels = rng.permutation(labels)
-            value = float(np.mean(perm_labels[:, None] == perm_labels[neigh]))
-            local_perm.append(value)
-            permuted_values.append(value)
+        for label in np.unique(labels):
+            label_int = int(label)
+            mask = labels == label
+            label_edges = int(np.sum(mask) * local_k)
+            label_same = int(np.sum(labels[mask, None] == labels[neigh[mask]]))
+            per_cluster_edges[label_int] = (
+                per_cluster_edges.get(label_int, 0) + label_edges
+            )
+            per_cluster_same[label_int] = (
+                per_cluster_same.get(label_int, 0) + label_same
+            )
+        sample_row_index = len(per_sample)
+        records.append(
+            {
+                "sample_id": str(sample_id),
+                "labels": labels,
+                "neigh": neigh,
+                "local_k": local_k,
+                "per_sample_index": sample_row_index,
+            }
+        )
         per_sample.append(
             {
                 "sample_id": str(sample_id),
                 "n_subregions": n,
                 "k": local_k,
                 "homophily": homophily,
-                "permutation_mean": float(np.mean(local_perm)) if local_perm else None,
-                "permutation_p95": float(np.quantile(local_perm, 0.95)) if local_perm else None,
             }
         )
 
     observed = float(same_total / max(edge_total, 1)) if edge_total else None
+    global_permuted: list[float] = []
+    per_sample_permuted: list[list[float]] = [[] for _ in per_sample]
+    per_cluster_permuted: dict[int, list[float]] = {
+        label: [] for label in per_cluster_edges
+    }
+    for _ in range(max(int(n_permutations), 0)):
+        perm_same_total = 0
+        perm_edge_total = 0
+        perm_cluster_same: dict[int, int] = {label: 0 for label in per_cluster_edges}
+        perm_cluster_edges: dict[int, int] = {label: 0 for label in per_cluster_edges}
+        for record in records:
+            labels = np.asarray(record["labels"], dtype=np.int64)
+            neigh = np.asarray(record["neigh"], dtype=np.int64)
+            local_k = int(record["local_k"])
+            per_sample_index = int(record["per_sample_index"])
+            perm_labels = rng.permutation(labels)
+            perm_same = int(np.sum(perm_labels[:, None] == perm_labels[neigh]))
+            perm_edges = int(neigh.size)
+            perm_same_total += perm_same
+            perm_edge_total += perm_edges
+            per_sample_permuted[per_sample_index].append(
+                float(perm_same / max(perm_edges, 1))
+            )
+            for label in np.unique(perm_labels):
+                label_int = int(label)
+                mask = perm_labels == label
+                label_edges = int(np.sum(mask) * local_k)
+                label_same = int(
+                    np.sum(perm_labels[mask, None] == perm_labels[neigh[mask]])
+                )
+                perm_cluster_edges[label_int] = (
+                    perm_cluster_edges.get(label_int, 0) + label_edges
+                )
+                perm_cluster_same[label_int] = (
+                    perm_cluster_same.get(label_int, 0) + label_same
+                )
+        if perm_edge_total:
+            global_permuted.append(float(perm_same_total / perm_edge_total))
+        for label, label_edges in perm_cluster_edges.items():
+            if label_edges > 0:
+                per_cluster_permuted.setdefault(int(label), []).append(
+                    float(perm_cluster_same[int(label)] / label_edges)
+                )
+    for index, values in enumerate(per_sample_permuted):
+        per_sample[index].update(
+            _permutation_summary(per_sample[index].get("homophily"), values)
+        )
+    per_cluster: list[dict[str, object]] = []
+    for label in sorted(per_cluster_edges):
+        label_observed = float(
+            per_cluster_same[label] / max(per_cluster_edges[label], 1)
+        )
+        row: dict[str, object] = {
+            "cluster": int(label),
+            "n_neighbor_edges": int(per_cluster_edges[label]),
+            "observed": label_observed,
+        }
+        row.update(
+            _permutation_summary(label_observed, per_cluster_permuted.get(label, []))
+        )
+        per_cluster.append(row)
+    perm_summary = _permutation_summary(observed, global_permuted)
     return {
         "available": observed is not None,
         "k": int(k),
         "n_neighbor_edges": int(edge_total),
         "observed": observed,
-        "permutation_mean": float(np.mean(permuted_values)) if permuted_values else None,
-        "permutation_p95": float(np.quantile(permuted_values, 0.95)) if permuted_values else None,
-        "excess_over_permutation_mean": (
-            float(observed - np.mean(permuted_values)) if observed is not None and permuted_values else None
-        ),
+        **perm_summary,
+        "strict_mode_recommended_min_permutations": 999,
+        "strict_mode_permutation_count_ok": bool(int(n_permutations) >= 999),
+        "per_cluster": per_cluster,
         "per_sample": per_sample,
+    }
+
+
+def _spatial_fragmentation(
+    table: pd.DataFrame,
+    *,
+    label_col: str,
+    sample_col: str | None,
+    k: int,
+) -> dict[str, object]:
+    from sklearn.neighbors import NearestNeighbors
+
+    required = {"center_x_um", "center_y_um", label_col}
+    if not required.issubset(table.columns):
+        return {
+            "available": False,
+            "reason": "missing_center_or_label_columns",
+            "required_columns": sorted(required),
+        }
+
+    group_key = sample_col if sample_col is not None and sample_col in table else None
+    groups = (
+        table.groupby(group_key, sort=True)
+        if group_key is not None
+        else [("cohort", table)]
+    )
+    per_sample_cluster: list[dict[str, object]] = []
+    aggregate: dict[int, dict[str, int]] = {}
+    for sample_id, group in groups:
+        coords = group[["center_x_um", "center_y_um"]].to_numpy(
+            dtype=np.float64, copy=False
+        )
+        labels = group[label_col].to_numpy(dtype=np.int64, copy=False)
+        finite = np.isfinite(coords).all(axis=1)
+        coords = coords[finite]
+        labels = labels[finite]
+        n = int(labels.size)
+        if n < 2:
+            continue
+        local_k = min(max(int(k), 1), n - 1)
+        nn = NearestNeighbors(n_neighbors=local_k + 1)
+        nn.fit(coords)
+        neigh = nn.kneighbors(coords, return_distance=False)[:, 1:]
+        adjacency = [set() for _ in range(n)]
+        for i in range(n):
+            for j in neigh[i]:
+                adjacency[i].add(int(j))
+                adjacency[int(j)].add(i)
+        for label in np.unique(labels):
+            label_int = int(label)
+            nodes = set(np.flatnonzero(labels == label).tolist())
+            unseen = set(nodes)
+            components = 0
+            while unseen:
+                components += 1
+                stack = [unseen.pop()]
+                while stack:
+                    current = stack.pop()
+                    for neighbor in adjacency[current]:
+                        if neighbor in unseen and int(labels[neighbor]) == label_int:
+                            unseen.remove(neighbor)
+                            stack.append(neighbor)
+            n_nodes = int(len(nodes))
+            fragmentation_index = float(components / max(n_nodes, 1))
+            per_sample_cluster.append(
+                {
+                    "sample_id": str(sample_id),
+                    "cluster": label_int,
+                    "n_subregions": n_nodes,
+                    "connected_components": int(components),
+                    "fragmentation_index": fragmentation_index,
+                }
+            )
+            agg = aggregate.setdefault(
+                label_int,
+                {"n_subregions": 0, "connected_components": 0, "occupied_samples": 0},
+            )
+            agg["n_subregions"] += n_nodes
+            agg["connected_components"] += int(components)
+            agg["occupied_samples"] += 1
+
+    per_cluster = [
+        {
+            "cluster": int(label),
+            "n_subregions": int(values["n_subregions"]),
+            "connected_components": int(values["connected_components"]),
+            "occupied_samples": int(values["occupied_samples"]),
+            "components_per_100_subregions": float(
+                100.0 * values["connected_components"] / max(values["n_subregions"], 1)
+            ),
+            "fragmentation_index": float(
+                values["connected_components"] / max(values["n_subregions"], 1)
+            ),
+        }
+        for label, values in sorted(aggregate.items())
+    ]
+    return {
+        "available": bool(per_cluster),
+        "k": int(k),
+        "per_cluster": per_cluster,
+        "per_sample_cluster": per_sample_cluster,
+        "interpretation": "Higher component counts or fragmentation indices indicate spatially scattered cluster assignments.",
     }
 
 
@@ -199,6 +449,8 @@ def spatial_niche_validation_report(
     knn: int = 6,
     n_permutations: int = 20,
     random_state: int = 0,
+    sample_obs_key: str | None = None,
+    allow_missing_sample_key: bool = False,
 ) -> dict[str, object]:
     """Summarize whether pooled subregion clusters behave like spatial niches."""
 
@@ -212,12 +464,25 @@ def spatial_niche_validation_report(
 
     summary = json.loads(summary_path.read_text())
     table = pd.read_parquet(subregion_path)
-    label_col = "cluster_int" if "cluster_int" in table.columns else "argmin_cluster_int"
+    label_col = (
+        "cluster_int" if "cluster_int" in table.columns else "argmin_cluster_int"
+    )
     if label_col not in table.columns:
-        raise ValueError("subregion table must contain cluster_int or argmin_cluster_int")
-    sample_col = "sample_id" if "sample_id" in table.columns else None
-    sampled = _subsample_table(table, max_subregions=int(max_subregions), random_state=int(random_state))
-    cluster_rows, cluster_csv = _cluster_stats(table, label_col=label_col, sample_col=sample_col)
+        raise ValueError(
+            "subregion table must contain cluster_int or argmin_cluster_int"
+        )
+    sample_col = _resolve_sample_column(
+        table,
+        summary,
+        sample_obs_key=sample_obs_key,
+        allow_missing_sample_key=allow_missing_sample_key,
+    )
+    sampled = _subsample_table(
+        table, max_subregions=int(max_subregions), random_state=int(random_state)
+    )
+    cluster_rows, cluster_csv = _cluster_stats(
+        table, label_col=label_col, sample_col=sample_col
+    )
     heavily_shrunk_clusters = []
     for row in cluster_rows:
         alpha = row.get("subregion_latent_shrinkage_alpha")
@@ -243,7 +508,17 @@ def spatial_niche_validation_report(
         n_permutations=int(n_permutations),
         random_state=int(random_state),
     )
-    sample_counts = table[sample_col].astype(str).value_counts().sort_index() if sample_col else pd.Series(dtype=np.int64)
+    fragmentation = _spatial_fragmentation(
+        sampled,
+        label_col=label_col,
+        sample_col=sample_col,
+        k=int(knn),
+    )
+    sample_counts = (
+        table[sample_col].astype(str).value_counts().sort_index()
+        if sample_col
+        else pd.Series(dtype=np.int64)
+    )
     report: dict[str, object] = {
         "run_dir": str(run_path),
         "summary_json": str(summary_path),
@@ -260,6 +535,7 @@ def spatial_niche_validation_report(
         "heavily_shrunk_cluster_alpha_threshold": 0.20,
         "heavily_shrunk_clusters": heavily_shrunk_clusters,
         "spatial_adjacency_homophily": homophily,
+        "spatial_fragmentation": fragmentation,
         "interpretation": {
             "role": "spatial_organization_qc_for_pooled_feature_distribution_clusters",
             "caveat": (
@@ -269,8 +545,16 @@ def spatial_niche_validation_report(
         },
     }
 
-    json_path = Path(output_json) if output_json is not None else run_path / "spatial_niche_validation.json"
-    csv_path = Path(output_cluster_csv) if output_cluster_csv is not None else run_path / "spatial_niche_cluster_statistics.csv"
+    json_path = (
+        Path(output_json)
+        if output_json is not None
+        else run_path / "spatial_niche_validation.json"
+    )
+    csv_path = (
+        Path(output_cluster_csv)
+        if output_cluster_csv is not None
+        else run_path / "spatial_niche_cluster_statistics.csv"
+    )
     json_path.write_text(json.dumps(report, indent=2))
     cluster_csv.to_csv(csv_path, index=False)
     report["outputs"] = {"json": str(json_path), "cluster_csv": str(csv_path)}
