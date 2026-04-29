@@ -704,6 +704,34 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
         str(config.ot.heterogeneity_pair_graph_k),
         "--heterogeneity-pair-bin-normalization",
         str(config.ot.heterogeneity_pair_bin_normalization),
+        "--heterogeneity-transport-max-subregions",
+        str(config.ot.heterogeneity_transport_max_subregions),
+        "--heterogeneity-transport-feature-mode",
+        str(config.ot.heterogeneity_transport_feature_mode),
+        "--heterogeneity-transport-feature-cost",
+        str(config.ot.heterogeneity_transport_feature_cost),
+        "--heterogeneity-fused-ot-feature-weight",
+        str(config.ot.heterogeneity_fused_ot_feature_weight),
+        "--heterogeneity-fused-ot-coordinate-weight",
+        str(config.ot.heterogeneity_fused_ot_coordinate_weight),
+        "--heterogeneity-fgw-alpha",
+        str(config.ot.heterogeneity_fgw_alpha),
+        "--heterogeneity-fgw-solver",
+        str(config.ot.heterogeneity_fgw_solver),
+        "--heterogeneity-fgw-epsilon",
+        str(config.ot.heterogeneity_fgw_epsilon),
+        "--heterogeneity-fgw-loss-fun",
+        str(config.ot.heterogeneity_fgw_loss_fun),
+        "--heterogeneity-fgw-max-iter",
+        str(config.ot.heterogeneity_fgw_max_iter),
+        "--heterogeneity-fgw-tol",
+        str(config.ot.heterogeneity_fgw_tol),
+        "--heterogeneity-fgw-structure-scale",
+        str(config.ot.heterogeneity_fgw_structure_scale),
+        "--heterogeneity-fgw-partial-mass",
+        str(config.ot.heterogeneity_fgw_partial_mass),
+        "--heterogeneity-fgw-partial-reg",
+        str(config.ot.heterogeneity_fgw_partial_reg),
         "--shape-leakage-permutations",
         str(config.ot.shape_leakage_permutations),
         "--candidate-n-clusters",
@@ -742,6 +770,16 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
                 str(config.ot.heterogeneity_pair_graph_radius),
             ]
         )
+    if config.ot.heterogeneity_fgw_structure_clip is not None:
+        cmd.extend(
+            [
+                "--heterogeneity-fgw-structure-clip",
+                str(config.ot.heterogeneity_fgw_structure_clip),
+            ]
+        )
+    cmd.extend(
+        _bool_flag("heterogeneity-fgw-partial", bool(config.ot.heterogeneity_fgw_partial))
+    )
     cmd.extend(_bool_flag("compute-spot-latent", bool(config.ot.compute_spot_latent)))
     cmd.extend(_bool_flag("auto-n-clusters", bool(config.ot.auto_n_clusters)))
     cmd.extend(

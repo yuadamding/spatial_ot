@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 
 import numpy as np
+import ot
 from sklearn.cluster import MiniBatchKMeans
 
 from .types import SubregionMeasure
 
 HETEROGENEITY_DESCRIPTOR_MODE = "heterogeneity_descriptor_niche"
 LEGACY_HETEROGENEITY_OT_ALIAS = "heterogeneity_ot_niche"
+HETEROGENEITY_FUSED_OT_MODE = "heterogeneity_fused_ot_niche"
+HETEROGENEITY_FGW_MODE = "heterogeneity_fgw_niche"
 HETEROGENEITY_DESCRIPTOR_ALIASES = {
     HETEROGENEITY_DESCRIPTOR_MODE,
     LEGACY_HETEROGENEITY_OT_ALIAS,
+}
+TRANSPORT_HETEROGENEITY_MODES = {
+    HETEROGENEITY_FUSED_OT_MODE,
+    HETEROGENEITY_FGW_MODE,
 }
 DEFAULT_BLOCK_WEIGHTS = {
     "composition": 0.20,
@@ -20,6 +28,16 @@ DEFAULT_BLOCK_WEIGHTS = {
     "pair_cooccurrence": 0.30,
 }
 VALID_PAIR_GRAPH_MODES = {"all_pairs", "knn", "radius"}
+
+
+@dataclass(frozen=True)
+class SubregionFGWMeasure:
+    coords: np.ndarray
+    features: np.ndarray
+    weights: np.ndarray
+    structure: np.ndarray
+    sample_id: str | None = None
+    subregion_id: int | None = None
 
 
 def _env_int(name: str, default: int) -> int:
@@ -132,6 +150,17 @@ def _normalize_rows(values: np.ndarray) -> np.ndarray:
     return (x / denom).astype(np.float32)
 
 
+def _normalize_mass(values: np.ndarray) -> np.ndarray:
+    x = np.asarray(values, dtype=np.float64).reshape(-1)
+    x = np.where(np.isfinite(x) & (x > 0), x, 0.0)
+    total = float(np.sum(x))
+    if total <= 1e-12:
+        if x.size == 0:
+            raise ValueError("mass vector must contain at least one entry.")
+        return np.full(x.size, 1.0 / float(x.size), dtype=np.float64)
+    return (x / total).astype(np.float64)
+
+
 def _numeric_summary(values: list[float] | np.ndarray) -> dict[str, float | int | None]:
     x = np.asarray(values, dtype=np.float64)
     x = x[np.isfinite(x)]
@@ -149,6 +178,108 @@ def _numeric_summary(values: list[float] | np.ndarray) -> dict[str, float | int 
         "q90": float(np.quantile(x, 0.90)),
         "max": float(np.max(x)),
     }
+
+
+def _pairwise_sqeuclidean(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    a = np.asarray(left, dtype=np.float64)
+    b = np.asarray(right, dtype=np.float64)
+    return np.maximum(
+        np.sum(a * a, axis=1, keepdims=True)
+        + np.sum(b * b, axis=1, keepdims=True).T
+        - 2.0 * (a @ b.T),
+        0.0,
+    )
+
+
+def _normalize_cost_matrix(cost: np.ndarray) -> np.ndarray:
+    x = np.asarray(cost, dtype=np.float64)
+    finite = x[np.isfinite(x)]
+    positive = finite[finite > 1e-12]
+    scale = float(np.median(positive)) if positive.size else 1.0
+    return np.asarray(x / max(scale, 1e-12), dtype=np.float64)
+
+
+def hellinger_cost(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    p = np.asarray(left, dtype=np.float64)
+    q = np.asarray(right, dtype=np.float64)
+    p = p / np.maximum(np.sum(p, axis=1, keepdims=True), 1e-12)
+    q = q / np.maximum(np.sum(q, axis=1, keepdims=True), 1e-12)
+    diff = np.sqrt(np.maximum(p[:, None, :], 0.0)) - np.sqrt(
+        np.maximum(q[None, :, :], 0.0)
+    )
+    return 0.5 * np.sum(diff * diff, axis=2)
+
+
+def feature_cost(
+    left: SubregionFGWMeasure,
+    right: SubregionFGWMeasure,
+    *,
+    feature_cost_kind: str = "hellinger_codebook",
+    normalize: bool = True,
+) -> np.ndarray:
+    requested = str(feature_cost_kind or "hellinger_codebook").strip().lower()
+    if requested in {"hellinger", "hellinger_codebook", "codebook_hellinger"}:
+        cost = hellinger_cost(left.features, right.features)
+    elif requested in {"sqeuclidean", "squared_euclidean", "euclidean"}:
+        cost = _pairwise_sqeuclidean(left.features, right.features)
+    else:
+        raise ValueError(
+            "feature_cost_kind must be 'hellinger_codebook' or 'sqeuclidean', "
+            f"got '{feature_cost_kind}'."
+        )
+    return (
+        _normalize_cost_matrix(cost)
+        if bool(normalize)
+        else np.asarray(cost, dtype=np.float64)
+    )
+
+
+def structure_cost(
+    coords: np.ndarray,
+    *,
+    scale: float,
+    clip: float | None = 3.0,
+) -> np.ndarray:
+    u = np.asarray(coords, dtype=np.float64)
+    diff = u[:, None, :] - u[None, :, :]
+    dist = np.sqrt(np.sum(diff * diff, axis=2)) / max(float(scale), 1e-12)
+    if clip is not None and float(clip) > 0:
+        dist = np.minimum(dist, float(clip))
+    np.fill_diagonal(dist, 0.0)
+    return dist.astype(np.float64)
+
+
+def _global_structure_scale(
+    measures: list[SubregionMeasure],
+    *,
+    structure_scale: str | float = "global_median",
+) -> float:
+    if isinstance(structure_scale, (int, float)):
+        return max(float(structure_scale), 1e-8)
+    requested = str(structure_scale or "global_median").strip().lower()
+    if requested in {"fixed", "unit", "canonical_unit"}:
+        return 1.0
+    values: list[np.ndarray] = []
+    for measure in measures:
+        coords = np.asarray(measure.canonical_coords, dtype=np.float64)
+        if coords.shape[0] < 2:
+            continue
+        rows, cols = np.triu_indices(coords.shape[0], k=1)
+        d = np.sqrt(np.sum((coords[rows] - coords[cols]) ** 2, axis=1))
+        d = d[np.isfinite(d) & (d > 1e-12)]
+        if d.size:
+            values.append(d)
+    if not values:
+        return 1.0
+    all_dist = np.concatenate(values)
+    if requested in {"global_q75", "q75", "p75", "global_75th"}:
+        return max(float(np.quantile(all_dist, 0.75)), 1e-8)
+    if requested not in {"global_median", "median"}:
+        raise ValueError(
+            "heterogeneity FGW structure_scale must be global_median, global_q75, "
+            f"canonical_unit, or a positive number, got '{structure_scale}'."
+        )
+    return max(float(np.median(all_dist)), 1e-8)
 
 
 def _softmax_negative_sqdist(
@@ -413,6 +544,391 @@ def _standardize_descriptor_block(
         ),
     }
     return weighted.astype(np.float32), stats
+
+
+def build_subregion_fgw_measures(
+    measures: list[SubregionMeasure],
+    *,
+    feature_mode: str = "soft_codebook",
+    structure_metric: str = "canonical_euclidean",
+    structure_scale: str | float = "global_median",
+    structure_clip: float | None = 3.0,
+    codebook_size: int = 32,
+    codebook_sample_size: int = 50000,
+    random_state: int = 1337,
+    sample_ids: list[str] | np.ndarray | None = None,
+) -> tuple[list[SubregionFGWMeasure], dict[str, object]]:
+    """Build measured attributed metric spaces for fused OT / FGW clustering."""
+
+    if not measures:
+        return [], {
+            "mode": "subregion_fgw_measures",
+            "n_subregions": 0,
+            "uses_ot_costs": True,
+        }
+    requested_feature_mode = str(feature_mode or "soft_codebook").strip().lower()
+    if requested_feature_mode not in {
+        "soft_codebook",
+        "whitened_features",
+        "whitened_features_plus_soft_codebook",
+    }:
+        raise ValueError(
+            "feature_mode must be soft_codebook, whitened_features, or "
+            f"whitened_features_plus_soft_codebook; got '{feature_mode}'."
+        )
+    requested_structure_metric = str(structure_metric or "canonical_euclidean").strip().lower()
+    if requested_structure_metric != "canonical_euclidean":
+        raise ValueError("Only canonical_euclidean structure_metric is currently implemented.")
+    all_features = np.vstack([np.asarray(m.features, dtype=np.float32) for m in measures])
+    max_codes = _env_int("SPATIAL_OT_HETEROGENEITY_MAX_CODEBOOK_SIZE", 16)
+    n_codes = min(max(int(codebook_size), 2), max(int(max_codes), 2), int(all_features.shape[0]))
+    centers, center, scale, temperature = _fit_state_codebook(
+        all_features,
+        codebook_size=n_codes,
+        sample_size=int(codebook_sample_size),
+        random_state=int(random_state),
+    )
+    resolved_structure_scale = _global_structure_scale(
+        measures,
+        structure_scale=structure_scale,
+    )
+    sample_values = (
+        [None] * len(measures)
+        if sample_ids is None
+        else [str(value) for value in np.asarray(sample_ids).reshape(-1).tolist()]
+    )
+    if len(sample_values) != len(measures):
+        sample_values = [None] * len(measures)
+    transport_measures: list[SubregionFGWMeasure] = []
+    code_entropy_values: list[np.ndarray] = []
+    support_sizes: list[int] = []
+    for idx, measure in enumerate(measures):
+        raw_features = np.asarray(measure.features, dtype=np.float32)
+        coords = np.asarray(measure.canonical_coords, dtype=np.float32)
+        weights = _normalize_mass(measure.weights).astype(np.float64)
+        z = (
+            (raw_features.astype(np.float64) - center[None, :]) / scale[None, :]
+        ).astype(np.float32)
+        probs = _softmax_negative_sqdist(z, centers, temperature=temperature)
+        entropy = -np.sum(
+            probs.astype(np.float64) * np.log(np.maximum(probs, 1e-12)),
+            axis=1,
+        ) / max(float(np.log(max(n_codes, 2))), 1e-8)
+        code_entropy_values.append(entropy.astype(np.float32))
+        if requested_feature_mode == "soft_codebook":
+            node_features = probs.astype(np.float64)
+        elif requested_feature_mode == "whitened_features":
+            node_features = z.astype(np.float64)
+        else:
+            node_features = np.hstack([z.astype(np.float64), probs.astype(np.float64)])
+        structure = structure_cost(
+            coords,
+            scale=float(resolved_structure_scale),
+            clip=structure_clip,
+        )
+        transport_measures.append(
+            SubregionFGWMeasure(
+                coords=coords.astype(np.float64),
+                features=np.asarray(node_features, dtype=np.float64),
+                weights=weights,
+                structure=structure,
+                sample_id=sample_values[idx],
+                subregion_id=int(measure.subregion_id),
+            )
+        )
+        support_sizes.append(int(coords.shape[0]))
+    metadata: dict[str, object] = {
+        "mode": "subregion_fgw_measures",
+        "implemented": True,
+        "n_subregions": int(len(transport_measures)),
+        "uses_ot_costs": True,
+        "feature_mode": requested_feature_mode,
+        "feature_cost_default": "hellinger_codebook"
+        if requested_feature_mode == "soft_codebook"
+        else "sqeuclidean",
+        "cell_state_codebook_size": int(n_codes),
+        "cell_state_codebook_temperature": float(temperature),
+        "cell_state_codebook_assignment_entropy_summary": _numeric_summary(
+            np.concatenate(code_entropy_values) if code_entropy_values else []
+        ),
+        "codebook_feature_standardization": "mean_std_whitening_fit_on_compressed_support_sample",
+        "structure_metric": requested_structure_metric,
+        "structure_scale": str(structure_scale),
+        "structure_scale_value": float(resolved_structure_scale),
+        "structure_clip": None if structure_clip is None else float(structure_clip),
+        "support_size_summary": _numeric_summary(support_sizes),
+        "uses_raw_spatial_coordinates": False,
+        "uses_subregion_centers": False,
+        "uses_internal_canonical_coordinates": True,
+    }
+    return transport_measures, metadata
+
+
+def fused_ot_distance(
+    left: SubregionFGWMeasure,
+    right: SubregionFGWMeasure,
+    *,
+    feature_weight: float = 0.5,
+    coordinate_weight: float = 0.5,
+    feature_cost_kind: str = "hellinger_codebook",
+    solver: str = "emd",
+    epsilon: float = 0.05,
+    return_coupling: bool = False,
+) -> tuple[float, np.ndarray | None, dict[str, object]]:
+    p = _normalize_mass(left.weights)
+    q = _normalize_mass(right.weights)
+    m_feature = feature_cost(left, right, feature_cost_kind=feature_cost_kind)
+    m_coord = _normalize_cost_matrix(_pairwise_sqeuclidean(left.coords, right.coords))
+    fw = max(float(feature_weight), 0.0)
+    cw = max(float(coordinate_weight), 0.0)
+    total = max(fw + cw, 1e-12)
+    cost = (fw / total) * m_feature + (cw / total) * m_coord
+    requested_solver = str(solver or "emd").strip().lower()
+    if requested_solver in {"sinkhorn", "entropic"}:
+        coupling = ot.sinkhorn(p, q, cost, reg=max(float(epsilon), 1e-8))
+        solver_name = "ot.sinkhorn"
+    elif requested_solver in {"emd", "exact", "network_simplex"}:
+        coupling = ot.emd(p, q, cost)
+        solver_name = "ot.emd"
+    else:
+        raise ValueError("fused_ot solver must be 'emd' or 'sinkhorn'.")
+    distance = float(np.sum(coupling * cost))
+    meta = {
+        "mode": HETEROGENEITY_FUSED_OT_MODE,
+        "uses_ot_costs": True,
+        "solver": solver_name,
+        "feature_weight": float(fw / total),
+        "coordinate_weight": float(cw / total),
+        "feature_cost": str(feature_cost_kind),
+        "n_source": int(p.size),
+        "n_target": int(q.size),
+        "distance": distance,
+    }
+    return distance, coupling if return_coupling else None, meta
+
+
+def fgw_distance(
+    left: SubregionFGWMeasure,
+    right: SubregionFGWMeasure,
+    *,
+    alpha: float = 0.5,
+    feature_cost_kind: str = "hellinger_codebook",
+    solver: str = "conditional_gradient",
+    epsilon: float = 0.05,
+    loss_fun: str = "square_loss",
+    max_iter: int = 500,
+    tol: float = 1e-7,
+    partial: bool = False,
+    partial_mass: float = 0.85,
+    partial_reg: float = 0.05,
+    return_coupling: bool = False,
+) -> tuple[float, np.ndarray | None, dict[str, object]]:
+    p = _normalize_mass(left.weights)
+    q = _normalize_mass(right.weights)
+    c1 = np.asarray(left.structure, dtype=np.float64)
+    c2 = np.asarray(right.structure, dtype=np.float64)
+    m = feature_cost(left, right, feature_cost_kind=feature_cost_kind)
+    a = float(np.clip(float(alpha), 0.0, 1.0))
+    requested_solver = str(solver or "conditional_gradient").strip().lower()
+    if a <= 1e-12 and not bool(partial):
+        if return_coupling:
+            coupling = ot.emd(p, q, m)
+            distance = float(np.sum(coupling * m))
+        else:
+            coupling = None
+            distance = ot.emd2(p, q, m)
+        solver_name = "ot.emd_feature_only_fgw_limit"
+    elif bool(partial):
+        distance = ot.gromov.entropic_partial_fused_gromov_wasserstein2(
+            m,
+            c1,
+            c2,
+            p=p,
+            q=q,
+            reg=max(float(partial_reg), 1e-8),
+            m=min(max(float(partial_mass), 1e-8), 1.0),
+            loss_fun=str(loss_fun),
+            alpha=a,
+            numItermax=int(max_iter),
+            tol=float(tol),
+            symmetric=True,
+            log=False,
+        )
+        coupling = None
+        solver_name = "ot.gromov.entropic_partial_fused_gromov_wasserstein2"
+    elif requested_solver in {"entropic", "pgd", "ppa"}:
+        distance = ot.gromov.entropic_fused_gromov_wasserstein2(
+            m,
+            c1,
+            c2,
+            p=p,
+            q=q,
+            loss_fun=str(loss_fun),
+            epsilon=max(float(epsilon), 1e-8),
+            symmetric=True,
+            alpha=a,
+            max_iter=int(max_iter),
+            tol=float(tol),
+            solver="PPA" if requested_solver == "ppa" else "PGD",
+            log=False,
+        )
+        coupling = None
+        solver_name = "ot.gromov.entropic_fused_gromov_wasserstein2"
+    elif requested_solver in {"conditional_gradient", "cg", "exact", "non_entropic"}:
+        distance = ot.gromov.fused_gromov_wasserstein2(
+            m,
+            c1,
+            c2,
+            p=p,
+            q=q,
+            loss_fun=str(loss_fun),
+            symmetric=True,
+            alpha=a,
+            max_iter=int(max_iter),
+            tol_rel=float(tol),
+            tol_abs=float(tol),
+            log=False,
+        )
+        coupling = None
+        solver_name = "ot.gromov.fused_gromov_wasserstein2"
+        if return_coupling:
+            coupling = ot.gromov.fused_gromov_wasserstein(
+                m,
+                c1,
+                c2,
+                p=p,
+                q=q,
+                loss_fun=str(loss_fun),
+                symmetric=True,
+                alpha=a,
+                max_iter=int(max_iter),
+                tol_rel=float(tol),
+                tol_abs=float(tol),
+                log=False,
+            )
+    else:
+        raise ValueError(
+            "fgw solver must be conditional_gradient, entropic, ppa, or partial."
+        )
+    distance_float = float(distance)
+    meta = {
+        "mode": HETEROGENEITY_FGW_MODE,
+        "uses_ot_costs": True,
+        "solver": solver_name,
+        "alpha": a,
+        "feature_cost": str(feature_cost_kind),
+        "loss_fun": str(loss_fun),
+        "partial": bool(partial),
+        "n_source": int(p.size),
+        "n_target": int(q.size),
+        "distance": distance_float,
+    }
+    if coupling is not None:
+        meta["source_marginal_error"] = float(np.max(np.abs(coupling.sum(axis=1) - p)))
+        meta["target_marginal_error"] = float(np.max(np.abs(coupling.sum(axis=0) - q)))
+    return distance_float, coupling, meta
+
+
+def pairwise_transport_distance_matrix(
+    measures: list[SubregionFGWMeasure],
+    *,
+    mode: str,
+    max_subregions: int = 800,
+    fused_ot_feature_weight: float = 0.5,
+    fused_ot_coordinate_weight: float = 0.5,
+    feature_cost_kind: str = "hellinger_codebook",
+    fgw_alpha: float = 0.5,
+    fgw_solver: str = "conditional_gradient",
+    fgw_epsilon: float = 0.05,
+    fgw_loss_fun: str = "square_loss",
+    fgw_max_iter: int = 500,
+    fgw_tol: float = 1e-7,
+    fgw_partial: bool = False,
+    fgw_partial_mass: float = 0.85,
+    fgw_partial_reg: float = 0.05,
+) -> tuple[np.ndarray, dict[str, object]]:
+    requested = str(mode).strip().lower()
+    if requested not in TRANSPORT_HETEROGENEITY_MODES:
+        raise ValueError(
+            f"mode must be one of {sorted(TRANSPORT_HETEROGENEITY_MODES)}, got '{mode}'."
+        )
+    n = int(len(measures))
+    cap = int(max_subregions)
+    if cap > 0 and n > cap:
+        raise ValueError(
+            f"{requested} requires an all-pairs transport distance matrix; "
+            f"n_subregions={n} exceeds heterogeneity_transport_max_subregions={cap}. "
+            "Use descriptor clustering, reduce/landmark subregions, or raise the cap intentionally."
+        )
+    distances = np.zeros((n, n), dtype=np.float32)
+    solved: list[float] = []
+    for left_idx in range(n):
+        for right_idx in range(left_idx + 1, n):
+            if requested == HETEROGENEITY_FUSED_OT_MODE:
+                value, _coupling, _meta = fused_ot_distance(
+                    measures[left_idx],
+                    measures[right_idx],
+                    feature_weight=fused_ot_feature_weight,
+                    coordinate_weight=fused_ot_coordinate_weight,
+                    feature_cost_kind=feature_cost_kind,
+                    solver="emd",
+                    return_coupling=False,
+                )
+            else:
+                value, _coupling, _meta = fgw_distance(
+                    measures[left_idx],
+                    measures[right_idx],
+                    alpha=fgw_alpha,
+                    feature_cost_kind=feature_cost_kind,
+                    solver=fgw_solver,
+                    epsilon=fgw_epsilon,
+                    loss_fun=fgw_loss_fun,
+                    max_iter=fgw_max_iter,
+                    tol=fgw_tol,
+                    partial=fgw_partial,
+                    partial_mass=fgw_partial_mass,
+                    partial_reg=fgw_partial_reg,
+                    return_coupling=False,
+                )
+            distances[left_idx, right_idx] = distances[right_idx, left_idx] = float(value)
+            solved.append(float(value))
+    metadata = {
+        "mode": requested,
+        "implemented": True,
+        "uses_ot_costs": True,
+        "distance_matrix_shape": [int(n), int(n)],
+        "distance_summary": _numeric_summary(solved),
+        "feature_cost": str(feature_cost_kind),
+        "max_subregions": int(max_subregions),
+    }
+    if requested == HETEROGENEITY_FUSED_OT_MODE:
+        total = max(
+            max(float(fused_ot_feature_weight), 0.0)
+            + max(float(fused_ot_coordinate_weight), 0.0),
+            1e-12,
+        )
+        metadata.update(
+            {
+                "solver": "ot.emd",
+                "feature_weight": float(max(float(fused_ot_feature_weight), 0.0) / total),
+                "coordinate_weight": float(max(float(fused_ot_coordinate_weight), 0.0) / total),
+            }
+        )
+    else:
+        metadata.update(
+            {
+                "solver": str(fgw_solver),
+                "alpha": float(np.clip(float(fgw_alpha), 0.0, 1.0)),
+                "epsilon": float(fgw_epsilon),
+                "loss_fun": str(fgw_loss_fun),
+                "max_iter": int(fgw_max_iter),
+                "tol": float(fgw_tol),
+                "partial": bool(fgw_partial),
+                "partial_mass": float(fgw_partial_mass),
+                "partial_reg": float(fgw_partial_reg),
+            }
+        )
+    return distances, metadata
 
 
 def build_internal_heterogeneity_embeddings(

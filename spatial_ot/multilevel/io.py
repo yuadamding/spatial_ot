@@ -126,6 +126,10 @@ def _method_stack_summary(
 ) -> dict[str, object]:
     if str(subregion_clustering_method) == HETEROGENEITY_DESCRIPTOR_MODE:
         core_model = "internal_heterogeneity_descriptor_spatial_cell_state_motif_clustering"
+    elif str(subregion_clustering_method) == "heterogeneity_fused_ot_niche":
+        core_model = "internal_heterogeneity_fused_ot_transport_distance_clustering"
+    elif str(subregion_clustering_method) == "heterogeneity_fgw_niche":
+        core_model = "internal_heterogeneity_fused_gromov_wasserstein_distance_clustering"
     elif not bool(subregion_clustering_uses_spatial):
         core_model = "pooled_raw_member_feature_distribution_subregion_latent_clustering"
     else:
@@ -1645,6 +1649,22 @@ def run_multilevel_ot_on_h5ad(
     heterogeneity_pair_graph_k: int = 8,
     heterogeneity_pair_graph_radius: float | None = None,
     heterogeneity_pair_bin_normalization: str = "per_bin",
+    heterogeneity_transport_max_subregions: int = 800,
+    heterogeneity_transport_feature_mode: str = "soft_codebook",
+    heterogeneity_transport_feature_cost: str = "hellinger_codebook",
+    heterogeneity_fused_ot_feature_weight: float = 0.5,
+    heterogeneity_fused_ot_coordinate_weight: float = 0.5,
+    heterogeneity_fgw_alpha: float = 0.5,
+    heterogeneity_fgw_solver: str = "conditional_gradient",
+    heterogeneity_fgw_epsilon: float = 0.05,
+    heterogeneity_fgw_loss_fun: str = "square_loss",
+    heterogeneity_fgw_max_iter: int = 500,
+    heterogeneity_fgw_tol: float = 1e-7,
+    heterogeneity_fgw_structure_scale: str | float = "global_median",
+    heterogeneity_fgw_structure_clip: float | None = 3.0,
+    heterogeneity_fgw_partial: bool = False,
+    heterogeneity_fgw_partial_mass: float = 0.85,
+    heterogeneity_fgw_partial_reg: float = 0.05,
     shape_diagnostics: bool = True,
     shape_leakage_permutations: int = 64,
     compute_spot_latent: bool = True,
@@ -1985,6 +2005,22 @@ def run_multilevel_ot_on_h5ad(
         heterogeneity_pair_graph_k=heterogeneity_pair_graph_k,
         heterogeneity_pair_graph_radius=heterogeneity_pair_graph_radius,
         heterogeneity_pair_bin_normalization=heterogeneity_pair_bin_normalization,
+        heterogeneity_transport_max_subregions=heterogeneity_transport_max_subregions,
+        heterogeneity_transport_feature_mode=heterogeneity_transport_feature_mode,
+        heterogeneity_transport_feature_cost=heterogeneity_transport_feature_cost,
+        heterogeneity_fused_ot_feature_weight=heterogeneity_fused_ot_feature_weight,
+        heterogeneity_fused_ot_coordinate_weight=heterogeneity_fused_ot_coordinate_weight,
+        heterogeneity_fgw_alpha=heterogeneity_fgw_alpha,
+        heterogeneity_fgw_solver=heterogeneity_fgw_solver,
+        heterogeneity_fgw_epsilon=heterogeneity_fgw_epsilon,
+        heterogeneity_fgw_loss_fun=heterogeneity_fgw_loss_fun,
+        heterogeneity_fgw_max_iter=heterogeneity_fgw_max_iter,
+        heterogeneity_fgw_tol=heterogeneity_fgw_tol,
+        heterogeneity_fgw_structure_scale=heterogeneity_fgw_structure_scale,
+        heterogeneity_fgw_structure_clip=heterogeneity_fgw_structure_clip,
+        heterogeneity_fgw_partial=heterogeneity_fgw_partial,
+        heterogeneity_fgw_partial_mass=heterogeneity_fgw_partial_mass,
+        heterogeneity_fgw_partial_reg=heterogeneity_fgw_partial_reg,
         auto_n_clusters=auto_n_clusters,
         candidate_n_clusters=candidate_n_clusters,
         auto_k_max_score_subregions=auto_k_max_score_subregions,
@@ -2464,6 +2500,30 @@ def run_multilevel_ot_on_h5ad(
         "heterogeneity_pair_bin_normalization": str(
             heterogeneity_pair_bin_normalization
         ),
+        "heterogeneity_transport_max_subregions": int(
+            heterogeneity_transport_max_subregions
+        ),
+        "heterogeneity_transport_feature_mode": str(heterogeneity_transport_feature_mode),
+        "heterogeneity_transport_feature_cost": str(heterogeneity_transport_feature_cost),
+        "heterogeneity_fused_ot_feature_weight": float(
+            heterogeneity_fused_ot_feature_weight
+        ),
+        "heterogeneity_fused_ot_coordinate_weight": float(
+            heterogeneity_fused_ot_coordinate_weight
+        ),
+        "heterogeneity_fgw_alpha": float(heterogeneity_fgw_alpha),
+        "heterogeneity_fgw_solver": str(heterogeneity_fgw_solver),
+        "heterogeneity_fgw_epsilon": float(heterogeneity_fgw_epsilon),
+        "heterogeneity_fgw_loss_fun": str(heterogeneity_fgw_loss_fun),
+        "heterogeneity_fgw_max_iter": int(heterogeneity_fgw_max_iter),
+        "heterogeneity_fgw_tol": float(heterogeneity_fgw_tol),
+        "heterogeneity_fgw_structure_scale": str(heterogeneity_fgw_structure_scale),
+        "heterogeneity_fgw_structure_clip": float(heterogeneity_fgw_structure_clip)
+        if heterogeneity_fgw_structure_clip is not None
+        else None,
+        "heterogeneity_fgw_partial": bool(heterogeneity_fgw_partial),
+        "heterogeneity_fgw_partial_mass": float(heterogeneity_fgw_partial_mass),
+        "heterogeneity_fgw_partial_reg": float(heterogeneity_fgw_partial_reg),
         "auto_k_max_score_subregions": int(auto_k_max_score_subregions),
         "auto_k_gap_references": int(auto_k_gap_references),
         "auto_k_mds_components": int(auto_k_mds_components),
@@ -2732,6 +2792,22 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         heterogeneity_pair_graph_k=config.ot.heterogeneity_pair_graph_k,
         heterogeneity_pair_graph_radius=config.ot.heterogeneity_pair_graph_radius,
         heterogeneity_pair_bin_normalization=config.ot.heterogeneity_pair_bin_normalization,
+        heterogeneity_transport_max_subregions=config.ot.heterogeneity_transport_max_subregions,
+        heterogeneity_transport_feature_mode=config.ot.heterogeneity_transport_feature_mode,
+        heterogeneity_transport_feature_cost=config.ot.heterogeneity_transport_feature_cost,
+        heterogeneity_fused_ot_feature_weight=config.ot.heterogeneity_fused_ot_feature_weight,
+        heterogeneity_fused_ot_coordinate_weight=config.ot.heterogeneity_fused_ot_coordinate_weight,
+        heterogeneity_fgw_alpha=config.ot.heterogeneity_fgw_alpha,
+        heterogeneity_fgw_solver=config.ot.heterogeneity_fgw_solver,
+        heterogeneity_fgw_epsilon=config.ot.heterogeneity_fgw_epsilon,
+        heterogeneity_fgw_loss_fun=config.ot.heterogeneity_fgw_loss_fun,
+        heterogeneity_fgw_max_iter=config.ot.heterogeneity_fgw_max_iter,
+        heterogeneity_fgw_tol=config.ot.heterogeneity_fgw_tol,
+        heterogeneity_fgw_structure_scale=config.ot.heterogeneity_fgw_structure_scale,
+        heterogeneity_fgw_structure_clip=config.ot.heterogeneity_fgw_structure_clip,
+        heterogeneity_fgw_partial=config.ot.heterogeneity_fgw_partial,
+        heterogeneity_fgw_partial_mass=config.ot.heterogeneity_fgw_partial_mass,
+        heterogeneity_fgw_partial_reg=config.ot.heterogeneity_fgw_partial_reg,
         shape_diagnostics=config.ot.shape_diagnostics,
         shape_leakage_permutations=config.ot.shape_leakage_permutations,
         compute_spot_latent=config.ot.compute_spot_latent,

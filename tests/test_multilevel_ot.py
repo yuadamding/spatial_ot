@@ -27,7 +27,16 @@ from spatial_ot.multilevel.geometry import (
     build_partition_subregions_from_grid_tiles,
     refine_subregions_by_cluster_coherence,
 )
-from spatial_ot.multilevel.heterogeneity import build_internal_heterogeneity_embeddings
+from spatial_ot.multilevel.heterogeneity import (
+    HETEROGENEITY_FGW_MODE,
+    HETEROGENEITY_FUSED_OT_MODE,
+    SubregionFGWMeasure,
+    build_internal_heterogeneity_embeddings,
+    build_subregion_fgw_measures,
+    fgw_distance,
+    fused_ot_distance,
+    pairwise_transport_distance_matrix,
+)
 from spatial_ot.multilevel.io import _cluster_count_dict
 from spatial_ot.multilevel.model_selection import (
     comprehensive_select_k_from_latent_embeddings,
@@ -1823,6 +1832,255 @@ def test_internal_heterogeneity_pair_block_detects_contact_motif(
     assert dist[0, 1] > 1e-3
     assert dist[0, 2] < dist[0, 1]
     assert dist[1, 3] < dist[1, 0]
+
+
+def _fgw_measure(
+    coords: np.ndarray,
+    features: np.ndarray,
+    weights: np.ndarray | None = None,
+) -> SubregionFGWMeasure:
+    coords64 = np.asarray(coords, dtype=np.float64)
+    features64 = np.asarray(features, dtype=np.float64)
+    if weights is None:
+        weights64 = np.full(coords64.shape[0], 1.0 / coords64.shape[0])
+    else:
+        weights64 = np.asarray(weights, dtype=np.float64)
+        weights64 = weights64 / weights64.sum()
+    diff = coords64[:, None, :] - coords64[None, :, :]
+    structure = np.sqrt(np.sum(diff * diff, axis=2))
+    return SubregionFGWMeasure(
+        coords=coords64,
+        features=features64,
+        weights=weights64,
+        structure=structure,
+    )
+
+
+def test_fgw_feature_only_limit_ignores_internal_geometry() -> None:
+    features = np.eye(3, dtype=np.float64)
+    line = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=np.float64)
+    triangle = np.array([[0.0, 0.0], [0.8, 0.6], [0.1, 1.4]], dtype=np.float64)
+    left = _fgw_measure(line, features)
+    right = _fgw_measure(triangle, features)
+
+    distance, coupling, meta = fgw_distance(
+        left,
+        right,
+        alpha=0.0,
+        max_iter=200,
+        tol=1e-9,
+        return_coupling=True,
+    )
+
+    assert meta["mode"] == HETEROGENEITY_FGW_MODE
+    assert meta["uses_ot_costs"] is True
+    assert distance < 1e-8
+    assert coupling is not None
+    np.testing.assert_allclose(coupling.sum(axis=1), left.weights, atol=1e-6)
+    np.testing.assert_allclose(coupling.sum(axis=0), right.weights, atol=1e-6)
+
+
+def test_fgw_structure_only_limit_ignores_feature_distribution() -> None:
+    coords = np.array([[0.0, 0.0], [1.0, 0.0], [0.2, 0.9]], dtype=np.float64)
+    features = np.eye(3, dtype=np.float64)
+    left = _fgw_measure(coords, features)
+    right = _fgw_measure(coords, np.tile(features[[0]], (3, 1)))
+
+    feature_only, _coupling, _meta = fgw_distance(
+        left,
+        right,
+        alpha=0.0,
+        max_iter=200,
+        tol=1e-9,
+    )
+    structure_only, coupling, meta = fgw_distance(
+        left,
+        right,
+        alpha=1.0,
+        max_iter=200,
+        tol=1e-9,
+        return_coupling=True,
+    )
+
+    assert feature_only > 1e-3
+    assert structure_only < 1e-8
+    assert coupling is not None
+    assert meta["source_marginal_error"] < 1e-6
+    assert meta["target_marginal_error"] < 1e-6
+
+
+def test_fused_ot_distance_uses_cross_coordinate_cost() -> None:
+    features = np.tile(np.array([[1.0, 0.0]], dtype=np.float64), (3, 1))
+    left = _fgw_measure(
+        np.array([[0.0, 0.0], [0.1, 0.0], [0.2, 0.0]], dtype=np.float64),
+        features,
+    )
+    right_same = _fgw_measure(
+        np.array([[0.0, 0.0], [0.1, 0.0], [0.2, 0.0]], dtype=np.float64),
+        features,
+    )
+    right_shifted = _fgw_measure(
+        np.array([[2.0, 0.0], [2.1, 0.0], [2.2, 0.0]], dtype=np.float64),
+        features,
+    )
+
+    same_distance, coupling, meta = fused_ot_distance(
+        left,
+        right_same,
+        feature_weight=0.0,
+        coordinate_weight=1.0,
+        return_coupling=True,
+    )
+    shifted_distance, _coupling, _meta = fused_ot_distance(
+        left,
+        right_shifted,
+        feature_weight=0.0,
+        coordinate_weight=1.0,
+    )
+
+    assert meta["mode"] == HETEROGENEITY_FUSED_OT_MODE
+    assert same_distance < 1e-8
+    assert shifted_distance > 0.1
+    assert coupling is not None
+    np.testing.assert_allclose(coupling.sum(axis=1), left.weights, atol=1e-6)
+    np.testing.assert_allclose(coupling.sum(axis=0), right_same.weights, atol=1e-6)
+
+
+def test_build_subregion_fgw_measures_and_pairwise_transport_cap() -> None:
+    def make_measure(subregion_id: int, offset: float) -> SubregionMeasure:
+        coords = np.array(
+            [[offset, 0.0], [offset + 0.2, 0.0], [offset, 0.2]],
+            dtype=np.float32,
+        )
+        features = np.eye(3, dtype=np.float32)
+        return SubregionMeasure(
+            subregion_id=int(subregion_id),
+            center_um=np.zeros(2, dtype=np.float32),
+            members=np.arange(3, dtype=np.int32),
+            canonical_coords=coords,
+            features=features,
+            weights=np.full(3, 1.0 / 3.0, dtype=np.float32),
+            geometry_point_count=3,
+            compressed_point_count=3,
+            normalizer=ShapeNormalizer(
+                center=np.zeros((1, 2), dtype=np.float32),
+                scale=1.0,
+                interpolator=None,
+            ),
+            normalizer_diagnostics=ShapeNormalizerDiagnostics(
+                geometry_source="test",
+                used_fallback=False,
+                ot_cost=None,
+                sinkhorn_converged=None,
+                mapped_radius_p95=None,
+                mapped_radius_max=None,
+                interpolation_residual=None,
+            ),
+        )
+
+    transport_measures, metadata = build_subregion_fgw_measures(
+        [make_measure(0, 0.0), make_measure(1, 0.5)],
+        codebook_size=3,
+        codebook_sample_size=6,
+        structure_scale="global_median",
+        random_state=2031,
+    )
+    assert metadata["uses_ot_costs"] is True
+    assert metadata["structure_metric"] == "canonical_euclidean"
+    assert len(transport_measures) == 2
+
+    distances, distance_meta = pairwise_transport_distance_matrix(
+        transport_measures,
+        mode=HETEROGENEITY_FUSED_OT_MODE,
+        max_subregions=2,
+        fused_ot_feature_weight=0.5,
+        fused_ot_coordinate_weight=0.5,
+    )
+    assert distances.shape == (2, 2)
+    assert np.allclose(np.diag(distances), 0.0)
+    assert distance_meta["uses_ot_costs"] is True
+
+    with pytest.raises(ValueError, match="exceeds heterogeneity_transport_max_subregions"):
+        pairwise_transport_distance_matrix(
+            transport_measures,
+            mode=HETEROGENEITY_FGW_MODE,
+            max_subregions=1,
+        )
+
+
+def test_fit_multilevel_ot_fgw_mode_uses_precomputed_transport_matrix() -> None:
+    rng = np.random.default_rng(2032)
+    coords_parts = []
+    feature_parts = []
+    subregion_members = []
+    start = 0
+    motifs = ["line", "triangle", "line", "triangle"]
+    offsets = [0.0, 4.0, 8.0, 12.0]
+    for offset, motif in zip(offsets, motifs, strict=True):
+        if motif == "line":
+            local = np.column_stack(
+                [
+                    np.linspace(-0.7, 0.7, 9),
+                    rng.normal(0.0, 0.02, size=9),
+                ]
+            )
+        else:
+            angles = np.linspace(0.0, 2.0 * np.pi, 9, endpoint=False)
+            local = np.column_stack([0.65 * np.cos(angles), 0.65 * np.sin(angles)])
+        coords_parts.append(local + np.array([offset, 0.0]))
+        feature_parts.append(np.tile(np.array([[1.0, 0.0]], dtype=np.float32), (9, 1)))
+        subregion_members.append(np.arange(start, start + 9, dtype=np.int32))
+        start += 9
+    coords = np.vstack(coords_parts).astype(np.float32)
+    features = np.vstack(feature_parts).astype(np.float32)
+    centers = np.vstack(
+        [coords[members].mean(axis=0) for members in subregion_members]
+    ).astype(np.float32)
+
+    result = fit_multilevel_ot(
+        features=features,
+        coords_um=coords,
+        subregion_members=subregion_members,
+        subregion_centers_um=centers,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=10.0,
+        stride_um=10.0,
+        min_cells=6,
+        max_subregions=4,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=9,
+        align_iters=1,
+        allow_reflection=False,
+        allow_scale=False,
+        allow_convex_hull_fallback=True,
+        max_iter=1,
+        tol=1e-4,
+        basic_niche_size_um=None,
+        min_subregions_per_cluster=1,
+        compute_spot_latent=False,
+        subregion_clustering_method=HETEROGENEITY_FGW_MODE,
+        heterogeneity_transport_max_subregions=4,
+        heterogeneity_transport_feature_mode="soft_codebook",
+        heterogeneity_transport_feature_cost="sqeuclidean",
+        heterogeneity_fgw_alpha=1.0,
+        heterogeneity_fgw_max_iter=100,
+        seed=2032,
+        compute_device="cpu",
+    )
+
+    metadata = result.subregion_latent_embedding_metadata
+    assert result.subregion_clustering_method == HETEROGENEITY_FGW_MODE
+    assert result.subregion_clustering_uses_spatial is True
+    assert result.subregion_latent_embeddings.shape == (4, 4)
+    assert metadata["uses_ot_costs"] is True
+    assert metadata["transport_distance"]["mode"] == HETEROGENEITY_FGW_MODE
+    assert metadata["transport_distance"]["uses_ot_costs"] is True
 
 
 def test_pooled_subregion_latent_uses_uncompressed_member_feature_distribution() -> (

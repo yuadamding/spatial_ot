@@ -10,7 +10,7 @@ import warnings
 import numpy as np
 import ot
 from scipy import sparse
-from sklearn.cluster import KMeans, MiniBatchKMeans
+from sklearn.cluster import AgglomerativeClustering, KMeans, MiniBatchKMeans
 import torch
 
 from .._runtime import runtime_memory_snapshot as _runtime_memory_snapshot
@@ -44,8 +44,13 @@ from .gpu_ot import sinkhorn_semirelaxed_unbalanced_log_torch
 from .heterogeneity import (
     HETEROGENEITY_DESCRIPTOR_ALIASES,
     HETEROGENEITY_DESCRIPTOR_MODE,
+    HETEROGENEITY_FGW_MODE,
+    HETEROGENEITY_FUSED_OT_MODE,
     LEGACY_HETEROGENEITY_OT_ALIAS,
+    TRANSPORT_HETEROGENEITY_MODES,
     build_internal_heterogeneity_embeddings,
+    build_subregion_fgw_measures,
+    pairwise_transport_distance_matrix,
 )
 from .model_selection import (
     comprehensive_select_k_from_latent_embeddings,
@@ -2215,6 +2220,70 @@ def _ensure_minimum_cluster_size(
     )
 
 
+def _cluster_precomputed_transport_distances(
+    distances: np.ndarray,
+    *,
+    n_clusters: int,
+    min_subregions_per_cluster: int,
+) -> dict[str, object]:
+    d = np.asarray(distances, dtype=np.float64)
+    if d.ndim != 2 or d.shape[0] != d.shape[1]:
+        raise ValueError("transport distance matrix must be square.")
+    n = int(d.shape[0])
+    k = int(n_clusters)
+    if k < 1 or k > n:
+        raise ValueError(f"n_clusters={k} is invalid for {n} subregions.")
+    if k == 1:
+        labels = np.zeros(n, dtype=np.int32)
+    else:
+        try:
+            model = AgglomerativeClustering(
+                n_clusters=k,
+                metric="precomputed",
+                linkage="average",
+            )
+        except TypeError:
+            model = AgglomerativeClustering(
+                n_clusters=k,
+                affinity="precomputed",
+                linkage="average",
+            )
+        labels = np.asarray(model.fit_predict(d), dtype=np.int32)
+
+    def _medoids_for(current_labels: np.ndarray) -> np.ndarray:
+        medoids = np.zeros(k, dtype=np.int32)
+        for cluster_id in range(k):
+            idx = np.flatnonzero(current_labels == cluster_id)
+            if idx.size == 0:
+                medoids[cluster_id] = int(np.argmin(np.mean(d, axis=1)))
+                continue
+            local = d[np.ix_(idx, idx)]
+            medoids[cluster_id] = int(idx[int(np.argmin(np.mean(local, axis=1)))])
+        return medoids
+
+    medoids = _medoids_for(labels)
+    costs = d[:, medoids].astype(np.float32)
+    argmin_labels = np.argmin(costs, axis=1).astype(np.int32)
+    labels, forced_mask = _ensure_minimum_cluster_size(
+        labels,
+        costs,
+        n_clusters=k,
+        min_subregions_per_cluster=int(min_subregions_per_cluster),
+    )
+    medoids = _medoids_for(labels)
+    costs = d[:, medoids].astype(np.float32)
+    argmin_labels = np.argmin(costs, axis=1).astype(np.int32)
+    inertia = float(np.sum(costs[np.arange(n), labels]))
+    return {
+        "labels": labels.astype(np.int32),
+        "argmin_labels": argmin_labels.astype(np.int32),
+        "costs": costs.astype(np.float32),
+        "forced_label_mask": forced_mask.astype(bool),
+        "medoid_indices": medoids.astype(np.int32),
+        "inertia": inertia,
+    }
+
+
 def _compute_assignment_costs(
     measures: list[SubregionMeasure],
     atom_coords: np.ndarray,
@@ -4036,6 +4105,22 @@ def fit_multilevel_ot(
     heterogeneity_pair_graph_k: int = 8,
     heterogeneity_pair_graph_radius: float | None = None,
     heterogeneity_pair_bin_normalization: str = "per_bin",
+    heterogeneity_transport_max_subregions: int = 800,
+    heterogeneity_transport_feature_mode: str = "soft_codebook",
+    heterogeneity_transport_feature_cost: str = "hellinger_codebook",
+    heterogeneity_fused_ot_feature_weight: float = 0.5,
+    heterogeneity_fused_ot_coordinate_weight: float = 0.5,
+    heterogeneity_fgw_alpha: float = 0.5,
+    heterogeneity_fgw_solver: str = "conditional_gradient",
+    heterogeneity_fgw_epsilon: float = 0.05,
+    heterogeneity_fgw_loss_fun: str = "square_loss",
+    heterogeneity_fgw_max_iter: int = 500,
+    heterogeneity_fgw_tol: float = 1e-7,
+    heterogeneity_fgw_structure_scale: str | float = "global_median",
+    heterogeneity_fgw_structure_clip: float | None = 3.0,
+    heterogeneity_fgw_partial: bool = False,
+    heterogeneity_fgw_partial_mass: float = 0.85,
+    heterogeneity_fgw_partial_reg: float = 0.05,
     auto_n_clusters: bool = False,
     candidate_n_clusters: tuple[int, ...] | list[int] | str | None = None,
     auto_k_max_score_subregions: int = 2500,
@@ -4139,14 +4224,53 @@ def fit_multilevel_ot(
         and float(heterogeneity_pair_graph_radius) <= 0
     ):
         heterogeneity_pair_graph_radius = None
+    heterogeneity_transport_max_subregions = max(
+        int(heterogeneity_transport_max_subregions), 0
+    )
+    heterogeneity_transport_feature_mode = (
+        str(heterogeneity_transport_feature_mode).strip().lower()
+    )
+    heterogeneity_transport_feature_cost = (
+        str(heterogeneity_transport_feature_cost).strip().lower()
+    )
+    heterogeneity_fused_ot_feature_weight = max(
+        float(heterogeneity_fused_ot_feature_weight), 0.0
+    )
+    heterogeneity_fused_ot_coordinate_weight = max(
+        float(heterogeneity_fused_ot_coordinate_weight), 0.0
+    )
+    if (
+        heterogeneity_fused_ot_feature_weight
+        + heterogeneity_fused_ot_coordinate_weight
+        <= 1e-12
+    ):
+        raise ValueError("at least one heterogeneity fused-OT weight must be positive")
+    heterogeneity_fgw_alpha = float(np.clip(float(heterogeneity_fgw_alpha), 0.0, 1.0))
+    heterogeneity_fgw_solver = str(heterogeneity_fgw_solver).strip().lower()
+    heterogeneity_fgw_epsilon = max(float(heterogeneity_fgw_epsilon), 1e-8)
+    heterogeneity_fgw_loss_fun = str(heterogeneity_fgw_loss_fun).strip().lower()
+    heterogeneity_fgw_max_iter = max(int(heterogeneity_fgw_max_iter), 1)
+    heterogeneity_fgw_tol = max(float(heterogeneity_fgw_tol), 1e-12)
+    if (
+        heterogeneity_fgw_structure_clip is not None
+        and float(heterogeneity_fgw_structure_clip) <= 0
+    ):
+        heterogeneity_fgw_structure_clip = None
+    heterogeneity_fgw_partial_mass = float(
+        np.clip(float(heterogeneity_fgw_partial_mass), 1e-8, 1.0)
+    )
+    heterogeneity_fgw_partial_reg = max(float(heterogeneity_fgw_partial_reg), 1e-8)
     if clustering_method not in {
         "pooled_subregion_latent",
         HETEROGENEITY_DESCRIPTOR_MODE,
+        HETEROGENEITY_FUSED_OT_MODE,
+        HETEROGENEITY_FGW_MODE,
         "ot_dictionary",
     }:
         raise ValueError(
             "subregion_clustering_method must be 'pooled_subregion_latent', "
-            f"'{HETEROGENEITY_DESCRIPTOR_MODE}', legacy alias "
+            f"'{HETEROGENEITY_DESCRIPTOR_MODE}', '{HETEROGENEITY_FUSED_OT_MODE}', "
+            f"'{HETEROGENEITY_FGW_MODE}', legacy alias "
             f"'{LEGACY_HETEROGENEITY_OT_ALIAS}', or 'ot_dictionary'."
         )
     subregion_feature_weight = max(0.0, float(subregion_feature_weight))
@@ -4634,6 +4758,7 @@ def fit_multilevel_ot(
     _progress("estimating overlap graph and cost scales")
     optimization_measures = _make_optimization_measures(measures)
     summaries = np.vstack([_measure_summary(m) for m in optimization_measures])
+    transport_measures = None
     if clustering_method in HETEROGENEITY_DESCRIPTOR_ALIASES:
         _progress(
             "building internal heterogeneity motif embeddings "
@@ -4655,6 +4780,44 @@ def fit_multilevel_ot(
             )
         )
         subregion_latent_embedding_mode = HETEROGENEITY_DESCRIPTOR_MODE
+        subregion_latent_diagnostics = {
+            "shrinkage_alpha": np.ones(len(subregion_members), dtype=np.float32),
+            "raw_to_shrunk_distance": np.zeros(len(subregion_members), dtype=np.float32),
+            "sample_ids": _subregion_sample_ids_from_members(
+                sample_ids, subregion_members
+            ),
+            "sample_aware_shrinkage": False,
+        }
+    elif clustering_method in TRANSPORT_HETEROGENEITY_MODES:
+        _progress(
+            "building attributed metric-space subregion measures for true "
+            f"{clustering_method} transport distances"
+        )
+        transport_measures, transport_metadata = build_subregion_fgw_measures(
+            measures,
+            feature_mode=heterogeneity_transport_feature_mode,
+            structure_scale=heterogeneity_fgw_structure_scale,
+            structure_clip=heterogeneity_fgw_structure_clip,
+            codebook_size=int(subregion_latent_codebook_size),
+            codebook_sample_size=int(subregion_latent_codebook_sample_size),
+            random_state=int(seed),
+            sample_ids=_subregion_sample_ids_from_members(sample_ids, subregion_members),
+        )
+        subregion_latent_embeddings = np.zeros((len(measures), 0), dtype=np.float32)
+        subregion_latent_embedding_metadata = {
+            "mode": str(clustering_method),
+            "requested_mode": str(requested_clustering_method),
+            "implemented": True,
+            "uses_ot_costs": True,
+            "label_assignment_source": "precomputed_transport_distance_matrix",
+            "measure_builder": transport_metadata,
+            "distance_note": (
+                "Subregion labels are assigned from an all-pairs transport distance "
+                "matrix over measured attributed metric spaces, not from Euclidean "
+                "descriptor vectors."
+            ),
+        }
+        subregion_latent_embedding_mode = str(clustering_method)
         subregion_latent_diagnostics = {
             "shrinkage_alpha": np.ones(len(subregion_members), dtype=np.float32),
             "raw_to_shrunk_distance": np.zeros(len(subregion_members), dtype=np.float32),
@@ -4742,6 +4905,13 @@ def fit_multilevel_ot(
                 min_cluster_size=int(min_subregions_per_cluster),
                 random_state=int(seed),
             )
+        elif clustering_method in TRANSPORT_HETEROGENEITY_MODES:
+            raise ValueError(
+                "auto_n_clusters is not yet implemented for true transport "
+                f"mode '{clustering_method}'. Run fixed K values and compare "
+                "precomputed-distance stability while the all-pairs FGW/OT path is "
+                "validation-grade."
+            )
         else:
             pilot_n_clusters = int(max(candidate_ks))
             pilot_n_init = int(auto_k_pilot_n_init)
@@ -4825,7 +4995,12 @@ def fit_multilevel_ot(
 
     n_clusters = int(selected_n_clusters)
     selected_restart_id = 0
-    if clustering_method in {"pooled_subregion_latent", HETEROGENEITY_DESCRIPTOR_MODE}:
+    if clustering_method in {
+        "pooled_subregion_latent",
+        HETEROGENEITY_DESCRIPTOR_MODE,
+        HETEROGENEITY_FUSED_OT_MODE,
+        HETEROGENEITY_FGW_MODE,
+    }:
         if clustering_method == HETEROGENEITY_DESCRIPTOR_MODE:
             _progress(
                 "clustering internal heterogeneity descriptor motif embeddings "
@@ -4833,19 +5008,57 @@ def fit_multilevel_ot(
                 "not raw tissue position or sample labels)"
             )
             label_assignment_source = "internal_heterogeneity_descriptor_motif_embeddings"
+        elif clustering_method in TRANSPORT_HETEROGENEITY_MODES:
+            _progress(
+                f"clustering subregions by precomputed {clustering_method} "
+                f"transport distances (K={n_clusters}; fixed-K validation path)"
+            )
+            label_assignment_source = f"precomputed_{clustering_method}_distance_matrix"
         else:
             _progress(
                 "clustering pooled raw-member feature-distribution subregion latent embeddings "
                 f"(K={n_clusters}; no spatial coordinates or OT costs in label assignment)"
             )
             label_assignment_source = "pooled_subregion_latent_embeddings"
-        latent_fit = fit_kmeans_on_latent_embeddings(
-            subregion_latent_embeddings,
-            n_clusters=n_clusters,
-            n_init=max(int(n_init), 1),
-            min_cluster_size=int(min_subregions_per_cluster),
-            random_state=int(seed),
-        )
+        if clustering_method in TRANSPORT_HETEROGENEITY_MODES:
+            if transport_measures is None:
+                raise RuntimeError("transport measures were not built before clustering.")
+            transport_distance_matrix, transport_distance_metadata = (
+                pairwise_transport_distance_matrix(
+                    transport_measures,
+                    mode=str(clustering_method),
+                    max_subregions=int(heterogeneity_transport_max_subregions),
+                    fused_ot_feature_weight=heterogeneity_fused_ot_feature_weight,
+                    fused_ot_coordinate_weight=heterogeneity_fused_ot_coordinate_weight,
+                    feature_cost_kind=heterogeneity_transport_feature_cost,
+                    fgw_alpha=heterogeneity_fgw_alpha,
+                    fgw_solver=heterogeneity_fgw_solver,
+                    fgw_epsilon=heterogeneity_fgw_epsilon,
+                    fgw_loss_fun=heterogeneity_fgw_loss_fun,
+                    fgw_max_iter=heterogeneity_fgw_max_iter,
+                    fgw_tol=heterogeneity_fgw_tol,
+                    fgw_partial=bool(heterogeneity_fgw_partial),
+                    fgw_partial_mass=heterogeneity_fgw_partial_mass,
+                    fgw_partial_reg=heterogeneity_fgw_partial_reg,
+                )
+            )
+            subregion_latent_embeddings = transport_distance_matrix.astype(np.float32)
+            subregion_latent_embedding_metadata["transport_distance"] = (
+                transport_distance_metadata
+            )
+            latent_fit = _cluster_precomputed_transport_distances(
+                transport_distance_matrix,
+                n_clusters=n_clusters,
+                min_subregions_per_cluster=int(min_subregions_per_cluster),
+            )
+        else:
+            latent_fit = fit_kmeans_on_latent_embeddings(
+                subregion_latent_embeddings,
+                n_clusters=n_clusters,
+                n_init=max(int(n_init), 1),
+                min_cluster_size=int(min_subregions_per_cluster),
+                random_state=int(seed),
+            )
         labels = np.asarray(latent_fit["labels"], dtype=np.int32)
         final_argmin_labels_best = np.asarray(
             latent_fit["argmin_labels"], dtype=np.int32

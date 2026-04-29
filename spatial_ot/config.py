@@ -84,6 +84,22 @@ class MultilevelOTConfig:
     heterogeneity_pair_graph_k: int = 8
     heterogeneity_pair_graph_radius: float | None = None
     heterogeneity_pair_bin_normalization: str = "per_bin"
+    heterogeneity_transport_max_subregions: int = 800
+    heterogeneity_transport_feature_mode: str = "soft_codebook"
+    heterogeneity_transport_feature_cost: str = "hellinger_codebook"
+    heterogeneity_fused_ot_feature_weight: float = 0.5
+    heterogeneity_fused_ot_coordinate_weight: float = 0.5
+    heterogeneity_fgw_alpha: float = 0.5
+    heterogeneity_fgw_solver: str = "conditional_gradient"
+    heterogeneity_fgw_epsilon: float = 0.05
+    heterogeneity_fgw_loss_fun: str = "square_loss"
+    heterogeneity_fgw_max_iter: int = 500
+    heterogeneity_fgw_tol: float = 1e-7
+    heterogeneity_fgw_structure_scale: str = "global_median"
+    heterogeneity_fgw_structure_clip: float | None = 3.0
+    heterogeneity_fgw_partial: bool = False
+    heterogeneity_fgw_partial_mass: float = 0.85
+    heterogeneity_fgw_partial_reg: float = 0.05
     shape_diagnostics: bool = True
     shape_leakage_permutations: int = 64
     compute_spot_latent: bool = True
@@ -291,6 +307,8 @@ def _validate_multilevel_experiment(
         "pooled_subregion_latent",
         "heterogeneity_descriptor_niche",
         "heterogeneity_ot_niche",
+        "heterogeneity_fused_ot_niche",
+        "heterogeneity_fgw_niche",
         "ot_dictionary",
     }
     config.ot.subregion_clustering_method = (
@@ -366,6 +384,74 @@ def _validate_multilevel_experiment(
         raise ValueError(
             "ot.heterogeneity_pair_bin_normalization must be 'per_bin' or 'global'"
         )
+    if config.ot.heterogeneity_transport_max_subregions < 0:
+        raise ValueError("ot.heterogeneity_transport_max_subregions must be >= 0")
+    config.ot.heterogeneity_transport_feature_mode = (
+        str(config.ot.heterogeneity_transport_feature_mode).strip().lower()
+    )
+    if config.ot.heterogeneity_transport_feature_mode not in {
+        "soft_codebook",
+        "whitened_features",
+        "whitened_features_plus_soft_codebook",
+    }:
+        raise ValueError(
+            "ot.heterogeneity_transport_feature_mode must be soft_codebook, "
+            "whitened_features, or whitened_features_plus_soft_codebook"
+        )
+    config.ot.heterogeneity_transport_feature_cost = (
+        str(config.ot.heterogeneity_transport_feature_cost).strip().lower()
+    )
+    if config.ot.heterogeneity_transport_feature_cost not in {
+        "hellinger_codebook",
+        "hellinger",
+        "sqeuclidean",
+        "squared_euclidean",
+    }:
+        raise ValueError(
+            "ot.heterogeneity_transport_feature_cost must be hellinger_codebook "
+            "or sqeuclidean"
+        )
+    if (
+        config.ot.heterogeneity_fused_ot_feature_weight < 0
+        or config.ot.heterogeneity_fused_ot_coordinate_weight < 0
+    ):
+        raise ValueError("ot.heterogeneity_fused_ot_*_weight values must be >= 0")
+    if (
+        config.ot.heterogeneity_fused_ot_feature_weight
+        + config.ot.heterogeneity_fused_ot_coordinate_weight
+        <= 1e-12
+    ):
+        raise ValueError("at least one fused-OT heterogeneity weight must be positive")
+    if not 0 <= config.ot.heterogeneity_fgw_alpha <= 1:
+        raise ValueError("ot.heterogeneity_fgw_alpha must be in [0, 1]")
+    config.ot.heterogeneity_fgw_solver = (
+        str(config.ot.heterogeneity_fgw_solver).strip().lower()
+    )
+    if config.ot.heterogeneity_fgw_solver not in {
+        "conditional_gradient",
+        "cg",
+        "entropic",
+        "pgd",
+        "ppa",
+    }:
+        raise ValueError(
+            "ot.heterogeneity_fgw_solver must be conditional_gradient, entropic, pgd, or ppa"
+        )
+    if config.ot.heterogeneity_fgw_epsilon <= 0:
+        raise ValueError("ot.heterogeneity_fgw_epsilon must be > 0")
+    if config.ot.heterogeneity_fgw_max_iter < 1:
+        raise ValueError("ot.heterogeneity_fgw_max_iter must be >= 1")
+    if config.ot.heterogeneity_fgw_tol <= 0:
+        raise ValueError("ot.heterogeneity_fgw_tol must be > 0")
+    if (
+        config.ot.heterogeneity_fgw_structure_clip is not None
+        and config.ot.heterogeneity_fgw_structure_clip <= 0
+    ):
+        config.ot.heterogeneity_fgw_structure_clip = None
+    if not 0 < config.ot.heterogeneity_fgw_partial_mass <= 1:
+        raise ValueError("ot.heterogeneity_fgw_partial_mass must be in (0, 1]")
+    if config.ot.heterogeneity_fgw_partial_reg <= 0:
+        raise ValueError("ot.heterogeneity_fgw_partial_reg must be > 0")
     if config.ot.geometry_eps <= 0 or config.ot.ot_eps <= 0:
         raise ValueError("ot.geometry_eps and ot.ot_eps must be > 0")
     if config.ot.rho <= 0:

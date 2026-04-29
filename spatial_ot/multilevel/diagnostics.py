@@ -9,6 +9,19 @@ LEAKAGE_PERMUTATION_P95_MARGIN_WARNING = 0.02
 LEAKAGE_PERMUTATION_MEAN_EXCESS_WARNING = 0.05
 
 
+def _candidate_cost_source(result: MultilevelOTResult) -> str:
+    method = str(result.subregion_clustering_method)
+    if method == "ot_dictionary":
+        return "ot_dictionary_candidate_costs"
+    if method == "heterogeneity_fused_ot_niche":
+        return "precomputed_heterogeneity_fused_ot_distance_to_cluster_medoids"
+    if method == "heterogeneity_fgw_niche":
+        return "precomputed_heterogeneity_fgw_distance_to_cluster_medoids"
+    if method == "heterogeneity_descriptor_niche":
+        return "internal_heterogeneity_descriptor_embedding_squared_euclidean"
+    return "pooled_subregion_latent_embedding_squared_euclidean"
+
+
 def assigned_transport_cost_decomposition(result: MultilevelOTResult) -> dict[str, float]:
     geometry = np.asarray(result.subregion_assigned_geometry_transport_costs, dtype=np.float64)
     feature = np.asarray(result.subregion_assigned_feature_transport_costs, dtype=np.float64)
@@ -23,7 +36,7 @@ def assigned_transport_cost_decomposition(result: MultilevelOTResult) -> dict[st
             ],
             dtype=np.float64,
         )
-        assignment_cost_source = "ot_dictionary_candidate_costs"
+        assignment_cost_source = _candidate_cost_source(result)
     else:
         assigned_transport_objective = transport_plus_transform
         assignment_cost_source = "fixed_label_ot_atom_diagnostics_not_primary_label_cost"
@@ -75,11 +88,7 @@ def cost_reliability_metrics(result: MultilevelOTResult) -> dict[str, object]:
     mixed_fallback = np.mean(np.any(used_fallback != used_fallback[:, :1], axis=1)) if used_fallback.size else 0.0
     return {
         "effective_eps_matrix_available": True,
-        "candidate_cost_source": (
-            "ot_dictionary_candidate_costs"
-            if result.subregion_clustering_uses_spatial
-            else "pooled_subregion_latent_embedding_squared_euclidean"
-        ),
+        "candidate_cost_source": _candidate_cost_source(result),
         "candidate_cost_uses_spatial": bool(result.subregion_clustering_uses_spatial),
         "fallback_fraction_all_costs": float(np.mean(used_fallback.astype(np.float32))) if used_fallback.size else 0.0,
         "fallback_fraction_assigned": float(np.mean(result.subregion_assigned_used_ot_fallback.astype(np.float32))),

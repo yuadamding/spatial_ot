@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4
+
+- Add true transport-defined heterogeneity clustering modes: `heterogeneity_fused_ot_niche` uses balanced OT on a fused feature-plus-canonical-coordinate ground cost, and `heterogeneity_fgw_niche` uses POT fused Gromov-Wasserstein on measured attributed subregion support objects.
+- Keep `heterogeneity_descriptor_niche` as the scalable descriptor baseline and the legacy `heterogeneity_ot_niche` name as its alias; the new fused-OT/FGW modes set `uses_ot_costs=true` and consume an all-pairs precomputed transport distance matrix.
+- Add transport-mode config, CLI, script, summary, and example-TOML controls, including FGW alpha, solver, epsilon, structure scaling, partial-FGW options, feature-cost selection, and an explicit `heterogeneity_transport_max_subregions` safety cap.
+- Cluster true transport distance matrices with precomputed-distance average linkage plus medoid diagnostics instead of KMeans on descriptor vectors.
+- Add targeted tests for FGW feature-only and structure-only limits, fused-coordinate OT behavior, and transport distance cap handling.
+- Align package metadata with the local `0.2.4` state.
+
 ## 0.2.3
 
 - Expose heterogeneity descriptor block weights as reproducible config, CLI, and script parameters instead of hidden environment-only controls.

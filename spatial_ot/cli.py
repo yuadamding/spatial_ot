@@ -1078,9 +1078,11 @@ def build_parser() -> argparse.ArgumentParser:
             "pooled_subregion_latent",
             "heterogeneity_descriptor_niche",
             "heterogeneity_ot_niche",
+            "heterogeneity_fused_ot_niche",
+            "heterogeneity_fgw_niche",
             "ot_dictionary",
         ],
-        help="How fitted subregions receive niche labels. heterogeneity_descriptor_niche clusters block-normalized internal spatial-cell-state motif descriptors; heterogeneity_ot_niche is a legacy alias until true fused-OT/FGW modes are implemented; pooled_subregion_latent is the composition/distribution-summary baseline; ot_dictionary keeps the historical OT-dictionary assignment.",
+        help="How fitted subregions receive niche labels. heterogeneity_descriptor_niche clusters block-normalized motif descriptors; heterogeneity_fused_ot_niche and heterogeneity_fgw_niche use all-pairs transport distances; heterogeneity_ot_niche is the legacy descriptor alias; pooled_subregion_latent is the composition baseline; ot_dictionary keeps the historical OT assignment.",
     )
     multilevel.add_argument(
         "--subregion-latent-embedding-mode",
@@ -1178,6 +1180,66 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["per_bin", "global"],
         help="Whether pair co-occurrence tensors are normalized per distance bin or globally.",
     )
+    multilevel.add_argument(
+        "--heterogeneity-transport-max-subregions",
+        type=int,
+        default=None,
+        help="Safety cap for all-pairs fused-OT/FGW distance matrices; 0 disables the cap.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-transport-feature-mode",
+        default=None,
+        choices=[
+            "soft_codebook",
+            "whitened_features",
+            "whitened_features_plus_soft_codebook",
+        ],
+        help="Node attributes used by true heterogeneity transport modes.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-transport-feature-cost",
+        default=None,
+        choices=["hellinger_codebook", "hellinger", "sqeuclidean", "squared_euclidean"],
+        help="Pointwise feature cost used by fused-OT/FGW modes.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-fused-ot-feature-weight",
+        type=float,
+        default=None,
+        help="Feature part weight in heterogeneity_fused_ot_niche.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-fused-ot-coordinate-weight",
+        type=float,
+        default=None,
+        help="Canonical-coordinate part weight in heterogeneity_fused_ot_niche.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-fgw-alpha",
+        type=float,
+        default=None,
+        help="FGW feature/structure tradeoff: 0 feature-only, 1 structure-only.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-fgw-solver",
+        default=None,
+        choices=["conditional_gradient", "cg", "entropic", "pgd", "ppa"],
+        help="Solver for heterogeneity_fgw_niche.",
+    )
+    multilevel.add_argument("--heterogeneity-fgw-epsilon", type=float, default=None)
+    multilevel.add_argument("--heterogeneity-fgw-loss-fun", default=None)
+    multilevel.add_argument("--heterogeneity-fgw-max-iter", type=int, default=None)
+    multilevel.add_argument("--heterogeneity-fgw-tol", type=float, default=None)
+    multilevel.add_argument("--heterogeneity-fgw-structure-scale", default=None)
+    multilevel.add_argument("--heterogeneity-fgw-structure-clip", type=float, default=None)
+    multilevel.add_argument(
+        "--heterogeneity-fgw-partial",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use entropic partial FGW instead of balanced FGW.",
+    )
+    multilevel.add_argument("--heterogeneity-fgw-partial-mass", type=float, default=None)
+    multilevel.add_argument("--heterogeneity-fgw-partial-reg", type=float, default=None)
     multilevel.add_argument(
         "--shape-diagnostics",
         action=argparse.BooleanOptionalAction,
@@ -1557,9 +1619,11 @@ def build_parser() -> argparse.ArgumentParser:
             "pooled_subregion_latent",
             "heterogeneity_descriptor_niche",
             "heterogeneity_ot_niche",
+            "heterogeneity_fused_ot_niche",
+            "heterogeneity_fgw_niche",
             "ot_dictionary",
         ],
-        help="How fitted subregions receive niche labels. heterogeneity_descriptor_niche clusters block-normalized internal spatial-cell-state motif descriptors; heterogeneity_ot_niche is a legacy alias until true fused-OT/FGW modes are implemented; pooled_subregion_latent is the composition/distribution-summary baseline; ot_dictionary keeps the historical OT-dictionary assignment.",
+        help="How fitted subregions receive niche labels. heterogeneity_descriptor_niche clusters block-normalized motif descriptors; heterogeneity_fused_ot_niche and heterogeneity_fgw_niche use all-pairs transport distances; heterogeneity_ot_niche is the legacy descriptor alias; pooled_subregion_latent is the composition baseline; ot_dictionary keeps the historical OT assignment.",
     )
     optimal_search.add_argument(
         "--subregion-latent-embedding-mode",
@@ -1656,6 +1720,72 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["per_bin", "global"],
         help="Whether pair co-occurrence tensors are normalized per distance bin or globally.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-transport-max-subregions",
+        type=int,
+        default=None,
+        help="Safety cap for all-pairs fused-OT/FGW distance matrices; 0 disables the cap.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-transport-feature-mode",
+        default=None,
+        choices=[
+            "soft_codebook",
+            "whitened_features",
+            "whitened_features_plus_soft_codebook",
+        ],
+        help="Node attributes used by true heterogeneity transport modes.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-transport-feature-cost",
+        default=None,
+        choices=["hellinger_codebook", "hellinger", "sqeuclidean", "squared_euclidean"],
+        help="Pointwise feature cost used by fused-OT/FGW modes.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-fused-ot-feature-weight",
+        type=float,
+        default=None,
+        help="Feature part weight in heterogeneity_fused_ot_niche.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-fused-ot-coordinate-weight",
+        type=float,
+        default=None,
+        help="Canonical-coordinate part weight in heterogeneity_fused_ot_niche.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-fgw-alpha",
+        type=float,
+        default=None,
+        help="FGW feature/structure tradeoff: 0 feature-only, 1 structure-only.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-fgw-solver",
+        default=None,
+        choices=["conditional_gradient", "cg", "entropic", "pgd", "ppa"],
+        help="Solver for heterogeneity_fgw_niche.",
+    )
+    optimal_search.add_argument("--heterogeneity-fgw-epsilon", type=float, default=None)
+    optimal_search.add_argument("--heterogeneity-fgw-loss-fun", default=None)
+    optimal_search.add_argument("--heterogeneity-fgw-max-iter", type=int, default=None)
+    optimal_search.add_argument("--heterogeneity-fgw-tol", type=float, default=None)
+    optimal_search.add_argument("--heterogeneity-fgw-structure-scale", default=None)
+    optimal_search.add_argument(
+        "--heterogeneity-fgw-structure-clip", type=float, default=None
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-fgw-partial",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use entropic partial FGW instead of balanced FGW.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-fgw-partial-mass", type=float, default=None
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-fgw-partial-reg", type=float, default=None
     )
     optimal_search.add_argument(
         "--shape-diagnostics",
@@ -1872,6 +2002,22 @@ def _resolve_multilevel_config_from_args(
         "heterogeneity_pair_graph_k",
         "heterogeneity_pair_graph_radius",
         "heterogeneity_pair_bin_normalization",
+        "heterogeneity_transport_max_subregions",
+        "heterogeneity_transport_feature_mode",
+        "heterogeneity_transport_feature_cost",
+        "heterogeneity_fused_ot_feature_weight",
+        "heterogeneity_fused_ot_coordinate_weight",
+        "heterogeneity_fgw_alpha",
+        "heterogeneity_fgw_solver",
+        "heterogeneity_fgw_epsilon",
+        "heterogeneity_fgw_loss_fun",
+        "heterogeneity_fgw_max_iter",
+        "heterogeneity_fgw_tol",
+        "heterogeneity_fgw_structure_scale",
+        "heterogeneity_fgw_structure_clip",
+        "heterogeneity_fgw_partial",
+        "heterogeneity_fgw_partial_mass",
+        "heterogeneity_fgw_partial_reg",
         "shape_diagnostics",
         "shape_leakage_permutations",
         "compute_spot_latent",
@@ -1893,7 +2039,7 @@ def _resolve_multilevel_config_from_args(
             if name == "allow_observed_hull_geometry"
             else name
         )
-        _set_if_not_none(config.ot, attr, getattr(args, name))
+        _set_if_not_none(config.ot, attr, getattr(args, name, None))
     if (
         config.ot.basic_niche_size_um is not None
         and float(config.ot.basic_niche_size_um) <= 0
