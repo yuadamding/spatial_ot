@@ -5,10 +5,13 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pandas as pd
+
 from spatial_ot.multilevel.concerns import (
     build_concern_resolution_report,
     write_concern_resolution_report,
 )
+from spatial_ot.multilevel.validation import spatial_niche_validation_report
 
 
 def _write_summary(path: Path, *, coordinate_only: bool, warnings: list[str], auto_k: bool = True) -> None:
@@ -88,6 +91,11 @@ def test_concern_report_requires_baseline_and_stability_for_feature_boundaries(t
     assert latent_claim["blocking_for_primary_claim"] is False
     assert latent_claim["blocking_for_within_niche_latent_claim"] is True
     assert "within_niche_latent_heterogeneity_claim" in report["within_niche_latent_blocking_concerns"]
+    suite = report["validation_suite"]
+    assert suite["shrinkage_tau_sensitivity"]
+    assert suite["heterogeneity_weight_sensitivity"]
+    assert suite["codebook_size_sensitivity"]
+    assert suite["spatial_niche_validation"][0].endswith("spatial-niche-validation --run-dir " + f'"{run_dir.as_posix()}"')
 
 
 def test_concern_report_accepts_coordinate_baseline_and_writes_outputs(tmp_path: Path) -> None:
@@ -219,3 +227,33 @@ def test_validate_run_concerns_strict_exits_nonzero_for_blockers(tmp_path: Path)
 
     assert completed.returncode == 1
     assert "blocking_concerns" in completed.stdout
+
+
+def test_spatial_niche_validation_reports_cluster_and_homophily_qc(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _write_summary(run_dir, coordinate_only=True, warnings=[], auto_k=False)
+    table = pd.DataFrame(
+        {
+            "subregion_id": list(range(6)),
+            "center_x_um": [0.0, 1.0, 10.0, 11.0, 0.0, 1.0],
+            "center_y_um": [0.0, 0.0, 0.0, 0.0, 10.0, 10.0],
+            "sample_id": ["s1", "s1", "s1", "s1", "s2", "s2"],
+            "cluster_int": [0, 0, 1, 1, 0, 1],
+            "n_cells": [4, 5, 6, 7, 3, 8],
+            "shape_area_um2": [20.0, 22.0, 19.0, 21.0, 18.0, 24.0],
+            "subregion_latent_shrinkage_alpha": [0.1, 0.2, 0.8, 0.7, 0.15, 0.9],
+            "subregion_latent_raw_to_shrunk_distance": [5.0, 4.0, 1.0, 1.2, 5.5, 0.8],
+        }
+    )
+    table.to_parquet(run_dir / "subregions_multilevel_ot.parquet", index=False)
+
+    report = spatial_niche_validation_report(run_dir, max_subregions=0, knn=1, n_permutations=2)
+
+    assert report["n_subregions"] == 6
+    assert report["n_clusters"] == 2
+    assert report["spatial_adjacency_homophily"]["available"] is True
+    assert report["spatial_adjacency_homophily"]["observed"] is not None
+    assert Path(report["outputs"]["json"]).exists()
+    assert Path(report["outputs"]["cluster_csv"]).exists()
+    cluster_zero = next(row for row in report["cluster_statistics"] if row["cluster"] == 0)
+    assert cluster_zero["subregion_latent_shrinkage_alpha"]["median"] == 0.15

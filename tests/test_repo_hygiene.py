@@ -48,12 +48,12 @@ def test_no_generated_files_tracked_when_git_metadata_is_available() -> None:
         assert not any(path.endswith(suffix) for suffix in forbidden_suffixes)
 
 
-def test_package_version_matches_0_1_13_state() -> None:
+def test_package_version_matches_0_1_15_state() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
     package_init = (repo_root / "spatial_ot" / "__init__.py").read_text()
-    assert 'version = "0.1.14"' in pyproject_toml
-    assert '__version__ = "0.1.14"' in package_init
+    assert 'version = "0.1.15"' in pyproject_toml
+    assert '__version__ = "0.1.15"' in package_init
 
 
 def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:

@@ -1,3 +1,41 @@
+Metadata-Version: 2.4
+Name: spatial-ot
+Version: 0.1.15
+Summary: Spatial subregion discovery with pooled feature-latent niche clustering and OT diagnostics.
+Author: Yu Adam Ding
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: Scientific/Engineering :: Bio-Informatics
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: anndata<0.12,>=0.11.4; python_version < "3.11"
+Requires-Dist: anndata>=0.12; python_version >= "3.11"
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: numpy>=2.0
+Requires-Dist: pandas>=2.0
+Requires-Dist: pyarrow>=15.0
+Requires-Dist: scanpy>=1.11
+Requires-Dist: scikit-learn>=1.5
+Requires-Dist: scipy>=1.13
+Requires-Dist: torch>=2.4
+Requires-Dist: POT>=0.9
+Requires-Dist: tomli>=2.0; python_version < "3.11"
+Provides-Extra: geometry
+Requires-Dist: geopandas>=0.14; extra == "geometry"
+Requires-Dist: shapely>=2.0; extra == "geometry"
+Provides-Extra: parallel
+Requires-Dist: joblib>=1.4; extra == "parallel"
+Requires-Dist: tqdm>=4.66; extra == "parallel"
+Provides-Extra: viz
+Requires-Dist: umap-learn>=0.5; extra == "viz"
+Provides-Extra: dev
+Requires-Dist: mypy>=1.10; extra == "dev"
+Requires-Dist: pre-commit>=3.7; extra == "dev"
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: pytest-cov>=5; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"
+
 # spatial_ot
 
 `spatial_ot` is a compact research package for multilevel spatial subregion discovery and pooled feature-latent niche clustering.
