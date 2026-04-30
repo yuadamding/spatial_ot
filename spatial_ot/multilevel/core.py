@@ -4131,8 +4131,10 @@ def fit_multilevel_ot(
     heterogeneity_fgw_loss_fun: str = "square_loss",
     heterogeneity_fgw_max_iter: int = 500,
     heterogeneity_fgw_tol: float = 1e-7,
-    heterogeneity_fgw_n_init: int = 1,
-    heterogeneity_fgw_init: str | tuple[str, ...] | list[str] | None = "outer_product",
+    heterogeneity_fgw_n_init: int = 3,
+    heterogeneity_fgw_init: str | tuple[str, ...] | list[str] | None = (
+        "outer_product,feature_ot,coordinate_ot"
+    ),
     heterogeneity_fgw_structure_scale: str | float = "global_median",
     heterogeneity_fgw_structure_clip: float | None = 3.0,
     heterogeneity_fgw_partial: bool = False,
@@ -4273,6 +4275,14 @@ def fit_multilevel_ot(
         raise ValueError(
             "split marker/codebook heterogeneity transport feature cost requires "
             "heterogeneity_transport_feature_mode='whitened_features_plus_soft_codebook'."
+        )
+    if (
+        heterogeneity_transport_feature_mode == "whitened_features_plus_soft_codebook"
+        and heterogeneity_transport_feature_cost not in split_feature_costs
+    ):
+        raise ValueError(
+            "heterogeneity_transport_feature_mode='whitened_features_plus_soft_codebook' "
+            "requires heterogeneity_transport_feature_cost='split_marker_codebook'."
         )
     heterogeneity_transport_marker_feature_weight = max(
         float(heterogeneity_transport_marker_feature_weight), 0.0

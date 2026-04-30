@@ -200,6 +200,21 @@ def _numeric_summary(values: list[float] | np.ndarray) -> dict[str, float | int 
     }
 
 
+def _scaled_cost_summary(
+    chunks: list[np.ndarray],
+    *,
+    scale: float,
+    weight: float = 1.0,
+) -> dict[str, float | int | None]:
+    if not chunks:
+        return {"count": 0}
+    values = np.concatenate(chunks).astype(np.float64, copy=False)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return {"count": 0}
+    return _numeric_summary(float(weight) * values / max(float(scale), 1e-12))
+
+
 def _pairwise_sqeuclidean(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     a = np.asarray(left, dtype=np.float64)
     b = np.asarray(right, dtype=np.float64)
@@ -237,10 +252,19 @@ def _validate_feature_cost_mode(
     feature_cost_kind: str,
 ) -> None:
     requested = str(feature_cost_kind or "hellinger_codebook").strip().lower()
-    if requested not in HELLINGER_FEATURE_COSTS:
-        return
     left_mode = str(getattr(left, "feature_mode", "soft_codebook"))
     right_mode = str(getattr(right, "feature_mode", "soft_codebook"))
+    if (
+        "whitened_features_plus_soft_codebook" in {left_mode, right_mode}
+        and requested not in SPLIT_MIXED_FEATURE_COSTS
+    ):
+        raise ValueError(
+            "Mixed feature mode requires feature_cost_kind='split_marker_codebook'. "
+            "Signed whitened marker features and probability-valued codebook "
+            "posteriors should not be compared with a single generic distance."
+        )
+    if requested not in HELLINGER_FEATURE_COSTS:
+        return
     if left_mode != "soft_codebook" or right_mode != "soft_codebook":
         raise ValueError(
             "Hellinger feature cost requires probability-valued "
@@ -314,12 +338,12 @@ def _raw_feature_cost(
     codebook_feature_weight: float = 0.5,
 ) -> np.ndarray:
     requested = str(feature_cost_kind or "hellinger_codebook").strip().lower()
+    _validate_feature_cost_mode(
+        left,
+        right,
+        feature_cost_kind=requested,
+    )
     if requested in HELLINGER_FEATURE_COSTS:
-        _validate_feature_cost_mode(
-            left,
-            right,
-            feature_cost_kind=requested,
-        )
         return hellinger_cost(left.features, right.features)
     if requested in SPLIT_MIXED_FEATURE_COSTS:
         marker_cost, codebook_cost = _mixed_feature_cost_components(left, right)
@@ -1038,8 +1062,10 @@ def fgw_distance(
     codebook_feature_scale: float | None = None,
     marker_feature_weight: float = 0.5,
     codebook_feature_weight: float = 0.5,
-    n_init: int = 1,
-    init: str | tuple[str, ...] | list[str] | None = "outer_product",
+    n_init: int = 3,
+    init: str | tuple[str, ...] | list[str] | None = (
+        "outer_product,feature_ot,coordinate_ot"
+    ),
     random_state: int = 1337,
     return_coupling: bool = False,
 ) -> tuple[float, np.ndarray | None, dict[str, object]]:
@@ -1436,16 +1462,62 @@ def fit_transport_cost_scales(
         "feature_cost_scale_summary": _numeric_summary(
             np.concatenate(feature_values) if feature_values else []
         ),
+        "scaled_feature_cost_summary": _scaled_cost_summary(
+            feature_values,
+            scale=scales.feature_scale,
+        ),
         "marker_feature_cost_scale_summary": _numeric_summary(
             np.concatenate(marker_feature_values) if marker_feature_values else []
+        ),
+        "scaled_marker_feature_cost_summary": _scaled_cost_summary(
+            marker_feature_values,
+            scale=scales.marker_feature_scale or 1.0,
+            weight=_feature_component_weights(
+                marker_feature_weight,
+                codebook_feature_weight,
+            )[0],
         ),
         "codebook_feature_cost_scale_summary": _numeric_summary(
             np.concatenate(codebook_feature_values) if codebook_feature_values else []
         ),
+        "scaled_codebook_feature_cost_summary": _scaled_cost_summary(
+            codebook_feature_values,
+            scale=scales.codebook_feature_scale or 1.0,
+            weight=_feature_component_weights(
+                marker_feature_weight,
+                codebook_feature_weight,
+            )[1],
+        ),
         "coordinate_cost_scale_summary": _numeric_summary(
             np.concatenate(coordinate_values) if coordinate_values else []
         ),
+        "scaled_coordinate_cost_summary": _scaled_cost_summary(
+            coordinate_values,
+            scale=scales.coordinate_scale,
+        ),
     }
+    marker_summary = metadata["scaled_marker_feature_cost_summary"]
+    codebook_summary = metadata["scaled_codebook_feature_cost_summary"]
+    if (
+        isinstance(marker_summary, dict)
+        and int(marker_summary.get("count", 0) or 0) > 0
+        and isinstance(codebook_summary, dict)
+        and int(codebook_summary.get("count", 0) or 0) > 0
+    ):
+        marker_mean = float(marker_summary.get("mean", 0.0) or 0.0)
+        codebook_mean = float(codebook_summary.get("mean", 0.0) or 0.0)
+        total_feature_mean = marker_mean + codebook_mean
+        metadata["transport_effective_feature_component_contributions"] = {
+            "mean_marker_feature_term": marker_mean,
+            "mean_codebook_feature_term": codebook_mean,
+            "mean_total_feature_term": total_feature_mean,
+            "fraction_marker_within_feature": float(
+                marker_mean / max(total_feature_mean, 1e-12)
+            ),
+            "fraction_codebook_within_feature": float(
+                codebook_mean / max(total_feature_mean, 1e-12)
+            ),
+        }
     return scales, metadata
 
 
@@ -1469,8 +1541,10 @@ def pairwise_transport_distance_matrix(
     fgw_loss_fun: str = "square_loss",
     fgw_max_iter: int = 500,
     fgw_tol: float = 1e-7,
-    fgw_n_init: int = 1,
-    fgw_init: str | tuple[str, ...] | list[str] | None = "outer_product",
+    fgw_n_init: int = 3,
+    fgw_init: str | tuple[str, ...] | list[str] | None = (
+        "outer_product,feature_ot,coordinate_ot"
+    ),
     fgw_partial: bool = False,
     fgw_partial_mass: float = 0.85,
     fgw_partial_reg: float = 0.05,
@@ -1498,6 +1572,10 @@ def pairwise_transport_distance_matrix(
     )
     distances = np.zeros((n, n), dtype=np.float32)
     solved: list[float] = []
+    fgw_objective_spreads: list[float] = []
+    fgw_unstable_pairs = 0
+    fgw_pairs_with_multiple_inits = 0
+    fgw_best_init_counts: dict[str, int] = {}
     for left_idx in range(n):
         for right_idx in range(left_idx + 1, n):
             if requested == HETEROGENEITY_FUSED_OT_MODE:
@@ -1543,6 +1621,20 @@ def pairwise_transport_distance_matrix(
                     partial_reg=fgw_partial_reg,
                     return_coupling=False,
                 )
+                objective_by_init = _meta.get("fgw_objective_by_init")
+                if isinstance(objective_by_init, dict) and len(objective_by_init) > 1:
+                    fgw_pairs_with_multiple_inits += 1
+                spread = _meta.get("fgw_objective_spread")
+                if spread is not None and np.isfinite(float(spread)):
+                    fgw_objective_spreads.append(float(spread))
+                if bool(_meta.get("fgw_unstable_pair", False)):
+                    fgw_unstable_pairs += 1
+                best_init = _meta.get("fgw_best_init")
+                if best_init is not None:
+                    key = str(best_init)
+                    fgw_best_init_counts[key] = (
+                        int(fgw_best_init_counts.get(key, 0)) + 1
+                    )
             distances[left_idx, right_idx] = distances[right_idx, left_idx] = float(
                 value
             )
@@ -1590,6 +1682,18 @@ def pairwise_transport_distance_matrix(
                 "tol": float(fgw_tol),
                 "n_init": int(max(int(fgw_n_init), 1)),
                 "init": str(fgw_init),
+                "fgw_multistart_summary": {
+                    "n_pairs": int(n * (n - 1) // 2),
+                    "n_pairs_with_multiple_inits": int(fgw_pairs_with_multiple_inits),
+                    "n_unstable_pairs": int(fgw_unstable_pairs),
+                    "fraction_unstable_pairs": float(
+                        fgw_unstable_pairs / max(int(n * (n - 1) // 2), 1)
+                    ),
+                    "objective_spread_summary": _numeric_summary(
+                        np.asarray(fgw_objective_spreads, dtype=np.float64)
+                    ),
+                    "best_init_counts": dict(fgw_best_init_counts),
+                },
                 "partial": bool(fgw_partial),
                 "partial_mass": float(fgw_partial_mass),
                 "partial_reg": float(fgw_partial_reg),

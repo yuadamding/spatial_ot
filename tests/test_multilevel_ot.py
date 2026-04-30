@@ -1935,6 +1935,26 @@ def test_hellinger_feature_cost_rejects_signed_whitened_features() -> None:
         feature_cost(left, right, feature_cost_kind="hellinger_codebook")
 
 
+def test_mixed_feature_mode_requires_split_transport_cost() -> None:
+    coords = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64)
+    base = _fgw_measure(
+        coords,
+        np.array([[0.0, 0.0, 1.0, 0.0], [2.0, 0.0, 0.0, 1.0]], dtype=np.float64),
+    )
+    mixed = SubregionFGWMeasure(
+        coords=base.coords,
+        features=base.features,
+        weights=base.weights,
+        structure=base.structure,
+        feature_mode="whitened_features_plus_soft_codebook",
+        n_whitened_features=2,
+        n_codebook_features=2,
+    )
+
+    with pytest.raises(ValueError, match="Mixed feature mode requires"):
+        feature_cost(mixed, mixed, feature_cost_kind="sqeuclidean")
+
+
 def test_split_mixed_feature_cost_uses_marker_and_codebook_components() -> None:
     coords = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64)
     base = _fgw_measure(
@@ -2046,6 +2066,36 @@ def test_balanced_fgw_records_multistart_audit_metadata() -> None:
     assert meta["fgw_objective_spread"] is not None
     assert meta["source_marginal_error"] < 1e-5
     assert meta["target_marginal_error"] < 1e-5
+
+
+def test_pairwise_fgw_distance_matrix_summarizes_multistart_instability() -> None:
+    coords_left = np.array([[0.0, 0.0], [1.0, 0.0], [0.2, 0.9]], dtype=np.float64)
+    coords_right = np.array([[0.0, 0.0], [0.8, 0.1], [0.1, 0.7]], dtype=np.float64)
+    features = np.eye(3, dtype=np.float64)
+    measures = [
+        _fgw_measure(coords_left, features),
+        _fgw_measure(coords_right, features[[1, 0, 2]]),
+    ]
+
+    distances, metadata = pairwise_transport_distance_matrix(
+        measures,
+        mode=HETEROGENEITY_FGW_MODE,
+        max_subregions=2,
+        feature_cost_kind="sqeuclidean",
+        fgw_alpha=0.5,
+        fgw_max_iter=80,
+        fgw_tol=1e-8,
+        fgw_n_init=3,
+        fgw_init="outer_product,feature_ot,coordinate_ot",
+    )
+
+    assert distances.shape == (2, 2)
+    assert np.isfinite(distances[0, 1])
+    summary = metadata["fgw_multistart_summary"]
+    assert summary["n_pairs"] == 1
+    assert summary["n_pairs_with_multiple_inits"] == 1
+    assert sum(summary["best_init_counts"].values()) == 1
+    assert summary["objective_spread_summary"]["count"] == 1
 
 
 def test_fused_ot_distance_uses_cross_coordinate_cost() -> None:

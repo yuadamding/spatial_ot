@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.7
+
+- Require `split_marker_codebook` whenever transport node features use `whitened_features_plus_soft_codebook`, preventing accidental generic Euclidean or Hellinger distances over mixed signed/probability-valued blocks.
+- Change validation-scale balanced FGW defaults to three starts (`outer_product,feature_ot,coordinate_ot`) instead of a single outer-product initialization.
+- Add distance-matrix-level FGW multistart summaries, including pairs with multiple starts, unstable-pair counts/fractions, objective-spread summaries, and best-initialization counts.
+- Add scaled marker/codebook/coordinate cost-contribution summaries to fitted transport cost-scale metadata.
+- Align package metadata with the local `0.2.7` state.
+
 ## 0.2.6
 
 - Add an explicit split marker/codebook feature cost for mixed transport node features: signed whitened marker features use squared Euclidean cost while soft codebook posteriors use Hellinger cost, with separate component weights and fitted scales.

@@ -99,8 +99,8 @@ class MultilevelOTConfig:
     heterogeneity_fgw_loss_fun: str = "square_loss"
     heterogeneity_fgw_max_iter: int = 500
     heterogeneity_fgw_tol: float = 1e-7
-    heterogeneity_fgw_n_init: int = 1
-    heterogeneity_fgw_init: str = "outer_product"
+    heterogeneity_fgw_n_init: int = 3
+    heterogeneity_fgw_init: str = "outer_product,feature_ot,coordinate_ot"
     heterogeneity_fgw_structure_scale: str = "global_median"
     heterogeneity_fgw_structure_clip: float | None = 3.0
     heterogeneity_fgw_partial: bool = False
@@ -440,6 +440,20 @@ def _validate_multilevel_experiment(
             "ot.heterogeneity_transport_feature_cost=split_marker_codebook "
             "requires ot.heterogeneity_transport_feature_mode="
             "'whitened_features_plus_soft_codebook'"
+        )
+    if (
+        config.ot.heterogeneity_transport_feature_mode
+        == "whitened_features_plus_soft_codebook"
+        and config.ot.heterogeneity_transport_feature_cost
+        not in {
+            "split_marker_codebook",
+            "mixed_marker_codebook",
+            "marker_sqeuclidean_codebook_hellinger",
+        }
+    ):
+        raise ValueError(
+            "ot.heterogeneity_transport_feature_mode='whitened_features_plus_soft_codebook' "
+            "requires ot.heterogeneity_transport_feature_cost='split_marker_codebook'"
         )
     if (
         config.ot.heterogeneity_transport_marker_feature_weight < 0

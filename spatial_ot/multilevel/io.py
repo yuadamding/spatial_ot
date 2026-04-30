@@ -1670,8 +1670,10 @@ def run_multilevel_ot_on_h5ad(
     heterogeneity_fgw_loss_fun: str = "square_loss",
     heterogeneity_fgw_max_iter: int = 500,
     heterogeneity_fgw_tol: float = 1e-7,
-    heterogeneity_fgw_n_init: int = 1,
-    heterogeneity_fgw_init: str | tuple[str, ...] | list[str] | None = "outer_product",
+    heterogeneity_fgw_n_init: int = 3,
+    heterogeneity_fgw_init: str | tuple[str, ...] | list[str] | None = (
+        "outer_product,feature_ot,coordinate_ot"
+    ),
     heterogeneity_fgw_structure_scale: str | float = "global_median",
     heterogeneity_fgw_structure_clip: float | None = 3.0,
     heterogeneity_fgw_partial: bool = False,

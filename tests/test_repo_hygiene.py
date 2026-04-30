@@ -58,8 +58,8 @@ def test_package_version_matches_0_2_5_state() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
     package_init = (repo_root / "spatial_ot" / "__init__.py").read_text()
-    assert 'version = "0.2.6"' in pyproject_toml
-    assert '__version__ = "0.2.6"' in package_init
+    assert 'version = "0.2.7"' in pyproject_toml
+    assert '__version__ = "0.2.7"' in package_init
 
 
 def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
@@ -508,8 +508,11 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "heterogeneity_fgw_alpha = 0.5" in config_toml
     assert 'heterogeneity_fused_ot_solver = "emd"' in config_toml
     assert 'heterogeneity_fgw_solver = "conditional_gradient"' in config_toml
-    assert "heterogeneity_fgw_n_init = 1" in config_toml
-    assert 'heterogeneity_fgw_init = "outer_product"' in config_toml
+    assert "heterogeneity_fgw_n_init = 3" in config_toml
+    assert (
+        'heterogeneity_fgw_init = "outer_product,feature_ot,coordinate_ot"'
+        in config_toml
+    )
     assert "joint_refinement_max_move_fraction = 0.05" in config_toml
     assert "auto_n_clusters = false" in config_toml
     assert (
