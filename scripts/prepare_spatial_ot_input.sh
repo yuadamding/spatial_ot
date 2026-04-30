@@ -12,7 +12,9 @@ OUTPUT_H5AD="${OUTPUT_H5AD:-${INPUT_DIR}/spatial_ot_input_pooled.h5ad}"
 REFRESH_POOLED_INPUT="${REFRESH_POOLED_INPUT:-0}"
 REFRESH_PREPARED_FEATURES="${REFRESH_PREPARED_FEATURES:-0}"
 SAMPLE_GLOB="${SAMPLE_GLOB:-*_cells_marker_genes_umap3d.h5ad}"
+SAMPLE_ID_PREFIX="${SAMPLE_ID_PREFIX:-}"
 SAMPLE_ID_SUFFIX="${SAMPLE_ID_SUFFIX:-_cells_marker_genes_umap3d}"
+SAMPLE_ID_CASE="${SAMPLE_ID_CASE:-preserve}"
 X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-512}"
 FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X_spatial_ot_x_svd_${X_FEATURE_COMPONENTS}}"
 PREPARED_FEATURE_OBSM_KEY="${PREPARED_FEATURE_OBSM_KEY:-X_spatial_ot_x_svd_${X_FEATURE_COMPONENTS}}"
@@ -94,7 +96,9 @@ if [[ "$REFRESH_POOLED_INPUT" == "1" || ! -f "$OUTPUT_H5AD" ]]; then
     --pooled-spatial-y-key "$POOLED_SPATIAL_Y_KEY" \
     --sample-obs-key "$SAMPLE_OBS_KEY" \
     --source-file-obs-key "$SOURCE_FILE_OBS_KEY" \
-    --sample-id-suffix "$SAMPLE_ID_SUFFIX"
+    --sample-id-prefix "$SAMPLE_ID_PREFIX" \
+    --sample-id-suffix "$SAMPLE_ID_SUFFIX" \
+    --sample-id-case "$SAMPLE_ID_CASE"
 fi
 
 PREPARE_ARGS=()

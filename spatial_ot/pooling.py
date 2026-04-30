@@ -15,11 +15,26 @@ from scipy import sparse
 from .feature_source import PREPARED_FEATURES_UNS_KEY
 
 
-def _sample_id_from_path(path: Path, suffix: str) -> str:
+def _sample_id_from_path(
+    path: Path,
+    suffix: str,
+    *,
+    prefix: str = "",
+    case: str = "preserve",
+) -> str:
     stem = path.stem
+    if prefix and stem.startswith(prefix):
+        stem = stem[len(prefix) :]
     if suffix and stem.endswith(suffix):
-        return stem[: -len(suffix)]
-    return stem
+        stem = stem[: -len(suffix)]
+    normalized_case = str(case).strip().lower()
+    if normalized_case in {"preserve", "none", ""}:
+        return stem
+    if normalized_case == "lower":
+        return stem.lower()
+    if normalized_case == "upper":
+        return stem.upper()
+    raise ValueError("sample_id_case must be one of 'preserve', 'lower', or 'upper'.")
 
 
 def _pooled_offsets(
@@ -90,7 +105,9 @@ def pool_h5ad_files(
     pooled_spatial_y_key: str = "pooled_cell_y",
     sample_obs_key: str = "sample_id",
     source_file_obs_key: str = "source_h5ad",
+    sample_id_prefix: str = "",
     sample_id_suffix: str = "_cells_marker_genes_umap3d",
+    sample_id_case: str = "preserve",
     layout_columns: int | None = None,
     layout_gap: float | None = None,
 ) -> dict:
@@ -118,7 +135,12 @@ def pool_h5ad_files(
     for input_path in paths:
         if not input_path.exists():
             raise FileNotFoundError(f"Input H5AD not found: {input_path}")
-        sample_id = _sample_id_from_path(input_path, sample_id_suffix)
+        sample_id = _sample_id_from_path(
+            input_path,
+            sample_id_suffix,
+            prefix=sample_id_prefix,
+            case=sample_id_case,
+        )
         adata = ad.read_h5ad(input_path)
         if spatial_x_key not in adata.obs or spatial_y_key not in adata.obs:
             raise KeyError(
@@ -249,6 +271,9 @@ def pool_h5ad_files(
         "n_genes": int(pooled.n_vars),
         "input_files": [str(path.name) for path in paths],
         "sample_ids": [str(sample_id) for sample_id in sample_ids],
+        "sample_id_prefix": str(sample_id_prefix),
+        "sample_id_suffix": str(sample_id_suffix),
+        "sample_id_case": str(sample_id_case),
         "feature_keys": [str(key) for key in feature_keys],
         "feature_obsm_keys": [str(key) for key in feature_obsm_keys],
         "spatial_keys": {
@@ -275,6 +300,9 @@ def pool_h5ad_files(
         "n_cells": int(pooled.n_obs),
         "n_genes": int(pooled.n_vars),
         "sample_ids": [str(sample_id) for sample_id in sample_ids],
+        "sample_id_prefix": str(sample_id_prefix),
+        "sample_id_suffix": str(sample_id_suffix),
+        "sample_id_case": str(sample_id_case),
         "feature_keys": [str(key) for key in feature_keys],
         "feature_obsm_keys": [str(key) for key in feature_obsm_keys],
         "spatial_x_key": str(pooled_spatial_x_key),
@@ -300,7 +328,9 @@ def pool_h5ads_in_directory(
     pooled_spatial_y_key: str = "pooled_cell_y",
     sample_obs_key: str = "sample_id",
     source_file_obs_key: str = "source_h5ad",
+    sample_id_prefix: str = "",
     sample_id_suffix: str = "_cells_marker_genes_umap3d",
+    sample_id_case: str = "preserve",
     layout_columns: int | None = None,
     layout_gap: float | None = None,
 ) -> dict:
@@ -320,7 +350,9 @@ def pool_h5ads_in_directory(
         pooled_spatial_y_key=pooled_spatial_y_key,
         sample_obs_key=sample_obs_key,
         source_file_obs_key=source_file_obs_key,
+        sample_id_prefix=sample_id_prefix,
         sample_id_suffix=sample_id_suffix,
+        sample_id_case=sample_id_case,
         layout_columns=layout_columns,
         layout_gap=layout_gap,
     )

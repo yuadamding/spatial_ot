@@ -24,7 +24,9 @@ POOLED_INPUT_NAME="${POOLED_INPUT_NAME:-spatial_ot_input_pooled.h5ad}"
 PREPARE_INPUTS_AHEAD="${PREPARE_INPUTS_AHEAD:-1}"
 REFRESH_PREPARED_FEATURES="${REFRESH_PREPARED_FEATURES:-0}"
 SAMPLE_GLOB="${SAMPLE_GLOB:-*_cells_marker_genes_umap3d.h5ad}"
+SAMPLE_ID_PREFIX="${SAMPLE_ID_PREFIX:-}"
 SAMPLE_ID_SUFFIX="${SAMPLE_ID_SUFFIX:-_cells_marker_genes_umap3d}"
+SAMPLE_ID_CASE="${SAMPLE_ID_CASE:-preserve}"
 SAMPLE_OBS_KEY="${SAMPLE_OBS_KEY:-sample_id}"
 SOURCE_FILE_OBS_KEY="${SOURCE_FILE_OBS_KEY:-source_h5ad}"
 SAMPLE_KEY="${SAMPLE_KEY:-p2_crc}"
@@ -104,6 +106,7 @@ JOINT_REFINEMENT_CLUSTER_WEIGHT="${JOINT_REFINEMENT_CLUSTER_WEIGHT:-1.0}"
 JOINT_REFINEMENT_SPATIAL_WEIGHT="${JOINT_REFINEMENT_SPATIAL_WEIGHT:-0.25}"
 JOINT_REFINEMENT_CUT_WEIGHT="${JOINT_REFINEMENT_CUT_WEIGHT:-0.5}"
 JOINT_REFINEMENT_MAX_MOVE_FRACTION="${JOINT_REFINEMENT_MAX_MOVE_FRACTION:-0.05}"
+JOINT_REFINEMENT_ACCEPTANCE_MARGIN="${JOINT_REFINEMENT_ACCEPTANCE_MARGIN:-1e-3}"
 REQUIRE_FULL_CELL_COVERAGE="${REQUIRE_FULL_CELL_COVERAGE:-0}"
 ALLOW_UMAP_AS_FEATURE="${ALLOW_UMAP_AS_FEATURE:-0}"
 ALLOW_OBSERVED_HULL_GEOMETRY="${ALLOW_OBSERVED_HULL_GEOMETRY:-0}"
@@ -280,6 +283,16 @@ if [[ "$POOL_ALL_INPUTS" == "1" ]]; then
     export PREPARED_FEATURE_OBSM_KEY
     export REFRESH_POOLED_INPUT
     export REFRESH_PREPARED_FEATURES
+    export SAMPLE_GLOB
+    export SAMPLE_ID_PREFIX
+    export SAMPLE_ID_SUFFIX
+    export SAMPLE_ID_CASE
+    export ORIGINAL_SPATIAL_X_KEY
+    export ORIGINAL_SPATIAL_Y_KEY
+    export POOLED_SPATIAL_X_KEY
+    export POOLED_SPATIAL_Y_KEY
+    export SAMPLE_OBS_KEY
+    export SOURCE_FILE_OBS_KEY
     bash "$SCRIPT_DIR/prepare_spatial_ot_input.sh"
   elif [[ "$REFRESH_POOLED_INPUT" == "1" || ! -f "$INPUT_H5AD" ]]; then
     mkdir -p "$(dirname -- "$INPUT_H5AD")"
@@ -294,7 +307,9 @@ if [[ "$POOL_ALL_INPUTS" == "1" ]]; then
       --pooled-spatial-y-key "$POOLED_SPATIAL_Y_KEY" \
       --sample-obs-key "$SAMPLE_OBS_KEY" \
       --source-file-obs-key "$SOURCE_FILE_OBS_KEY" \
-      --sample-id-suffix "$SAMPLE_ID_SUFFIX"
+      --sample-id-prefix "$SAMPLE_ID_PREFIX" \
+      --sample-id-suffix "$SAMPLE_ID_SUFFIX" \
+      --sample-id-case "$SAMPLE_ID_CASE"
   fi
 elif [[ ! -f "$INPUT_H5AD" ]]; then
   echo "Missing input H5AD: $INPUT_H5AD" >&2
@@ -420,6 +435,7 @@ EXTRA_FLAGS+=(
   --joint-refinement-spatial-weight "$JOINT_REFINEMENT_SPATIAL_WEIGHT"
   --joint-refinement-cut-weight "$JOINT_REFINEMENT_CUT_WEIGHT"
   --joint-refinement-max-move-fraction "$JOINT_REFINEMENT_MAX_MOVE_FRACTION"
+  --joint-refinement-acceptance-margin "$JOINT_REFINEMENT_ACCEPTANCE_MARGIN"
 )
 if [[ -n "$HETEROGENEITY_PAIR_GRAPH_RADIUS" ]]; then
   EXTRA_FLAGS+=(--heterogeneity-pair-graph-radius "$HETEROGENEITY_PAIR_GRAPH_RADIUS")

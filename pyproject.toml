@@ -59,3 +59,10 @@ package-dir = {"" = "."}
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["spatial_ot*"]
+
+[tool.setuptools.data-files]
+"share/spatial-ot/configs" = ["configs/*.toml"]
+"share/spatial-ot/scripts" = [
+  "scripts/README.md",
+  "scripts/*.sh",
+]

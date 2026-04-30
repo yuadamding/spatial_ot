@@ -3562,6 +3562,135 @@ def _cell_projection_from_subregion_probabilities(
     return labels, probs
 
 
+def _cell_subregion_labels_from_members(
+    n_cells: int, subregion_members: list[np.ndarray]
+) -> np.ndarray:
+    labels = np.full(int(n_cells), -1, dtype=np.int32)
+    for rid, members in enumerate(subregion_members):
+        member_idx = np.asarray(members, dtype=np.int64)
+        if member_idx.size:
+            labels[member_idx] = int(rid)
+    return labels.astype(np.int32)
+
+
+def _build_joint_refinement_preliminary_embeddings(
+    *,
+    clustering_method: str,
+    requested_clustering_method: str,
+    features: np.ndarray,
+    coords_um: np.ndarray,
+    centers_um: np.ndarray,
+    subregion_members: list[np.ndarray],
+    sample_ids: np.ndarray | None,
+    subregion_latent_embedding_mode: str,
+    subregion_latent_shrinkage_tau: float,
+    subregion_latent_heterogeneity_weight: float,
+    subregion_latent_sample_prior_weight: float,
+    subregion_latent_codebook_size: int,
+    subregion_latent_codebook_sample_size: int,
+    heterogeneity_pair_distance_bins: str | tuple[float, ...] | None,
+    heterogeneity_pair_graph_mode: str,
+    heterogeneity_pair_graph_k: int,
+    heterogeneity_pair_graph_radius: float | None,
+    heterogeneity_pair_bin_normalization: str,
+    heterogeneity_block_weights: dict[str, float],
+    geometry_eps: float,
+    geometry_samples: int,
+    compressed_support_size: int,
+    lambda_x: float,
+    lambda_y: float,
+    allow_convex_hull_fallback: bool,
+    compute_device: torch.device,
+    seed: int,
+) -> tuple[np.ndarray, dict[str, object]]:
+    if clustering_method == HETEROGENEITY_DESCRIPTOR_MODE:
+        _progress(
+            "building initial heterogeneity descriptor embeddings for joint refinement"
+        )
+        reference_points, reference_weights = make_reference_points_unit_disk(
+            int(geometry_samples)
+        )
+        initial_measures = _build_subregion_measures(
+            features=features,
+            coords_um=coords_um,
+            centers_um=centers_um,
+            region_geometries=_region_geometries_from_observed_points(
+                subregion_members
+            ),
+            geometry_reference_points=reference_points,
+            geometry_reference_weights=reference_weights,
+            geometry_eps=geometry_eps,
+            geometry_samples=geometry_samples,
+            compressed_support_size=compressed_support_size,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            seed=seed,
+            allow_convex_hull_fallback=allow_convex_hull_fallback,
+            compute_device=compute_device,
+        )
+        embeddings, descriptor_metadata = build_internal_heterogeneity_embeddings(
+            initial_measures,
+            codebook_size=int(subregion_latent_codebook_size),
+            codebook_sample_size=int(subregion_latent_codebook_sample_size),
+            pair_distance_bins=heterogeneity_pair_distance_bins,
+            pair_graph_mode=heterogeneity_pair_graph_mode,
+            pair_graph_k=int(heterogeneity_pair_graph_k),
+            pair_graph_radius=heterogeneity_pair_graph_radius,
+            pair_bin_normalization=heterogeneity_pair_bin_normalization,
+            block_weights=heterogeneity_block_weights,
+            random_state=int(seed),
+            mode=str(requested_clustering_method),
+        )
+        metadata = dict(descriptor_metadata)
+        metadata.update(
+            {
+                "preliminary_embedding_source": HETEROGENEITY_DESCRIPTOR_MODE,
+                "uses_ot_costs": False,
+                "transport_inside_boundary_loop": False,
+                "description": (
+                    "Initial joint-refinement labels are fit on the same "
+                    "heterogeneity descriptor family as the final descriptor "
+                    "clustering, then boundary moves use a fast feature-mean "
+                    "proxy with fixed preliminary prototypes."
+                ),
+            }
+        )
+        return embeddings.astype(np.float32), metadata
+
+    embeddings, diagnostics = _build_subregion_latent_embeddings_from_members(
+        features,
+        subregion_members,
+        mode=subregion_latent_embedding_mode,
+        shrinkage_tau=subregion_latent_shrinkage_tau,
+        heterogeneity_weight=subregion_latent_heterogeneity_weight,
+        sample_ids=sample_ids,
+        sample_prior_weight=subregion_latent_sample_prior_weight,
+        codebook_size=subregion_latent_codebook_size,
+        codebook_sample_size=subregion_latent_codebook_sample_size,
+        random_state=int(seed),
+        return_diagnostics=True,
+    )
+    metadata = _subregion_latent_embedding_metadata(
+        mode=subregion_latent_embedding_mode,
+        shrinkage_tau=subregion_latent_shrinkage_tau,
+        heterogeneity_weight=subregion_latent_heterogeneity_weight,
+        sample_prior_weight=subregion_latent_sample_prior_weight,
+        codebook_size=subregion_latent_codebook_size,
+        codebook_sample_size=subregion_latent_codebook_sample_size,
+        feature_dim=int(features.shape[1]),
+        embedding_dim=int(embeddings.shape[1]),
+        sample_aware_shrinkage=bool(diagnostics.get("sample_aware_shrinkage", False)),
+    )
+    metadata.update(
+        {
+            "preliminary_embedding_source": "pooled_subregion_latent",
+            "uses_ot_costs": False,
+            "transport_inside_boundary_loop": False,
+        }
+    )
+    return embeddings.astype(np.float32), metadata
+
+
 def _cluster_feature_centroids_from_subregions(
     subregion_latent_embeddings: np.ndarray,
     labels: np.ndarray,
@@ -3621,6 +3750,11 @@ def _fit_pooled_latent_only_result(
     basic_niche_size_um: float | None,
     used_basic_niches: bool,
     joint_refinement_summary: dict[str, object] | None = None,
+    joint_refinement_initial_cell_subregion_labels: np.ndarray | None = None,
+    joint_refinement_refined_cell_subregion_labels: np.ndarray | None = None,
+    joint_refinement_initial_subregion_cluster_labels: np.ndarray | None = None,
+    joint_refinement_energy: list[dict[str, float]] | None = None,
+    joint_refinement_moves: list[dict[str, object]] | None = None,
 ) -> MultilevelOTResult:
     _progress(
         "using fast pooled-subregion-latent-only fit; skipping fixed-label OT atom diagnostics "
@@ -4043,6 +4177,26 @@ def _fit_pooled_latent_only_result(
             )
         ),
         auto_k_selection=auto_k_selection,
+        joint_refinement_initial_cell_subregion_labels=np.asarray(
+            joint_refinement_initial_cell_subregion_labels
+            if joint_refinement_initial_cell_subregion_labels is not None
+            else np.zeros(0, dtype=np.int32),
+            dtype=np.int32,
+        ),
+        joint_refinement_refined_cell_subregion_labels=np.asarray(
+            joint_refinement_refined_cell_subregion_labels
+            if joint_refinement_refined_cell_subregion_labels is not None
+            else np.zeros(0, dtype=np.int32),
+            dtype=np.int32,
+        ),
+        joint_refinement_initial_subregion_cluster_labels=np.asarray(
+            joint_refinement_initial_subregion_cluster_labels
+            if joint_refinement_initial_subregion_cluster_labels is not None
+            else np.zeros(0, dtype=np.int32),
+            dtype=np.int32,
+        ),
+        joint_refinement_energy=list(joint_refinement_energy or []),
+        joint_refinement_moves=list(joint_refinement_moves or []),
     )
 
 
@@ -4099,6 +4253,7 @@ def fit_multilevel_ot(
     joint_refinement_spatial_weight: float = 0.25,
     joint_refinement_cut_weight: float = 0.5,
     joint_refinement_max_move_fraction: float = 0.05,
+    joint_refinement_acceptance_margin: float = 1e-3,
     compute_spot_latent: bool = True,
     subregion_clustering_method: str = HETEROGENEITY_DESCRIPTOR_MODE,
     subregion_latent_embedding_mode: str = "mean_std_shrunk",
@@ -4353,6 +4508,9 @@ def fit_multilevel_ot(
     joint_refinement_max_move_fraction = float(
         np.clip(float(joint_refinement_max_move_fraction), 0.0, 1.0)
     )
+    joint_refinement_acceptance_margin = max(
+        0.0, float(joint_refinement_acceptance_margin)
+    )
 
     _progress(
         f"standardizing feature matrix for {features.shape[0]} cells and {features.shape[1]} features"
@@ -4381,7 +4539,7 @@ def fit_multilevel_ot(
             )
             if construction_method in {"deep_segmentation", "joint_refinement"}:
                 refinement_suffix = (
-                    "; cluster-aware joint refinement will run after initial pooled-latent clustering"
+                    "; cluster-aware joint refinement will run after initial active-target clustering"
                     if construction_method == "joint_refinement"
                     else ""
                 )
@@ -4576,6 +4734,11 @@ def fit_multilevel_ot(
         "enabled": bool(construction_method == "joint_refinement"),
         "applied": False,
     }
+    joint_refinement_initial_cell_subregion_labels = np.zeros(0, dtype=np.int32)
+    joint_refinement_refined_cell_subregion_labels = np.zeros(0, dtype=np.int32)
+    joint_refinement_initial_subregion_cluster_labels = np.zeros(0, dtype=np.int32)
+    joint_refinement_move_log: list[dict[str, object]] = []
+    joint_refinement_energy: list[dict[str, float]] = []
     if construction_method == "joint_refinement":
         if not build_generated_subregions:
             raise ValueError(
@@ -4592,21 +4755,49 @@ def fit_multilevel_ot(
         _progress(
             "running constrained joint segmentation-clustering refinement "
             f"(iters={joint_refinement_iters}, knn={joint_refinement_knn}, "
-            f"max_move_fraction={joint_refinement_max_move_fraction:g})"
+            f"max_move_fraction={joint_refinement_max_move_fraction:g}, "
+            f"acceptance_margin={joint_refinement_acceptance_margin:g})"
         )
-        initial_embeddings, _initial_diagnostics = (
-            _build_subregion_latent_embeddings_from_members(
-                features,
-                subregion_members,
-                mode=subregion_latent_embedding_mode,
-                shrinkage_tau=subregion_latent_shrinkage_tau,
-                heterogeneity_weight=subregion_latent_heterogeneity_weight,
+        joint_refinement_initial_cell_subregion_labels = (
+            _cell_subregion_labels_from_members(features.shape[0], subregion_members)
+        )
+        initial_embeddings, initial_embedding_metadata = (
+            _build_joint_refinement_preliminary_embeddings(
+                clustering_method=clustering_method,
+                requested_clustering_method=requested_clustering_method,
+                features=features,
+                coords_um=coords_um,
+                centers_um=centers_um,
+                subregion_members=subregion_members,
                 sample_ids=sample_ids,
-                sample_prior_weight=subregion_latent_sample_prior_weight,
-                codebook_size=subregion_latent_codebook_size,
-                codebook_sample_size=subregion_latent_codebook_sample_size,
-                random_state=int(seed),
-                return_diagnostics=True,
+                subregion_latent_embedding_mode=subregion_latent_embedding_mode,
+                subregion_latent_shrinkage_tau=subregion_latent_shrinkage_tau,
+                subregion_latent_heterogeneity_weight=(
+                    subregion_latent_heterogeneity_weight
+                ),
+                subregion_latent_sample_prior_weight=(
+                    subregion_latent_sample_prior_weight
+                ),
+                subregion_latent_codebook_size=subregion_latent_codebook_size,
+                subregion_latent_codebook_sample_size=(
+                    subregion_latent_codebook_sample_size
+                ),
+                heterogeneity_pair_distance_bins=heterogeneity_pair_distance_bins,
+                heterogeneity_pair_graph_mode=heterogeneity_pair_graph_mode,
+                heterogeneity_pair_graph_k=heterogeneity_pair_graph_k,
+                heterogeneity_pair_graph_radius=heterogeneity_pair_graph_radius,
+                heterogeneity_pair_bin_normalization=(
+                    heterogeneity_pair_bin_normalization
+                ),
+                heterogeneity_block_weights=heterogeneity_block_weights,
+                geometry_eps=geometry_eps,
+                geometry_samples=geometry_samples,
+                compressed_support_size=compressed_support_size,
+                lambda_x=lambda_x,
+                lambda_y=lambda_y,
+                allow_convex_hull_fallback=allow_convex_hull_fallback,
+                compute_device=resolved_compute_device,
+                seed=int(seed),
             )
         )
         preliminary_k = int(requested_n_clusters)
@@ -4674,6 +4865,9 @@ def fit_multilevel_ot(
             ),
             random_state=int(seed),
         )
+        joint_refinement_initial_subregion_cluster_labels = np.asarray(
+            preliminary_fit["labels"], dtype=np.int32
+        )
         initial_region_count = int(len(subregion_members))
         initial_cell_memberships = int(
             sum(np.asarray(member, dtype=np.int32).size for member in subregion_members)
@@ -4699,10 +4893,14 @@ def fit_multilevel_ot(
                 spatial_weight=float(joint_refinement_spatial_weight),
                 cut_weight=float(joint_refinement_cut_weight),
                 max_move_fraction=float(joint_refinement_max_move_fraction),
+                acceptance_margin=float(joint_refinement_acceptance_margin),
+                enforce_connectivity=True,
                 feature_dims=int(joint_refinement_feature_dims),
                 seed=int(seed),
+                move_log=joint_refinement_move_log,
             )
         )
+        joint_refinement_energy = [dict(row) for row in refinement_history]
         refined_cell_memberships = int(
             sum(np.asarray(member, dtype=np.int32).size for member in refined_members)
         )
@@ -4714,11 +4912,42 @@ def fit_multilevel_ot(
             np.asarray(ids, dtype=np.int32) for ids in refined_basic_ids
         ]
         region_geometries = _region_geometries_from_observed_points(subregion_members)
+        joint_refinement_refined_cell_subregion_labels = (
+            _cell_subregion_labels_from_members(features.shape[0], subregion_members)
+        )
         _validate_mutually_exclusive_memberships(
             features.shape[0], subregion_members, require_full_coverage=True
         )
         accepted_moves = float(
             sum(float(row.get("accepted_moves", 0.0)) for row in refinement_history)
+        )
+        accepted_move_rows = [
+            row for row in joint_refinement_move_log if bool(row.get("accepted"))
+        ]
+        unique_moved_cells = {
+            int(row["cell"]) for row in accepted_move_rows if "cell" in row
+        }
+        first_energy = refinement_history[0] if refinement_history else {}
+        last_energy = refinement_history[-1] if refinement_history else {}
+        initial_energy = first_energy.get("total_energy_before")
+        final_energy = last_energy.get("total_energy_after")
+        regions_before_split = int(
+            last_energy.get(
+                "regions_before_connectivity_split",
+                float(initial_region_count),
+            )
+        )
+        regions_after_split = int(
+            last_energy.get(
+                "regions_after_connectivity_split",
+                float(regions_before_split),
+            )
+        )
+        regions_after_merge = int(
+            last_energy.get(
+                "regions_after_min_cell_merge",
+                float(len(subregion_members)),
+            )
         )
         joint_refinement_summary = {
             "enabled": True,
@@ -4729,16 +4958,50 @@ def fit_multilevel_ot(
             "final_cell_memberships": refined_cell_memberships,
             "preliminary_k": int(preliminary_k),
             "preliminary_auto_k_selection": preliminary_auto_k_summary,
+            "preliminary_embedding": initial_embedding_metadata,
+            "preliminary_embedding_source": str(
+                initial_embedding_metadata.get("preliminary_embedding_source")
+            ),
             "history": refinement_history,
             "accepted_boundary_moves": accepted_moves,
-            "moved_cell_fraction": float(accepted_moves / max(features.shape[0], 1)),
+            "n_cells_moved_total": int(len(unique_moved_cells)),
+            "fraction_cells_moved_total": float(
+                len(unique_moved_cells) / max(features.shape[0], 1)
+            ),
+            "moved_cell_fraction": float(
+                len(unique_moved_cells) / max(features.shape[0], 1)
+            ),
+            "boundary_churn_fraction": float(
+                len(unique_moved_cells) / max(features.shape[0], 1)
+            ),
+            "initial_energy": (
+                float(initial_energy) if initial_energy is not None else None
+            ),
+            "final_energy": float(final_energy) if final_energy is not None else None,
+            "energy_delta": (
+                float(final_energy) - float(initial_energy)
+                if initial_energy is not None and final_energy is not None
+                else None
+            ),
+            "n_disconnected_repairs": int(
+                max(0, regions_after_split - regions_before_split)
+            ),
+            "n_subregions_merged_after_refinement": int(
+                max(0, regions_after_split - regions_after_merge)
+            ),
             "cluster_weight": float(joint_refinement_cluster_weight),
             "spatial_weight": float(joint_refinement_spatial_weight),
             "cut_weight": float(joint_refinement_cut_weight),
             "max_move_fraction_per_iter": float(joint_refinement_max_move_fraction),
+            "acceptance_margin": float(joint_refinement_acceptance_margin),
             "feature_dims": int(joint_refinement_feature_dims),
+            "move_log_records": int(len(joint_refinement_move_log)),
+            "energy_records": int(len(joint_refinement_energy)),
             "requires_connected_output": True,
+            "connectivity_checked_during_moves": True,
             "requires_min_cells": True,
+            "eligible_cell_policy": "boundary_cells_only",
+            "transport_inside_boundary_loop": False,
             "uses_soft_area_target": bool(max_subregion_area_um2 is not None),
         }
         _progress(
@@ -4795,6 +5058,17 @@ def fit_multilevel_ot(
             basic_niche_size_um=basic_niche_size_um,
             used_basic_niches=used_basic_niches,
             joint_refinement_summary=joint_refinement_summary,
+            joint_refinement_initial_cell_subregion_labels=(
+                joint_refinement_initial_cell_subregion_labels
+            ),
+            joint_refinement_refined_cell_subregion_labels=(
+                joint_refinement_refined_cell_subregion_labels
+            ),
+            joint_refinement_initial_subregion_cluster_labels=(
+                joint_refinement_initial_subregion_cluster_labels
+            ),
+            joint_refinement_energy=joint_refinement_energy,
+            joint_refinement_moves=joint_refinement_move_log,
         )
 
     _progress(
@@ -5747,4 +6021,15 @@ def fit_multilevel_ot(
             )
         ),
         auto_k_selection=auto_k_selection,
+        joint_refinement_initial_cell_subregion_labels=(
+            joint_refinement_initial_cell_subregion_labels.astype(np.int32)
+        ),
+        joint_refinement_refined_cell_subregion_labels=(
+            joint_refinement_refined_cell_subregion_labels.astype(np.int32)
+        ),
+        joint_refinement_initial_subregion_cluster_labels=(
+            joint_refinement_initial_subregion_cluster_labels.astype(np.int32)
+        ),
+        joint_refinement_energy=list(joint_refinement_energy),
+        joint_refinement_moves=list(joint_refinement_move_log),
     )

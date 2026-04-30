@@ -9,6 +9,8 @@ from spatial_ot.config import (
     load_multilevel_config,
     validate_multilevel_config,
 )
+from spatial_ot.cli import build_parser, _resolve_multilevel_config_from_args
+from spatial_ot.feature_source import default_precomputed_x_feature_key
 
 
 def test_multilevel_config_rejects_unknown_sections() -> None:
@@ -67,3 +69,54 @@ def test_multilevel_config_requires_region_obs_key_for_region_geometry_json() ->
         raise AssertionError(
             "Expected region_geometry_json without region_obs_key to be rejected"
         )
+
+
+def test_multilevel_config_rejects_negative_joint_refinement_margin() -> None:
+    config = MultilevelExperimentConfig()
+    config.paths.input_h5ad = "input.h5ad"
+    config.paths.output_dir = "out"
+    config.paths.feature_obsm_key = "X"
+    config.ot.joint_refinement_acceptance_margin = -1e-3
+    try:
+        validate_multilevel_config(config)
+    except ValueError as exc:
+        assert "joint_refinement_acceptance_margin" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected negative joint_refinement_acceptance_margin to be rejected"
+        )
+
+
+def test_optimal_search_cli_preserves_config_sample_key_when_not_overridden() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "config.toml"
+        path.write_text(
+            """
+            [paths]
+            input_h5ad = "cells.h5ad"
+            output_dir = "runs/search"
+            feature_obsm_key = "X_pca"
+            sample_obs_key = "patient_id"
+            """
+        )
+        args = build_parser().parse_args(["optimal-search", "--config", str(path)])
+
+        config = _resolve_multilevel_config_from_args(args)
+
+    assert config.paths.sample_obs_key == "patient_id"
+
+
+def test_optimal_search_cli_defaults_to_prepared_feature_cache() -> None:
+    args = build_parser().parse_args(
+        [
+            "optimal-search",
+            "--input-h5ad",
+            "cells.h5ad",
+            "--output-dir",
+            "runs/search",
+        ]
+    )
+
+    config = _resolve_multilevel_config_from_args(args)
+
+    assert config.paths.feature_obsm_key == default_precomputed_x_feature_key()

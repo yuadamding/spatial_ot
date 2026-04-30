@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.interpolate import RBFInterpolator
@@ -177,3 +177,14 @@ class MultilevelOTResult:
     min_subregions_per_cluster: int = 1
     effective_min_subregions_per_cluster: int = 1
     auto_k_selection: dict[str, object] | None = None
+    joint_refinement_initial_cell_subregion_labels: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.int32)
+    )
+    joint_refinement_refined_cell_subregion_labels: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.int32)
+    )
+    joint_refinement_initial_subregion_cluster_labels: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.int32)
+    )
+    joint_refinement_energy: list[dict[str, float]] = field(default_factory=list)
+    joint_refinement_moves: list[dict[str, object]] = field(default_factory=list)

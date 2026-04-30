@@ -11,7 +11,9 @@ INPUT_DIR="${INPUT_DIR:-../spatial_ot_input}"
 OUTPUT_H5AD="${OUTPUT_H5AD:-${INPUT_DIR}/spatial_ot_input_pooled.h5ad}"
 FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X}"
 SAMPLE_GLOB="${SAMPLE_GLOB:-*_cells_marker_genes_umap3d.h5ad}"
+SAMPLE_ID_PREFIX="${SAMPLE_ID_PREFIX:-}"
 SAMPLE_ID_SUFFIX="${SAMPLE_ID_SUFFIX:-_cells_marker_genes_umap3d}"
+SAMPLE_ID_CASE="${SAMPLE_ID_CASE:-preserve}"
 ORIGINAL_SPATIAL_X_KEY="${ORIGINAL_SPATIAL_X_KEY:-cell_x}"
 ORIGINAL_SPATIAL_Y_KEY="${ORIGINAL_SPATIAL_Y_KEY:-cell_y}"
 POOLED_SPATIAL_X_KEY="${POOLED_SPATIAL_X_KEY:-pooled_cell_x}"
@@ -43,4 +45,6 @@ mkdir -p "$(dirname -- "$OUTPUT_H5AD")"
   --pooled-spatial-y-key "$POOLED_SPATIAL_Y_KEY" \
   --sample-obs-key "$SAMPLE_OBS_KEY" \
   --source-file-obs-key "$SOURCE_FILE_OBS_KEY" \
-  --sample-id-suffix "$SAMPLE_ID_SUFFIX"
+  --sample-id-prefix "$SAMPLE_ID_PREFIX" \
+  --sample-id-suffix "$SAMPLE_ID_SUFFIX" \
+  --sample-id-case "$SAMPLE_ID_CASE"

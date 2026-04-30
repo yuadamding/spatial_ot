@@ -55,6 +55,11 @@ _SHELL_DEFAULT_CHECKS: tuple[tuple[str, str, str], ...] = (
         "ot.joint_refinement_max_move_fraction",
         "float",
     ),
+    (
+        "JOINT_REFINEMENT_ACCEPTANCE_MARGIN",
+        "ot.joint_refinement_acceptance_margin",
+        "float",
+    ),
 )
 
 

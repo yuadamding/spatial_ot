@@ -393,6 +393,7 @@ def _subregion_construction_summary(
     joint_refinement_spatial_weight: float,
     joint_refinement_cut_weight: float,
     joint_refinement_max_move_fraction: float,
+    joint_refinement_acceptance_margin: float,
     deep_summary: dict,
 ) -> dict[str, object]:
     generated = bool(build_generated_subregions)
@@ -525,12 +526,14 @@ def _subregion_construction_summary(
             "spatial_weight": float(joint_refinement_spatial_weight),
             "cut_weight": float(joint_refinement_cut_weight),
             "max_move_fraction": float(joint_refinement_max_move_fraction),
+            "acceptance_margin": float(joint_refinement_acceptance_margin),
             "summary": dict(
                 result.subregion_latent_embedding_metadata.get("joint_refinement", {})
             ),
             "algorithm": (
-                "deep-segmentation initialization, pooled-latent clustering, constrained adjacent boundary moves "
-                "that improve cluster-prototype coherence after spatial/cut penalties, then connected min-cell merge"
+                "deep-segmentation initialization, active-target preliminary clustering, constrained adjacent boundary moves "
+                "that improve cluster-prototype coherence by at least the acceptance margin after spatial/cut penalties, "
+                "with source-connectivity checks and connected min-cell repair"
             ),
         },
     }
@@ -799,6 +802,12 @@ def _save_multilevel_outputs(
     supports_path = output_dir / "cluster_supports_multilevel_ot.npz"
     spot_latent_path = output_dir / "spot_level_latent_multilevel_ot.npz"
     candidate_diag_path = output_dir / "multilevel_ot_candidate_cost_diagnostics.npz"
+    refinement_energy_path = output_dir / "joint_refinement_energy.csv"
+    refinement_moves_path = output_dir / "joint_refinement_moves.parquet"
+    refinement_initial_cells_path = output_dir / "cell_to_subregion_initial.npy"
+    refinement_refined_cells_path = output_dir / "cell_to_subregion_refined.npy"
+    refinement_initial_clusters_path = output_dir / "cluster_labels_initial.npy"
+    refinement_refined_clusters_path = output_dir / "cluster_labels_refined.npy"
     map_path = output_dir / "multilevel_ot_spatial_map.png"
     emb_path = output_dir / "multilevel_ot_subregion_embedding.png"
     atom_path = output_dir / "multilevel_ot_atom_layouts.png"
@@ -821,6 +830,18 @@ def _save_multilevel_outputs(
     if result.auto_k_selection is not None:
         outputs["auto_k_selection"] = str(auto_k_path)
         outputs["auto_k_scores"] = str(auto_k_scores_path)
+    has_joint_refinement_audit = (
+        result.joint_refinement_initial_cell_subregion_labels.size > 0
+        or bool(result.joint_refinement_energy)
+        or bool(result.joint_refinement_moves)
+    )
+    if has_joint_refinement_audit:
+        outputs["joint_refinement_energy"] = str(refinement_energy_path)
+        outputs["joint_refinement_moves"] = str(refinement_moves_path)
+        outputs["cell_to_subregion_initial"] = str(refinement_initial_cells_path)
+        outputs["cell_to_subregion_refined"] = str(refinement_refined_cells_path)
+        outputs["cluster_labels_initial"] = str(refinement_initial_clusters_path)
+        outputs["cluster_labels_refined"] = str(refinement_refined_clusters_path)
     write_sample_spatial_maps = _env_bool("SPATIAL_OT_WRITE_SAMPLE_SPATIAL_MAPS", True)
     if write_sample_spatial_maps:
         outputs["sample_spatial_maps_dir"] = str(output_dir / "sample_spatial_maps")
@@ -1478,6 +1499,53 @@ def _save_multilevel_outputs(
             bool
         ),
     )
+    if has_joint_refinement_audit:
+        _io_progress("writing joint refinement audit outputs")
+        np.save(
+            refinement_initial_cells_path,
+            result.joint_refinement_initial_cell_subregion_labels.astype(np.int32),
+        )
+        np.save(
+            refinement_refined_cells_path,
+            result.joint_refinement_refined_cell_subregion_labels.astype(np.int32),
+        )
+        np.save(
+            refinement_initial_clusters_path,
+            result.joint_refinement_initial_subregion_cluster_labels.astype(np.int32),
+        )
+        np.save(
+            refinement_refined_clusters_path,
+            result.subregion_cluster_labels.astype(np.int32),
+        )
+        energy_df = pd.DataFrame(result.joint_refinement_energy)
+        if energy_df.empty:
+            energy_df = pd.DataFrame(
+                columns=[
+                    "iteration",
+                    "boundary_cells",
+                    "evaluated_boundary_cells",
+                    "accepted_moves",
+                    "total_energy_before",
+                    "total_energy_after",
+                    "total_energy_delta",
+                ]
+            )
+        energy_df.to_csv(refinement_energy_path, index=False)
+        move_df = pd.DataFrame(result.joint_refinement_moves)
+        if move_df.empty:
+            move_df = pd.DataFrame(
+                columns=[
+                    "iteration",
+                    "cell",
+                    "old_subregion",
+                    "new_subregion",
+                    "old_cluster",
+                    "new_cluster",
+                    "weighted_delta",
+                    "accepted",
+                ]
+            )
+        move_df.to_parquet(refinement_moves_path, index=False)
     if result.auto_k_selection is not None:
         auto_k_path.write_text(json.dumps(result.auto_k_selection, indent=2))
         scores = result.auto_k_selection.get("scores")
@@ -1639,6 +1707,7 @@ def run_multilevel_ot_on_h5ad(
     joint_refinement_spatial_weight: float = 0.25,
     joint_refinement_cut_weight: float = 0.5,
     joint_refinement_max_move_fraction: float = 0.05,
+    joint_refinement_acceptance_margin: float = 1e-3,
     subregion_clustering_method: str = HETEROGENEITY_DESCRIPTOR_MODE,
     subregion_latent_embedding_mode: str = "mean_std_shrunk",
     subregion_latent_shrinkage_tau: float = 25.0,
@@ -2003,6 +2072,7 @@ def run_multilevel_ot_on_h5ad(
         joint_refinement_spatial_weight=joint_refinement_spatial_weight,
         joint_refinement_cut_weight=joint_refinement_cut_weight,
         joint_refinement_max_move_fraction=joint_refinement_max_move_fraction,
+        joint_refinement_acceptance_margin=joint_refinement_acceptance_margin,
         subregion_clustering_method=subregion_clustering_method,
         subregion_latent_embedding_mode=subregion_latent_embedding_mode,
         subregion_latent_shrinkage_tau=subregion_latent_shrinkage_tau,
@@ -2249,6 +2319,7 @@ def run_multilevel_ot_on_h5ad(
         joint_refinement_spatial_weight=joint_refinement_spatial_weight,
         joint_refinement_cut_weight=joint_refinement_cut_weight,
         joint_refinement_max_move_fraction=joint_refinement_max_move_fraction,
+        joint_refinement_acceptance_margin=joint_refinement_acceptance_margin,
         deep_summary=deep_summary,
     )
     subregion_construction["membership_validation"] = membership_validation_summary
@@ -2350,6 +2421,84 @@ def run_multilevel_ot_on_h5ad(
         primary_prob_argmax_disagreement_count
         / max(int(np.sum(covered_primary_cell_mask)), 1)
     )
+    clustering_method = str(result.subregion_clustering_method)
+    if clustering_method == HETEROGENEITY_DESCRIPTOR_MODE:
+        subregion_clustering_feature_space = (
+            "block-normalized internal heterogeneity descriptor embeddings over "
+            "canonical spatial-state fields and pair co-occurrence graphs"
+        )
+        method_layer_2 = (
+            "Each subregion is converted into a block-normalized internal "
+            "heterogeneity descriptor over soft state composition, diversity, "
+            "canonical spatial-state fields, and pair co-occurrence motifs. "
+            "Niche labels are learned by clustering that descriptor matrix; "
+            "shape, density, sample labels, and raw tissue position are reserved "
+            "for QC unless explicitly requested elsewhere."
+        )
+        method_core_note = (
+            "heterogeneity descriptor subregion clustering with fixed-label OT "
+            "atom/projection diagnostics"
+        )
+        clustering_note = (
+            "primary niche labels are assigned by KMeans/model selection on "
+            "block-normalized internal heterogeneity descriptor embeddings; "
+            "shape/density/sample metadata are QC fields, not clustering inputs"
+        )
+    elif clustering_method == "pooled_subregion_latent":
+        subregion_clustering_feature_space = (
+            "pooled raw-member feature-distribution subregion latent embeddings"
+        )
+        method_layer_2 = (
+            "Each subregion is converted into a raw member-cell feature-distribution "
+            "latent embedding summarizing its internal cell-state distribution. "
+            "Niche clusters are learned by pooling all subregion latent embeddings "
+            "across the cohort and clustering that matrix; this label-assignment "
+            "step does not use spatial coordinates, subregion centers, overlap "
+            "edges, compressed OT supports, or OT candidate costs."
+        )
+        method_core_note = (
+            "pooled raw-member feature-distribution subregion latent clustering "
+            "with fixed-label OT atom diagnostics"
+        )
+        clustering_note = (
+            "primary niche labels are assigned by KMeans/model selection on pooled "
+            "subregion latent embeddings built from raw member-cell feature-distribution "
+            "summaries. The active embedding mode is recorded in "
+            "subregion_latent_embedding_metadata; spatial coordinates are not used "
+            "for this clustering step"
+        )
+    elif clustering_method in {
+        "heterogeneity_fused_ot_niche",
+        "heterogeneity_fgw_niche",
+    }:
+        subregion_clustering_feature_space = (
+            "precomputed true transport distances between attributed subregion measures"
+        )
+        method_layer_2 = (
+            "Each subregion is represented as an attributed measure over canonical "
+            "coordinates and cell-state support points. Niche labels are learned "
+            "from precomputed fused-OT/FGW transport distances, with medoid "
+            "diagnostics recorded for validation-scale fixed-K runs."
+        )
+        method_core_note = (
+            "true transport-distance subregion clustering with fixed-K medoid diagnostics"
+        )
+        clustering_note = (
+            "primary niche labels are assigned from a precomputed fused-OT/FGW "
+            "distance matrix over subregion measures; this mode is validation-scale "
+            "and does not run transport inside per-cell boundary moves"
+        )
+    else:
+        subregion_clustering_feature_space = "shape-normalized OT dictionary candidate costs"
+        method_layer_2 = (
+            "Each subregion is converted into compressed canonical-coordinate plus "
+            "feature measures and assigned using OT dictionary candidate costs."
+        )
+        method_core_note = "shape-normalized OT dictionary clustering"
+        clustering_note = (
+            "primary niche labels are assigned from OT dictionary candidate costs; "
+            "this path is retained for compatibility and diagnostics"
+        )
     summary = {
         "summary_schema_version": "1",
         "spatial_ot_version": _package_version(),
@@ -2370,6 +2519,7 @@ def run_multilevel_ot_on_h5ad(
             "mutually_exclusive_subregions_implemented": True,
             "deep_graph_subregion_segmentation_implemented": True,
             "joint_segmentation_clustering_refinement_implemented": True,
+            "joint_refinement_move_audit_implemented": True,
         },
         "latent_source": _latent_source_label(feature_source, deep_summary),
         "communication_source": "none",
@@ -2406,6 +2556,9 @@ def run_multilevel_ot_on_h5ad(
         "auto_k_selection_role": "exploratory_shortlist_final_refit_requires_stability_confirmation",
         "atoms_per_cluster": int(atoms_per_cluster),
         "subregion_construction": subregion_construction,
+        "joint_refinement": dict(
+            result.subregion_latent_embedding_metadata.get("joint_refinement", {})
+        ),
         "subregion_construction_mode": str(subregion_construction["mode"]),
         "subregion_construction_method": str(subregion_construction_method),
         "deep_segmentation_knn": int(deep_segmentation_knn),
@@ -2421,19 +2574,14 @@ def run_multilevel_ot_on_h5ad(
         "joint_refinement_spatial_weight": float(joint_refinement_spatial_weight),
         "joint_refinement_cut_weight": float(joint_refinement_cut_weight),
         "joint_refinement_max_move_fraction": float(joint_refinement_max_move_fraction),
+        "joint_refinement_acceptance_margin": float(
+            joint_refinement_acceptance_margin
+        ),
         "subregion_clustering_method": str(result.subregion_clustering_method),
         "subregion_clustering_uses_spatial": bool(
             result.subregion_clustering_uses_spatial
         ),
-        "subregion_clustering_feature_space": (
-            "block-normalized internal heterogeneity descriptor embeddings over canonical spatial-state fields and pair co-occurrence graphs"
-            if result.subregion_clustering_method == HETEROGENEITY_DESCRIPTOR_MODE
-            else (
-                "pooled raw-member feature-distribution subregion latent embeddings"
-                if not result.subregion_clustering_uses_spatial
-                else "shape-normalized OT dictionary candidate costs"
-            )
-        ),
+        "subregion_clustering_feature_space": subregion_clustering_feature_space,
         "subregion_latent_embedding_mode": str(result.subregion_latent_embedding_mode),
         "subregion_latent_embedding_metadata": dict(
             result.subregion_latent_embedding_metadata
@@ -2698,10 +2846,7 @@ def run_multilevel_ot_on_h5ad(
                 "explicit-region runs may supply external region geometry."
             ),
             "layer_2_subregion_heterogeneity_clustering": (
-                "Each subregion is converted into a raw member-cell feature-distribution latent embedding summarizing "
-                "its internal cell-state distribution. Niche clusters are learned by pooling all subregion latent "
-                "embeddings across the cohort and clustering that pooled matrix; this label-assignment step does not "
-                "use spatial coordinates, subregion centers, overlap edges, compressed OT supports, or OT candidate costs."
+                method_layer_2
             ),
             "layer_3_projection_and_visualization": (
                 "Cell labels, spot-level latent fields, and sample maps are downstream projections of fitted subregion "
@@ -2709,18 +2854,14 @@ def run_multilevel_ot_on_h5ad(
             ),
         },
         "method_notes": {
-            "core": "pooled raw-member feature-distribution subregion latent clustering with fixed-label OT atom diagnostics",
+            "core": method_core_note,
             "geometry_normalization": "data-driven geometry samples from each subregion are OT-mapped into a shared unit-disk reference domain for fixed-label atom dictionaries, projection, and QC; generated subregions use their observed cell point cloud, explicit regions use supplied mask/polygon geometry, and degenerate 1-2 point subregions fall back to centered-and-scaled local coordinates without OT interpolation",
             "geometry_proxy": "generated subregion memberships are learned from observed coordinates plus the OT feature view by data-driven spatial partitioning and graph-aware minimum-size merging; generated subregion boundary and shape are taken from observed member coordinates rather than a hand-coded template geometry",
             "deep_segmentation": "when subregion_construction_method='deep_segmentation', generated memberships start from many coordinate seeds for full tissue coverage, then a spatial kNN boundary-refinement pass moves boundaries using learned/deep feature affinity before connected small pieces are merged to satisfy min_cells and max_subregions; max_subregion_area_um2 is a soft QC target",
-            "joint_refinement": "when subregion_construction_method='joint_refinement', deep-graph segmentation initializes the partition, pooled subregion latent labels are fit, and only adjacent boundary cells may move when doing so improves cluster-prototype coherence after spatial/cut penalties; final regions are reconnected and merged to satisfy min_cells, while max_subregion_area_um2 remains soft QC",
+            "joint_refinement": "when subregion_construction_method='joint_refinement', deep-graph segmentation initializes the partition, active-target preliminary labels are fit, and only adjacent boundary cells may move when doing so improves cluster-prototype coherence by the configured acceptance margin after spatial/cut penalties; source connectivity is checked during moves, final regions are reconnected and merged to satisfy min_cells, and max_subregion_area_um2 remains soft QC",
             "subregion_membership_radius": "radius_um is not a generated-subregion membership radius; generated memberships are a full-coverage mutually exclusive spatial/feature partition controlled by target scale, min_cells, max_subregions, and graph-aware merging; max_subregion_area_um2 is reported but not used as a hard split constraint",
             "basic_niches": "when basic_niche_size_um is set, it is only a target scale hint for data-driven atomic membership seeds; fitted subregions are mutually exclusive spatial-graph connected pieces with sparse pieces merged to satisfy min_cells, while geometry remains data-driven from observed cells",
-            "subregion_latent_clustering": (
-                "primary niche labels are assigned by KMeans/model selection on pooled subregion latent embeddings "
-                "built from raw member-cell feature-distribution summaries. The active embedding mode is recorded in "
-                "subregion_latent_embedding_metadata; spatial coordinates are not used for this clustering step"
-            ),
+            "subregion_latent_clustering": clustering_note,
             "local_measure": "compressed empirical measures over canonical coordinates and standardized cell-level features retained for fixed-label atom dictionaries, projection, and QC diagnostics",
             "local_matching": "semi-relaxed unbalanced Sinkhorn with fixed source marginal and relaxed target marginal is used after labels are fixed to fit diagnostic atoms and projections",
             "overlap_consistency": "the overlap-penalty outputs are retained for backward-compatible diagnostics, but fitted subregion memberships are required to be mutually exclusive, so generated runs should report zero true-overlap edges",
@@ -2810,6 +2951,9 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         joint_refinement_spatial_weight=config.ot.joint_refinement_spatial_weight,
         joint_refinement_cut_weight=config.ot.joint_refinement_cut_weight,
         joint_refinement_max_move_fraction=config.ot.joint_refinement_max_move_fraction,
+        joint_refinement_acceptance_margin=(
+            config.ot.joint_refinement_acceptance_margin
+        ),
         subregion_clustering_method=config.ot.subregion_clustering_method,
         subregion_latent_embedding_mode=config.ot.subregion_latent_embedding_mode,
         subregion_latent_shrinkage_tau=config.ot.subregion_latent_shrinkage_tau,

@@ -633,8 +633,23 @@ def test_joint_refinement_preserves_partition_and_records_metadata() -> None:
     metadata = result.subregion_latent_embedding_metadata["joint_refinement"]
     assert metadata["enabled"] is True
     assert metadata["applied"] is True
+    assert metadata["preliminary_embedding_source"] == "heterogeneity_descriptor_niche"
+    assert metadata["acceptance_margin"] == pytest.approx(1e-3)
+    assert metadata["transport_inside_boundary_loop"] is False
+    assert metadata["connectivity_checked_during_moves"] is True
     assert metadata["requires_connected_output"] is True
     assert metadata["requires_min_cells"] is True
+    assert result.joint_refinement_initial_cell_subregion_labels.shape == (
+        coords.shape[0],
+    )
+    assert result.joint_refinement_refined_cell_subregion_labels.shape == (
+        coords.shape[0],
+    )
+    assert result.joint_refinement_initial_subregion_cluster_labels.shape[0] == metadata[
+        "initial_region_count"
+    ]
+    assert result.joint_refinement_energy
+    assert "total_energy_before" in result.joint_refinement_energy[0]
 
 
 def test_cluster_coherence_refinement_keeps_mutually_exclusive_connected_min_cell_regions() -> (
@@ -661,6 +676,7 @@ def test_cluster_coherence_refinement_keeps_mutually_exclusive_connected_min_cel
         np.arange(48, 72, dtype=np.int32),
     ]
 
+    move_log: list[dict[str, object]] = []
     centers, refined_members, _ids, history = refine_subregions_by_cluster_coherence(
         coords,
         features,
@@ -672,8 +688,10 @@ def test_cluster_coherence_refinement_keeps_mutually_exclusive_connected_min_cel
         n_iters=1,
         n_neighbors=8,
         max_move_fraction=0.05,
+        acceptance_margin=0.0,
         feature_dims=2,
         seed=316,
+        move_log=move_log,
     )
 
     assert centers.shape[0] == len(refined_members)
@@ -684,6 +702,55 @@ def test_cluster_coherence_refinement_keeps_mutually_exclusive_connected_min_cel
         coords.shape[0], refined_members, require_full_coverage=True
     )
     assert history
+    assert "total_energy_delta" in history[0]
+    assert move_log
+    assert any(bool(row["accepted"]) for row in move_log)
+
+
+def test_cluster_coherence_refinement_margin_blocks_tiny_or_negative_moves() -> None:
+    rng = np.random.default_rng(316)
+    coords = np.vstack(
+        [
+            rng.normal(loc=[-1.0, 0.0], scale=0.18, size=(24, 2)),
+            rng.normal(loc=[0.0, 0.0], scale=0.18, size=(24, 2)),
+            rng.normal(loc=[1.0, 0.0], scale=0.18, size=(24, 2)),
+        ]
+    ).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[-2.0, 0.0], scale=0.1, size=(24, 2)),
+            rng.normal(loc=[0.0, 0.0], scale=0.1, size=(24, 2)),
+            rng.normal(loc=[2.0, 0.0], scale=0.1, size=(24, 2)),
+        ]
+    ).astype(np.float32)
+    members = [
+        np.arange(0, 24, dtype=np.int32),
+        np.arange(24, 48, dtype=np.int32),
+        np.arange(48, 72, dtype=np.int32),
+    ]
+    move_log: list[dict[str, object]] = []
+
+    _centers, _refined_members, _ids, history = refine_subregions_by_cluster_coherence(
+        coords,
+        features,
+        members,
+        np.asarray([0, 1, 0], dtype=np.int32),
+        min_cells=12,
+        max_subregions=4,
+        target_scale_um=1.0,
+        n_iters=1,
+        n_neighbors=8,
+        max_move_fraction=0.05,
+        acceptance_margin=1e6,
+        feature_dims=2,
+        seed=316,
+        move_log=move_log,
+    )
+
+    assert history[0]["accepted_moves"] == 0
+    assert history[0]["acceptance_margin"] == pytest.approx(1e6)
+    assert move_log
+    assert all(not bool(row["accepted"]) for row in move_log)
 
 
 def test_batched_gpu_helpers_mark_nonconverged_finite_solves_as_fallback(
@@ -1661,6 +1728,60 @@ def test_internal_heterogeneity_embedding_separates_arrangement_not_composition(
     dist = np.linalg.norm(embeddings[:, None, :] - embeddings[None, :, :], axis=2)
     assert dist[0, 2] < dist[0, 1]
     assert dist[1, 3] < dist[1, 0]
+
+
+def test_heterogeneity_codebook_size_defaults_to_requested_value(monkeypatch) -> None:
+    monkeypatch.delenv("SPATIAL_OT_HETEROGENEITY_MAX_CODEBOOK_SIZE", raising=False)
+    rng = np.random.default_rng(2030)
+
+    measures = []
+    for subregion_id in range(4):
+        measures.append(
+            SubregionMeasure(
+                subregion_id=int(subregion_id),
+                center_um=np.zeros(2, dtype=np.float32),
+                members=np.arange(10, dtype=np.int32),
+                canonical_coords=rng.normal(size=(10, 2)).astype(np.float32),
+                features=rng.normal(size=(10, 5)).astype(np.float32),
+                weights=np.full(10, 0.1, dtype=np.float32),
+                geometry_point_count=10,
+                compressed_point_count=10,
+                normalizer=ShapeNormalizer(
+                    center=np.zeros((1, 2), dtype=np.float32),
+                    scale=1.0,
+                    interpolator=None,
+                ),
+                normalizer_diagnostics=ShapeNormalizerDiagnostics(
+                    geometry_source="test",
+                    used_fallback=False,
+                    ot_cost=None,
+                    sinkhorn_converged=None,
+                    mapped_radius_p95=None,
+                    mapped_radius_max=None,
+                    interpolation_residual=None,
+                ),
+            )
+        )
+
+    _, descriptor_metadata = build_internal_heterogeneity_embeddings(
+        measures,
+        codebook_size=18,
+        codebook_sample_size=40,
+        random_state=2030,
+    )
+    _, transport_metadata = build_subregion_fgw_measures(
+        measures,
+        codebook_size=18,
+        codebook_sample_size=40,
+        random_state=2030,
+    )
+
+    assert descriptor_metadata["cell_state_codebook_size"] == 18
+    assert descriptor_metadata["cell_state_codebook_size_requested"] == 18
+    assert descriptor_metadata["cell_state_codebook_size_cap"] == 18
+    assert transport_metadata["cell_state_codebook_size"] == 18
+    assert transport_metadata["cell_state_codebook_size_requested"] == 18
+    assert transport_metadata["cell_state_codebook_size_cap"] == 18
 
 
 def test_internal_heterogeneity_composition_only_loses_arrangement() -> None:

@@ -78,6 +78,7 @@ joint_refinement_cluster_weight = 1.0
 joint_refinement_spatial_weight = 0.25
 joint_refinement_cut_weight = 0.5
 joint_refinement_max_move_fraction = 0.05
+joint_refinement_acceptance_margin = 1e-3
 auto_n_clusters = false
 candidate_n_clusters = [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
 auto_k_max_score_subregions = 2500

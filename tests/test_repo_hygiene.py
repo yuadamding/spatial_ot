@@ -78,6 +78,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     deep_segmentation_sh = (
         script_dir / "run_deep_segmentation_cohort_gpu.sh"
     ).read_text()
+    prepare_xenium_sh = (script_dir / "prepare_xenium_spatial_ot_input.sh").read_text()
+    run_xenium_sh = (script_dir / "run_xenium_cohort_gpu.sh").read_text()
     config_toml = (repo_root / "configs" / "multilevel_deep_example.toml").read_text()
 
     assert "../spatial_ot_input" in run_sh
@@ -290,6 +292,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         in pool_helper_sh
     )
     assert "pool-inputs" in pool_helper_sh
+    assert "--sample-id-prefix" in pool_helper_sh
+    assert "--sample-id-case" in pool_helper_sh
     assert "../spatial_ot_input" in prepare_helper_sh
     assert "../.venv" in prepare_helper_sh
     assert (
@@ -303,6 +307,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     )
     assert "pool-inputs" in prepare_helper_sh
     assert "prepare-inputs" in prepare_helper_sh
+    assert "--sample-id-prefix" in prepare_helper_sh
+    assert "--sample-id-case" in prepare_helper_sh
     assert "../spatial_ot_input" in prepare_all_helper_sh
     assert "../.venv" in prepare_all_helper_sh
     assert 'PREPARE_POOLED_INPUT="${PREPARE_POOLED_INPUT:-1}"' in prepare_all_helper_sh
@@ -356,6 +362,10 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         'JOINT_REFINEMENT_ITERS="${JOINT_REFINEMENT_ITERS:-2}"' in deep_segmentation_sh
     )
     assert (
+        'JOINT_REFINEMENT_ACCEPTANCE_MARGIN="${JOINT_REFINEMENT_ACCEPTANCE_MARGIN:-1e-3}"'
+        in deep_segmentation_sh
+    )
+    assert (
         'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"'
         in deep_segmentation_sh
     )
@@ -374,6 +384,30 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     )
     assert "run_prepared_cohort_gpu.sh" in deep_segmentation_sh
     assert "/storage/" not in deep_segmentation_sh
+    assert "../data_review/results" in prepare_xenium_sh
+    assert "xenium_spatial_ot_input_pooled.h5ad" in prepare_xenium_sh
+    assert 'SAMPLE_GLOB="${SAMPLE_GLOB:-xenium_*_processed.h5ad}"' in prepare_xenium_sh
+    assert 'SAMPLE_ID_PREFIX="${SAMPLE_ID_PREFIX:-xenium_}"' in prepare_xenium_sh
+    assert 'SAMPLE_ID_SUFFIX="${SAMPLE_ID_SUFFIX:-_processed}"' in prepare_xenium_sh
+    assert 'SAMPLE_ID_CASE="${SAMPLE_ID_CASE:-lower}"' in prepare_xenium_sh
+    assert 'ORIGINAL_SPATIAL_X_KEY="${ORIGINAL_SPATIAL_X_KEY:-x_centroid}"' in prepare_xenium_sh
+    assert 'ORIGINAL_SPATIAL_Y_KEY="${ORIGINAL_SPATIAL_Y_KEY:-y_centroid}"' in prepare_xenium_sh
+    assert "prepare_spatial_ot_input.sh" in prepare_xenium_sh
+    assert "/storage/" not in prepare_xenium_sh
+    assert "../data_review/results" in run_xenium_sh
+    assert "../outputs/spatial_ot/xenium_cohort_multilevel_ot_deep_expression_" in run_xenium_sh
+    assert "xenium_spatial_ot_input_pooled.h5ad" in run_xenium_sh
+    assert 'SPATIAL_SCALE="${SPATIAL_SCALE:-1.0}"' in run_xenium_sh
+    assert 'FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X}"' in run_xenium_sh
+    assert 'PREPARE_INPUTS_AHEAD="${PREPARE_INPUTS_AHEAD:-0}"' in run_xenium_sh
+    assert 'X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-421}"' in run_xenium_sh
+    assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in run_xenium_sh
+    assert 'DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-intrinsic}"' in run_xenium_sh
+    assert 'DEEP_OUTPUT_OBSM_KEY="${DEEP_OUTPUT_OBSM_KEY:-X_spatial_ot_deep_expression_autoencoder}"' in run_xenium_sh
+    assert 'DEEP_CONTEXT_WEIGHT="${DEEP_CONTEXT_WEIGHT:-0.0}"' in run_xenium_sh
+    assert 'CANDIDATE_N_CLUSTERS="${CANDIDATE_N_CLUSTERS:-8-16}"' in run_xenium_sh
+    assert "run.sh" in run_xenium_sh
+    assert "/storage/" not in run_xenium_sh
     optimal_search_sh = (script_dir / "run_optimal_setting_search.sh").read_text()
     assert "../spatial_ot_input/spatial_ot_input_pooled.h5ad" in optimal_search_sh
     assert "../work/spatial_ot_runs/cohort_optimal_search" in optimal_search_sh
@@ -514,6 +548,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         in config_toml
     )
     assert "joint_refinement_max_move_fraction = 0.05" in config_toml
+    assert "joint_refinement_acceptance_margin = 1e-3" in config_toml
     assert "auto_n_clusters = false" in config_toml
     assert (
         "candidate_n_clusters = [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]"

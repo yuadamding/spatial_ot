@@ -96,6 +96,47 @@ def test_pool_h5ads_in_directory_keeps_sample_labels_and_separates_coordinates(
     )
 
 
+def test_pool_h5ads_in_directory_normalizes_xenium_sample_ids(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "xenium"
+    input_dir.mkdir()
+    for sample, offset in [("P1_CRC", 0.0), ("P2_CRC", 10.0)]:
+        path = input_dir / f"xenium_{sample}_processed.h5ad"
+        adata = ad.AnnData(
+            X=np.ones((2, 3), dtype=np.float32),
+            var=pd.DataFrame(index=["g1", "g2", "g3"]),
+        )
+        adata.obs["x_centroid"] = np.asarray([offset, offset + 1.0], dtype=np.float32)
+        adata.obs["y_centroid"] = np.asarray([offset + 2.0, offset + 3.0], dtype=np.float32)
+        adata.write_h5ad(path)
+
+    output_h5ad = tmp_path / "xenium_pooled.h5ad"
+    summary = pool_h5ads_in_directory(
+        input_dir=input_dir,
+        output_h5ad=output_h5ad,
+        feature_obsm_keys=["X"],
+        sample_glob="xenium_*_processed.h5ad",
+        spatial_x_key="x_centroid",
+        spatial_y_key="y_centroid",
+        sample_id_prefix="xenium_",
+        sample_id_suffix="_processed",
+        sample_id_case="lower",
+    )
+
+    pooled = ad.read_h5ad(output_h5ad)
+    assert summary["sample_ids"] == ["p1_crc", "p2_crc"]
+    assert set(pooled.obs["sample_id"].astype(str)) == {"p1_crc", "p2_crc"}
+    assert "original_x_centroid" in pooled.obs
+    assert "original_y_centroid" in pooled.obs
+    assert all(
+        str(index).startswith(("p1_crc:", "p2_crc:")) for index in pooled.obs_names
+    )
+    assert pooled.uns["pooled_inputs"]["sample_id_prefix"] == "xenium_"
+    assert pooled.uns["pooled_inputs"]["sample_id_suffix"] == "_processed"
+    assert pooled.uns["pooled_inputs"]["sample_id_case"] == "lower"
+
+
 def test_prepare_h5ad_feature_cache_reuses_matching_precomputed_x_features(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

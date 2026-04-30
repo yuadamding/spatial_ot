@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -62,3 +63,18 @@ def test_doctor_cli_exits_zero_on_clean_tree(tmp_path: Path) -> None:
     payload = json.loads(completed.stdout)
     assert payload["status"] == "ok"
     assert payload["shell_defaults_vs_config"]["mismatches"] == []
+
+
+def test_doctor_cli_tolerates_openmp_thread_lists(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["OMP_NUM_THREADS"] = "8,4"
+    completed = subprocess.run(
+        [sys.executable, "-m", "spatial_ot", "doctor"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

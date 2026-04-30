@@ -674,6 +674,8 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
         str(config.ot.joint_refinement_cut_weight),
         "--joint-refinement-max-move-fraction",
         str(config.ot.joint_refinement_max_move_fraction),
+        "--joint-refinement-acceptance-margin",
+        str(config.ot.joint_refinement_acceptance_margin),
         "--subregion-clustering-method",
         str(config.ot.subregion_clustering_method),
         "--subregion-latent-embedding-mode",
@@ -780,6 +782,13 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
             [
                 "--heterogeneity-pair-graph-radius",
                 str(config.ot.heterogeneity_pair_graph_radius),
+            ]
+        )
+    if config.ot.max_subregion_area_um2 is not None:
+        cmd.extend(
+            [
+                "--max-subregion-area-um2",
+                str(config.ot.max_subregion_area_um2),
             ]
         )
     if config.ot.heterogeneity_fgw_structure_clip is not None:

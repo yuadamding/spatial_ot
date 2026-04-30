@@ -1,0 +1,2 @@
+[console_scripts]
+spatial-ot = spatial_ot.cli:main

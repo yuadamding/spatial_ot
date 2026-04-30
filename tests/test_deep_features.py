@@ -1163,6 +1163,121 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert "mlot_subregion_cluster_probs" in saved_cells.obsm
 
 
+def test_run_multilevel_ot_writes_joint_refinement_audit_outputs(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("SPATIAL_OT_WRITE_SAMPLE_SPATIAL_MAPS", "0")
+    rng = np.random.default_rng(315)
+    left = np.column_stack(
+        [
+            rng.normal(loc=-0.4, scale=0.12, size=50),
+            rng.normal(loc=0.0, scale=0.35, size=50),
+        ]
+    )
+    right = np.column_stack(
+        [
+            rng.normal(loc=0.4, scale=0.12, size=50),
+            rng.normal(loc=0.0, scale=0.35, size=50),
+        ]
+    )
+    coords = np.vstack([left, right]).astype(np.float32)
+    features = np.vstack(
+        [
+            rng.normal(loc=[-2.0, 0.0], scale=0.15, size=(50, 2)),
+            rng.normal(loc=[2.0, 0.0], scale=0.15, size=(50, 2)),
+        ]
+    ).astype(np.float32)
+
+    adata = ad.AnnData(X=features.copy())
+    adata.obsm["X_pca"] = features.copy()
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    input_h5ad = tmp_path / "joint_refinement.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    output_dir = tmp_path / "joint_refinement_out"
+    summary = run_multilevel_ot_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=output_dir,
+        feature_obsm_key="X_pca",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=1.0,
+        stride_um=1.0,
+        min_cells=15,
+        max_subregions=4,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=8,
+        align_iters=1,
+        n_init=1,
+        allow_convex_hull_fallback=False,
+        max_iter=1,
+        tol=1e-4,
+        basic_niche_size_um=1.0,
+        shape_diagnostics=False,
+        subregion_construction_method="joint_refinement",
+        deep_segmentation_knn=8,
+        deep_segmentation_feature_dims=2,
+        deep_segmentation_feature_weight=5.0,
+        deep_segmentation_spatial_weight=0.01,
+        joint_refinement_iters=1,
+        joint_refinement_knn=8,
+        joint_refinement_feature_dims=2,
+        joint_refinement_max_move_fraction=0.10,
+        joint_refinement_acceptance_margin=1e-3,
+        compute_spot_latent=False,
+        seed=315,
+        compute_device="cpu",
+    )
+
+    outputs = summary["outputs"]
+    for key in [
+        "joint_refinement_energy",
+        "joint_refinement_moves",
+        "cell_to_subregion_initial",
+        "cell_to_subregion_refined",
+        "cluster_labels_initial",
+        "cluster_labels_refined",
+    ]:
+        assert Path(outputs[key]).exists()
+
+    initial_cells = np.load(outputs["cell_to_subregion_initial"])
+    refined_cells = np.load(outputs["cell_to_subregion_refined"])
+    initial_clusters = np.load(outputs["cluster_labels_initial"])
+    refined_clusters = np.load(outputs["cluster_labels_refined"])
+    assert initial_cells.shape == (coords.shape[0],)
+    assert refined_cells.shape == (coords.shape[0],)
+    assert initial_clusters.shape[0] == summary["joint_refinement"][
+        "initial_region_count"
+    ]
+    assert refined_clusters.shape[0] == summary["n_subregions"]
+
+    energy = pd.read_csv(outputs["joint_refinement_energy"])
+    moves = pd.read_parquet(outputs["joint_refinement_moves"])
+    assert {"total_energy_before", "total_energy_delta", "acceptance_margin"} <= set(
+        energy.columns
+    )
+    assert {"weighted_delta", "accepted", "source_connectivity_preserved"} <= set(
+        moves.columns
+    )
+    assert summary["joint_refinement"]["preliminary_embedding_source"] == (
+        "heterogeneity_descriptor_niche"
+    )
+    assert summary["joint_refinement"]["transport_inside_boundary_loop"] is False
+    saved_summary = json.loads((output_dir / "summary.json").read_text())
+    assert saved_summary["outputs"]["joint_refinement_moves"] == outputs[
+        "joint_refinement_moves"
+    ]
+
+
 def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallback(
     tmp_path,
 ) -> None:
@@ -1255,7 +1370,7 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert summary["shape_leakage_balanced_accuracy"] is None
     assert "subregion" in summary["method_layers"]["layer_1_subregion_formation"]
     assert (
-        "pooled matrix"
+        "heterogeneity descriptor"
         in summary["method_layers"]["layer_2_subregion_heterogeneity_clustering"]
     )
     assert (

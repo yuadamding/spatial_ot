@@ -11,7 +11,7 @@ from .config import (
     validate_multilevel_config,
 )
 from .deep import fit_deep_features_on_h5ad, transform_h5ad_with_deep_model
-from .feature_source import prepare_h5ad_feature_cache
+from .feature_source import default_precomputed_x_feature_key, prepare_h5ad_feature_cache
 from .multilevel import (
     plot_sample_niche_maps_from_run_dir,
     plot_sample_spot_latent_maps_from_run_dir,
@@ -21,6 +21,19 @@ from .multilevel import (
 )
 from .optimal_search import run_multilevel_optimal_search
 from .pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_directory
+
+
+def _parse_thread_env_int(value: str | None, default: int) -> int:
+    if value is None:
+        return max(int(default), 1)
+    token = str(value).strip()
+    if "," in token:
+        token = token.split(",", 1)[0].strip()
+    try:
+        parsed = int(token)
+    except ValueError:
+        return max(int(default), 1)
+    return max(int(parsed), 1) if parsed > 0 else max(int(default), 1)
 
 
 def _configure_runtime_threads_from_env() -> None:
@@ -34,13 +47,10 @@ def _configure_runtime_threads_from_env() -> None:
         from .multilevel.runtime import configure_local_thread_budget
     except Exception:
         return
-    threads = (
-        int(torch_threads)
-        if torch_threads is not None
-        else max(int(os.cpu_count() or 1), 1)
-    )
-    interop_threads = (
-        int(torch_interop_threads) if torch_interop_threads is not None else 4
+    threads = _parse_thread_env_int(torch_threads, max(int(os.cpu_count() or 1), 1))
+    interop_threads = _parse_thread_env_int(
+        torch_interop_threads,
+        min(4, max(int(os.cpu_count() or 1), 1)),
     )
     configure_local_thread_budget(threads, interop_threads)
 
@@ -623,9 +633,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="obs key storing the source H5AD filename.",
     )
     pool_inputs.add_argument(
+        "--sample-id-prefix",
+        default="",
+        help="Filename prefix stripped when deriving sample IDs.",
+    )
+    pool_inputs.add_argument(
         "--sample-id-suffix",
         default="_cells_marker_genes_umap3d",
         help="Filename suffix stripped when deriving sample IDs.",
+    )
+    pool_inputs.add_argument(
+        "--sample-id-case",
+        default="preserve",
+        choices=["preserve", "lower", "upper"],
+        help="Optional case normalization applied to derived sample IDs.",
     )
     pool_inputs.add_argument(
         "--layout-columns",
@@ -1051,7 +1072,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--joint-refinement-cluster-weight",
         type=float,
         default=None,
-        help="Weight on pooled-latent cluster-prototype coherence during joint refinement.",
+        help="Weight on preliminary cluster-prototype coherence during joint refinement.",
     )
     multilevel.add_argument(
         "--joint-refinement-spatial-weight",
@@ -1070,6 +1091,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Maximum fraction of cells that may move during each joint-refinement sweep.",
+    )
+    multilevel.add_argument(
+        "--joint-refinement-acceptance-margin",
+        type=float,
+        default=None,
+        help="Minimum weighted objective gain required before accepting a joint-refinement boundary move.",
     )
     multilevel.add_argument(
         "--subregion-clustering-method",
@@ -1630,7 +1657,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--joint-refinement-cluster-weight",
         type=float,
         default=None,
-        help="Weight on pooled-latent cluster-prototype coherence during joint refinement.",
+        help="Weight on preliminary cluster-prototype coherence during joint refinement.",
     )
     optimal_search.add_argument(
         "--joint-refinement-spatial-weight",
@@ -1649,6 +1676,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Maximum fraction of cells that may move during each joint-refinement sweep.",
+    )
+    optimal_search.add_argument(
+        "--joint-refinement-acceptance-margin",
+        type=float,
+        default=None,
+        help="Minimum weighted objective gain required before accepting a joint-refinement boundary move.",
     )
     optimal_search.add_argument(
         "--subregion-clustering-method",
@@ -1956,7 +1989,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     optimal_search.add_argument(
         "--sample-obs-key",
-        default="sample_id",
+        default=None,
         help="obs key used when writing one best-run niche map per sample.",
     )
     optimal_search.add_argument(
@@ -2005,6 +2038,11 @@ def _resolve_multilevel_config_from_args(
     _set_if_not_none(config.paths, "input_h5ad", args.input_h5ad)
     _set_if_not_none(config.paths, "output_dir", args.output_dir)
     _set_if_not_none(config.paths, "feature_obsm_key", args.feature_obsm_key)
+    if (
+        getattr(args, "command", None) == "optimal-search"
+        and not config.paths.feature_obsm_key
+    ):
+        config.paths.feature_obsm_key = default_precomputed_x_feature_key()
     _set_if_not_none(config.paths, "spatial_x_key", args.spatial_x_key)
     _set_if_not_none(config.paths, "spatial_y_key", args.spatial_y_key)
     _set_if_not_none(
@@ -2058,6 +2096,7 @@ def _resolve_multilevel_config_from_args(
         "joint_refinement_spatial_weight",
         "joint_refinement_cut_weight",
         "joint_refinement_max_move_fraction",
+        "joint_refinement_acceptance_margin",
         "subregion_clustering_method",
         "subregion_latent_embedding_mode",
         "subregion_latent_shrinkage_tau",
@@ -2471,7 +2510,9 @@ def main() -> None:
             pooled_spatial_y_key=args.pooled_spatial_y_key,
             sample_obs_key=args.sample_obs_key,
             source_file_obs_key=args.source_file_obs_key,
+            sample_id_prefix=args.sample_id_prefix,
             sample_id_suffix=args.sample_id_suffix,
+            sample_id_case=args.sample_id_case,
             layout_columns=args.layout_columns,
             layout_gap=args.layout_gap,
         )
@@ -2531,7 +2572,7 @@ def main() -> None:
         summary = run_multilevel_optimal_search(
             config=config,
             search_output_dir=args.output_dir or config.paths.output_dir,
-            sample_obs_key=args.sample_obs_key,
+            sample_obs_key=args.sample_obs_key or config.paths.sample_obs_key,
             source_file_obs_key=args.source_file_obs_key,
             plot_spatial_x_key=args.plot_spatial_x_key,
             plot_spatial_y_key=args.plot_spatial_y_key,

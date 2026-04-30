@@ -704,6 +704,41 @@ def _region_adjacency_from_knn(
     return adjacency
 
 
+def _cell_knn_adjacency(neighbors: np.ndarray) -> list[set[int]]:
+    neigh = np.asarray(neighbors, dtype=np.int64)
+    adjacency = [set(row.tolist()) for row in neigh]
+    for src, row in enumerate(neigh):
+        for dst in row.tolist():
+            if 0 <= int(dst) < len(adjacency):
+                adjacency[int(dst)].add(int(src))
+    return adjacency
+
+
+def _removing_cell_preserves_source_connectivity(
+    *,
+    cell: int,
+    labels: np.ndarray,
+    source: int,
+    adjacency: list[set[int]],
+) -> bool:
+    source_members = np.flatnonzero(labels == int(source)).astype(np.int64)
+    if source_members.size <= 2:
+        return True
+    remaining = set(int(idx) for idx in source_members.tolist() if int(idx) != int(cell))
+    if len(remaining) <= 1:
+        return True
+    start = next(iter(remaining))
+    seen = {start}
+    stack = [start]
+    while stack:
+        current = stack.pop()
+        for neighbor in adjacency[int(current)]:
+            if neighbor in remaining and neighbor not in seen:
+                seen.add(int(neighbor))
+                stack.append(int(neighbor))
+    return len(seen) == len(remaining)
+
+
 def _weighted_cluster_feature_prototypes(
     region_means: np.ndarray,
     region_sizes: np.ndarray,
@@ -755,6 +790,62 @@ def _cluster_feature_objective(
     return float(total)
 
 
+def _refinement_energy_components(
+    *,
+    labels: np.ndarray,
+    coords: np.ndarray,
+    features: np.ndarray,
+    region_cluster_labels: np.ndarray,
+    prototypes: np.ndarray,
+    neighbors: np.ndarray,
+    scale_sq: float,
+    cluster_weight: float,
+    spatial_weight: float,
+    cut_weight: float,
+) -> dict[str, float]:
+    label_arr = np.asarray(labels, dtype=np.int32)
+    n_regions = int(label_arr.max(initial=-1)) + 1
+    if n_regions <= 0:
+        return {
+            "cluster_energy": 0.0,
+            "spatial_energy": 0.0,
+            "cut_energy": 0.0,
+            "total_energy": 0.0,
+        }
+    region_sizes = np.bincount(label_arr, minlength=n_regions).astype(np.float64)
+    feature_sums = np.zeros((n_regions, int(features.shape[1])), dtype=np.float64)
+    coord_sums = np.zeros((n_regions, 2), dtype=np.float64)
+    np.add.at(feature_sums, label_arr, np.asarray(features, dtype=np.float64))
+    np.add.at(coord_sums, label_arr, np.asarray(coords, dtype=np.float64))
+    denom = np.maximum(region_sizes[:, None], 1.0)
+    region_means = (feature_sums / denom).astype(np.float32)
+    centers = coord_sums / denom
+    cluster_energy = _cluster_feature_objective(
+        region_means,
+        region_sizes,
+        region_cluster_labels,
+        prototypes,
+    )
+    centered = np.asarray(coords, dtype=np.float64) - centers[label_arr]
+    spatial_energy = float(np.sum(centered * centered) / max(float(scale_sq), 1e-12))
+    neigh = np.asarray(neighbors, dtype=np.int64)
+    if neigh.size:
+        cut_energy = float(np.mean(label_arr[neigh] != label_arr[:, None]))
+    else:
+        cut_energy = 0.0
+    total = (
+        float(cluster_weight) * float(cluster_energy)
+        + float(spatial_weight) * float(spatial_energy)
+        + float(cut_weight) * float(cut_energy)
+    )
+    return {
+        "cluster_energy": float(cluster_energy),
+        "spatial_energy": float(spatial_energy),
+        "cut_energy": float(cut_energy),
+        "total_energy": float(total),
+    }
+
+
 def refine_subregions_by_cluster_coherence(
     coords_um: np.ndarray,
     features: np.ndarray,
@@ -770,8 +861,11 @@ def refine_subregions_by_cluster_coherence(
     spatial_weight: float = 0.25,
     cut_weight: float = 0.5,
     max_move_fraction: float = 0.05,
+    acceptance_margin: float = 1e-3,
+    enforce_connectivity: bool = True,
     feature_dims: int = 32,
     seed: int = 1337,
+    move_log: list[dict[str, object]] | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], list[np.ndarray], list[dict[str, float]]]:
     """Refine a full-coverage partition using fitted cluster coherence.
 
@@ -819,9 +913,11 @@ def refine_subregions_by_cluster_coherence(
     )
     nn.fit(coords)
     neighbors = nn.kneighbors(coords, return_distance=False)[:, 1:]
+    cell_adjacency = _cell_knn_adjacency(neighbors)
     rng = np.random.default_rng(int(seed))
     min_cells = max(int(min_cells), 1)
     max_moves_per_iter = max(1, int(np.ceil(float(max_move_fraction) * n_cells)))
+    acceptance_margin = max(float(acceptance_margin), 0.0)
     scale_sq = max(float(target_scale_um) ** 2, 1e-6)
     history: list[dict[str, float]] = []
 
@@ -837,8 +933,17 @@ def refine_subregions_by_cluster_coherence(
         prototypes = _weighted_cluster_feature_prototypes(
             region_means, region_sizes, region_cluster_labels
         )
-        objective_before = _cluster_feature_objective(
-            region_means, region_sizes, region_cluster_labels, prototypes
+        energy_before = _refinement_energy_components(
+            labels=labels,
+            coords=coords,
+            features=feature_view,
+            region_cluster_labels=region_cluster_labels,
+            prototypes=prototypes,
+            neighbors=neighbors,
+            scale_sq=scale_sq,
+            cluster_weight=float(cluster_weight),
+            spatial_weight=float(spatial_weight),
+            cut_weight=float(cut_weight),
         )
 
         neighbor_labels = labels[neighbors]
@@ -851,8 +956,23 @@ def refine_subregions_by_cluster_coherence(
                     "boundary_cells": 0.0,
                     "accepted_moves": 0.0,
                     "moved_cell_fraction": 0.0,
-                    "cluster_objective_before": float(objective_before),
-                    "cluster_objective_after": float(objective_before),
+                    "cluster_objective_before": float(
+                        energy_before["cluster_energy"]
+                    ),
+                    "cluster_objective_after": float(
+                        energy_before["cluster_energy"]
+                    ),
+                    "spatial_objective_before": float(
+                        energy_before["spatial_energy"]
+                    ),
+                    "spatial_objective_after": float(
+                        energy_before["spatial_energy"]
+                    ),
+                    "cut_objective_before": float(energy_before["cut_energy"]),
+                    "cut_objective_after": float(energy_before["cut_energy"]),
+                    "total_energy_before": float(energy_before["total_energy"]),
+                    "total_energy_after": float(energy_before["total_energy"]),
+                    "acceptance_margin": float(acceptance_margin),
                 }
             )
             break
@@ -890,7 +1010,10 @@ def refine_subregions_by_cluster_coherence(
             own_neighbor_labels = labels[neighbors[int(cell)]]
             old_cut = float(np.mean(own_neighbor_labels != source))
             best_target = -1
-            best_delta = 0.0
+            best_delta = float("inf")
+            best_cluster_delta = 0.0
+            best_spatial_delta = 0.0
+            best_cut_delta = 0.0
             for target_raw in candidate_labels.tolist():
                 target = int(target_raw)
                 target_label = int(region_cluster_labels[target])
@@ -927,7 +1050,44 @@ def refine_subregions_by_cluster_coherence(
                 if total_delta < best_delta:
                     best_delta = float(total_delta)
                     best_target = target
-            if best_target < 0:
+                    best_cluster_delta = float(cluster_delta)
+                    best_spatial_delta = float(spatial_delta)
+                    best_cut_delta = float(cut_delta)
+            if best_target < 0 or not np.isfinite(best_delta):
+                continue
+
+            preserves_connectivity = True
+            if bool(enforce_connectivity):
+                preserves_connectivity = _removing_cell_preserves_source_connectivity(
+                    cell=int(cell),
+                    labels=labels,
+                    source=int(source),
+                    adjacency=cell_adjacency,
+                )
+            accepted_move = bool(
+                preserves_connectivity and best_delta < -float(acceptance_margin)
+            )
+            if move_log is not None:
+                move_log.append(
+                    {
+                        "iteration": int(iteration),
+                        "cell": int(cell),
+                        "old_subregion": int(source),
+                        "new_subregion": int(best_target),
+                        "old_cluster": int(region_cluster_labels[int(source)]),
+                        "new_cluster": int(region_cluster_labels[int(best_target)]),
+                        "delta_cluster_coherence": float(best_cluster_delta),
+                        "delta_spatial_penalty": float(best_spatial_delta),
+                        "delta_cut_penalty": float(best_cut_delta),
+                        "weighted_delta": float(best_delta),
+                        "acceptance_margin": float(acceptance_margin),
+                        "accepted": bool(accepted_move),
+                        "source_connectivity_preserved": bool(preserves_connectivity),
+                        "source_size_before": int(region_sizes[int(source)]),
+                        "target_size_before": int(region_sizes[int(best_target)]),
+                    }
+                )
+            if not accepted_move:
                 continue
 
             labels[int(cell)] = int(best_target)
@@ -941,17 +1101,17 @@ def refine_subregions_by_cluster_coherence(
             if accepted >= max_moves_per_iter:
                 break
 
-        region_sizes_after = np.bincount(labels, minlength=n_regions).astype(np.float64)
-        feature_sums_after = np.zeros((n_regions, keep_dims), dtype=np.float64)
-        np.add.at(feature_sums_after, labels, feature_view.astype(np.float64))
-        region_means_after = (
-            feature_sums_after / np.maximum(region_sizes_after[:, None], 1.0)
-        ).astype(np.float32)
-        objective_after = _cluster_feature_objective(
-            region_means_after,
-            region_sizes_after,
-            region_cluster_labels,
-            prototypes,
+        energy_after = _refinement_energy_components(
+            labels=labels,
+            coords=coords,
+            features=feature_view,
+            region_cluster_labels=region_cluster_labels,
+            prototypes=prototypes,
+            neighbors=neighbors,
+            scale_sq=scale_sq,
+            cluster_weight=float(cluster_weight),
+            spatial_weight=float(spatial_weight),
+            cut_weight=float(cut_weight),
         )
         history.append(
             {
@@ -960,8 +1120,19 @@ def refine_subregions_by_cluster_coherence(
                 "evaluated_boundary_cells": float(evaluated),
                 "accepted_moves": float(accepted),
                 "moved_cell_fraction": float(accepted / max(n_cells, 1)),
-                "cluster_objective_before": float(objective_before),
-                "cluster_objective_after": float(objective_after),
+                "cluster_objective_before": float(energy_before["cluster_energy"]),
+                "cluster_objective_after": float(energy_after["cluster_energy"]),
+                "spatial_objective_before": float(energy_before["spatial_energy"]),
+                "spatial_objective_after": float(energy_after["spatial_energy"]),
+                "cut_objective_before": float(energy_before["cut_energy"]),
+                "cut_objective_after": float(energy_after["cut_energy"]),
+                "total_energy_before": float(energy_before["total_energy"]),
+                "total_energy_after": float(energy_after["total_energy"]),
+                "total_energy_delta": float(
+                    energy_after["total_energy"] - energy_before["total_energy"]
+                ),
+                "acceptance_margin": float(acceptance_margin),
+                "connectivity_enforced": float(bool(enforce_connectivity)),
             }
         )
         if accepted == 0:

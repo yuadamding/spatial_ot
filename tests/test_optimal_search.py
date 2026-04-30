@@ -129,6 +129,7 @@ def test_candidate_command_preserves_pretrained_deep_model_and_regularization_fl
     config.deep.early_stopping_patience = 4
     config.deep.min_delta = 0.002
     config.deep.restore_best = False
+    config.ot.max_subregion_area_um2 = 123.5
 
     command = _candidate_command(config)
 
@@ -161,6 +162,9 @@ def test_candidate_command_preserves_pretrained_deep_model_and_regularization_fl
     assert command[command.index("--joint-refinement-max-move-fraction") + 1] == str(
         config.ot.joint_refinement_max_move_fraction
     )
+    assert command[command.index("--joint-refinement-acceptance-margin") + 1] == str(
+        config.ot.joint_refinement_acceptance_margin
+    )
     assert command[
         command.index("--heterogeneity-transport-max-subregions") + 1
     ] == str(config.ot.heterogeneity_transport_max_subregions)
@@ -176,6 +180,7 @@ def test_candidate_command_preserves_pretrained_deep_model_and_regularization_fl
     assert command[command.index("--heterogeneity-fgw-solver") + 1] == str(
         config.ot.heterogeneity_fgw_solver
     )
+    assert command[command.index("--max-subregion-area-um2") + 1] == "123.5"
 
 
 def test_optimal_search_marks_timed_out_candidates(monkeypatch, tmp_path: Path) -> None:
