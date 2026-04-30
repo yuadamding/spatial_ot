@@ -29,7 +29,14 @@ def _decode_counts_from_factors(
 
 
 class MLPAutoencoder(nn.Module):
-    def __init__(self, input_dim: int, context_dim: int, config: DeepFeatureConfig, *, count_dim: int | None = None) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        context_dim: int,
+        config: DeepFeatureConfig,
+        *,
+        count_dim: int | None = None,
+    ) -> None:
         super().__init__()
         hidden_dim = int(config.hidden_dim)
         layers = []
@@ -76,14 +83,18 @@ class MLPAutoencoder(nn.Module):
             self.count_log_theta = nn.Parameter(torch.zeros(int(count_dim)))
             nn.init.normal_(self.count_gene_factors, std=0.02)
 
-    def _encode_all(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _encode_all(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         h = self.encoder_body(x)
         intrinsic = self.intrinsic_head(h)
         context = self.context_head(h)
         joint = self.fusion(torch.cat([intrinsic, context], dim=-1))
         return intrinsic, context, joint
 
-    def encode(self, x: torch.Tensor, *, output_embedding: str = "joint") -> torch.Tensor:
+    def encode(
+        self, x: torch.Tensor, *, output_embedding: str = "joint"
+    ) -> torch.Tensor:
         intrinsic, context, joint = self._encode_all(x)
         if output_embedding == "intrinsic":
             return intrinsic
@@ -114,7 +125,9 @@ class MLPAutoencoder(nn.Module):
             or self.count_gene_bias is None
             or self.count_log_theta is None
         ):
-            raise RuntimeError("Count reconstruction was requested, but the count decoder was not initialized.")
+            raise RuntimeError(
+                "Count reconstruction was requested, but the count decoder was not initialized."
+            )
         return _decode_counts_from_factors(
             intrinsic,
             factor_layer=self.count_factor,
@@ -127,7 +140,14 @@ class MLPAutoencoder(nn.Module):
 
 
 class GraphAutoencoder(nn.Module):
-    def __init__(self, input_dim: int, context_dim: int, config: DeepFeatureConfig, *, count_dim: int | None = None) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        context_dim: int,
+        config: DeepFeatureConfig,
+        *,
+        count_dim: int | None = None,
+    ) -> None:
         super().__init__()
         hidden_dim = int(config.hidden_dim)
         layers = []
@@ -139,10 +159,16 @@ class GraphAutoencoder(nn.Module):
         self.encoder_body = nn.Sequential(*layers)
         self.encoder_head = nn.Linear(in_dim, int(config.latent_dim))
         self.short_layers = nn.ModuleList(
-            [MeanGraphLayer(int(config.latent_dim), hidden_dim) for _ in range(max(int(config.graph_layers), 1))]
+            [
+                MeanGraphLayer(int(config.latent_dim), hidden_dim)
+                for _ in range(max(int(config.graph_layers), 1))
+            ]
         )
         self.mid_layers = nn.ModuleList(
-            [MeanGraphLayer(int(config.latent_dim), hidden_dim) for _ in range(max(int(config.graph_layers), 1))]
+            [
+                MeanGraphLayer(int(config.latent_dim), hidden_dim)
+                for _ in range(max(int(config.graph_layers), 1))
+            ]
         )
         self.fusion = nn.Sequential(
             nn.Linear(int(config.latent_dim) * 3, hidden_dim),
@@ -196,7 +222,9 @@ class GraphAutoencoder(nn.Module):
         edge_index_mid: torch.Tensor,
         output_embedding: str = "joint",
     ) -> torch.Tensor:
-        intrinsic, context, joint = self._encode_all(x, edge_index_short=edge_index_short, edge_index_mid=edge_index_mid)
+        intrinsic, context, joint = self._encode_all(
+            x, edge_index_short=edge_index_short, edge_index_mid=edge_index_mid
+        )
         if output_embedding == "intrinsic":
             return intrinsic
         if output_embedding == "context":
@@ -210,7 +238,9 @@ class GraphAutoencoder(nn.Module):
         edge_index_short: torch.Tensor,
         edge_index_mid: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        intrinsic, context, joint = self._encode_all(x, edge_index_short=edge_index_short, edge_index_mid=edge_index_mid)
+        intrinsic, context, joint = self._encode_all(
+            x, edge_index_short=edge_index_short, edge_index_mid=edge_index_mid
+        )
         return {
             "intrinsic": intrinsic,
             "context": context,
@@ -232,7 +262,9 @@ class GraphAutoencoder(nn.Module):
             or self.count_gene_bias is None
             or self.count_log_theta is None
         ):
-            raise RuntimeError("Count reconstruction was requested, but the count decoder was not initialized.")
+            raise RuntimeError(
+                "Count reconstruction was requested, but the count decoder was not initialized."
+            )
         return _decode_counts_from_factors(
             intrinsic,
             factor_layer=self.count_factor,
@@ -244,10 +276,23 @@ class GraphAutoencoder(nn.Module):
         )
 
 
-def make_model(input_dim: int, context_dim: int, config: DeepFeatureConfig, *, count_dim: int | None = None) -> nn.Module:
+def make_model(
+    input_dim: int,
+    context_dim: int,
+    config: DeepFeatureConfig,
+    *,
+    count_dim: int | None = None,
+) -> nn.Module:
     if config.method == "graph_autoencoder":
-        return GraphAutoencoder(input_dim=input_dim, context_dim=context_dim, config=config, count_dim=count_dim)
-    return MLPAutoencoder(input_dim=input_dim, context_dim=context_dim, config=config, count_dim=count_dim)
+        return GraphAutoencoder(
+            input_dim=input_dim,
+            context_dim=context_dim,
+            config=config,
+            count_dim=count_dim,
+        )
+    return MLPAutoencoder(
+        input_dim=input_dim, context_dim=context_dim, config=config, count_dim=count_dim
+    )
 
 
 def tensor_graphs(

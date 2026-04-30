@@ -21,7 +21,9 @@ from spatial_ot.deep import (
 )
 from spatial_ot.deep.features import _split_validation
 from spatial_ot.deep.io import _extract_count_target as _extract_deep_count_target
-from spatial_ot.multilevel.metadata import extract_count_target as _extract_multilevel_count_target
+from spatial_ot.multilevel.metadata import (
+    extract_count_target as _extract_multilevel_count_target,
+)
 from spatial_ot.multilevel.io import _load_region_geometry_json
 from spatial_ot.multilevel import run_multilevel_ot_on_h5ad
 
@@ -171,8 +173,12 @@ def test_no_validation_restores_latest_epoch_not_epoch_one() -> None:
         restore_best=True,
     )
 
-    enc1 = SpatialOTFeatureEncoder(config_epoch1).fit(features=features, coords_um=coords, seed=11)
-    enc5 = SpatialOTFeatureEncoder(config_epoch5).fit(features=features, coords_um=coords, seed=11)
+    enc1 = SpatialOTFeatureEncoder(config_epoch1).fit(
+        features=features, coords_um=coords, seed=11
+    )
+    enc5 = SpatialOTFeatureEncoder(config_epoch5).fit(
+        features=features, coords_um=coords, seed=11
+    )
 
     z1 = enc1.transform(features=features, coords_um=coords)
     z5 = enc5.transform(features=features, coords_um=coords)
@@ -201,8 +207,12 @@ def test_seed_reproducibility_includes_weight_initialization() -> None:
         restore_best=True,
     )
 
-    enc_a = SpatialOTFeatureEncoder(config).fit(features=features, coords_um=coords, seed=23)
-    enc_b = SpatialOTFeatureEncoder(config).fit(features=features, coords_um=coords, seed=23)
+    enc_a = SpatialOTFeatureEncoder(config).fit(
+        features=features, coords_um=coords, seed=23
+    )
+    enc_b = SpatialOTFeatureEncoder(config).fit(
+        features=features, coords_um=coords, seed=23
+    )
 
     z_a = enc_a.transform(features=features, coords_um=coords)
     z_b = enc_b.transform(features=features, coords_um=coords)
@@ -229,7 +239,9 @@ def test_build_neighbor_graph_respects_max_neighbors() -> None:
         assert int(max_degree) <= 3
 
 
-def test_aggregate_neighbor_mean_torch_matches_full_gather_when_chunked(monkeypatch) -> None:
+def test_aggregate_neighbor_mean_torch_matches_full_gather_when_chunked(
+    monkeypatch,
+) -> None:
     features = torch.arange(24, dtype=torch.float32).reshape(8, 3)
     edge_index = torch.tensor(
         [
@@ -299,7 +311,9 @@ def test_deep_scaler_fit_on_train_only() -> None:
     val_mask = _split_validation(coords_um=coords, batch=batch, config=config, seed=3)
     train_mask = ~val_mask
     expected_mean = features[train_mask].mean(axis=0, keepdims=True)
-    assert np.allclose(encoder.feature_mean, expected_mean.astype(np.float32), atol=1e-5)
+    assert np.allclose(
+        encoder.feature_mean, expected_mean.astype(np.float32), atol=1e-5
+    )
 
 
 def test_fit_deep_features_helper_returns_result(tmp_path) -> None:
@@ -458,7 +472,9 @@ def test_transform_h5ad_with_deep_model_writes_embedding(tmp_path) -> None:
     assert transformed.obsm["X_deep_test"].shape == (18, 3)
 
 
-def test_transform_h5ad_with_deep_model_rejects_graph_full_batch_oversize_input(tmp_path) -> None:
+def test_transform_h5ad_with_deep_model_rejects_graph_full_batch_oversize_input(
+    tmp_path,
+) -> None:
     rng = np.random.default_rng(7801)
     features_train = rng.normal(size=(6, 4)).astype(np.float32)
     coords_train = rng.normal(size=(6, 2)).astype(np.float32)
@@ -518,7 +534,9 @@ def test_transform_h5ad_with_deep_model_rejects_graph_full_batch_oversize_input(
         )
 
 
-def test_transform_h5ad_with_deep_model_rejects_mismatched_input_obsm_key(tmp_path) -> None:
+def test_transform_h5ad_with_deep_model_rejects_mismatched_input_obsm_key(
+    tmp_path,
+) -> None:
     rng = np.random.default_rng(79)
     features = rng.normal(size=(20, 4)).astype(np.float32)
     coords = rng.normal(size=(20, 2)).astype(np.float32)
@@ -570,7 +588,9 @@ def test_transform_h5ad_with_deep_model_rejects_mismatched_input_obsm_key(tmp_pa
         )
 
 
-def test_multilevel_pretrained_deep_model_rejects_mismatched_input_obsm_key(tmp_path) -> None:
+def test_multilevel_pretrained_deep_model_rejects_mismatched_input_obsm_key(
+    tmp_path,
+) -> None:
     rng = np.random.default_rng(791)
     features = rng.normal(size=(20, 4)).astype(np.float32)
     coords = rng.normal(size=(20, 2)).astype(np.float32)
@@ -648,7 +668,9 @@ def test_multilevel_pretrained_deep_model_rejects_mismatched_input_obsm_key(tmp_
         )
 
 
-def test_transform_h5ad_with_deep_model_rejects_spatial_scale_mismatch(tmp_path) -> None:
+def test_transform_h5ad_with_deep_model_rejects_spatial_scale_mismatch(
+    tmp_path,
+) -> None:
     rng = np.random.default_rng(80)
     features = rng.normal(size=(20, 4)).astype(np.float32)
     coords = rng.normal(size=(20, 2)).astype(np.float32)
@@ -756,7 +778,9 @@ latent_dim = 5
         load_multilevel_config(config_path)
 
 
-def test_count_layer_config_loads_now_that_count_reconstruction_is_supported(tmp_path) -> None:
+def test_count_layer_config_loads_now_that_count_reconstruction_is_supported(
+    tmp_path,
+) -> None:
     config_path = tmp_path / "multilevel_count.toml"
     config_path.write_text(
         """
@@ -868,7 +892,10 @@ def test_fit_deep_features_on_h5ad_reports_count_reconstruction(tmp_path) -> Non
     assert count_summary["target_layer"] == "X"
     assert count_summary["decoder_rank"] == 4
     assert count_summary["gene_chunk_size"] == 3
-    assert summary["deep_features"]["latent_diagnostics"]["count_target_dim"] == counts.shape[1]
+    assert (
+        summary["deep_features"]["latent_diagnostics"]["count_target_dim"]
+        == counts.shape[1]
+    )
 
 
 def test_deep_fit_cli_spatial_scale_overrides_config(tmp_path) -> None:
@@ -1013,11 +1040,17 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert summary["deep_features"]["enabled"] is True
     assert summary["deep_features"]["method"] == "graph_autoencoder"
     assert summary["deep_features"]["allow_joint_ot_embedding"] is True
-    assert summary["deep_features"]["ot_feature_view_warning"] == "joint_embedding_explicit_opt_in"
+    assert (
+        summary["deep_features"]["ot_feature_view_warning"]
+        == "joint_embedding_explicit_opt_in"
+    )
     assert summary["deep_features"]["batch_correction"] == "disabled"
     assert "runtime_memory" in summary["deep_features"]
     assert summary["deep_features"]["feature_schema"]["input_obsm_key"] == "X_pca"
-    assert summary["deep_features"]["feature_schema"]["coordinate_keys"] == ["cell_x", "cell_y"]
+    assert summary["deep_features"]["feature_schema"]["coordinate_keys"] == [
+        "cell_x",
+        "cell_y",
+    ]
     assert "deep_feature_model" in summary["outputs"]
     assert "deep_feature_history" in summary["outputs"]
     assert "deep_feature_model_meta" in summary["outputs"]
@@ -1029,11 +1062,25 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert saved_summary["latent_source"] == "deep_joint"
     assert saved_summary["communication_source"] == "none"
     assert saved_summary["method_stack"]["deep_feature_adapter"] == "graph_autoencoder"
-    assert saved_summary["method_stack"]["cell_label_mode"] == "fitted_subregion_cluster_membership"
-    assert saved_summary["method_stack"]["cell_projection_mode"] == "auxiliary_approximate_cell_scores"
-    assigned_transport_cost_decomposition = saved_summary["assigned_transport_cost_decomposition"]
-    assert assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"] > 0.0
-    assert assigned_transport_cost_decomposition["mean_transport_assignment_objective"] >= assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"]
+    assert (
+        saved_summary["method_stack"]["cell_label_mode"]
+        == "fitted_subregion_cluster_membership"
+    )
+    assert (
+        saved_summary["method_stack"]["cell_projection_mode"]
+        == "auxiliary_approximate_cell_scores"
+    )
+    assigned_transport_cost_decomposition = saved_summary[
+        "assigned_transport_cost_decomposition"
+    ]
+    assert (
+        assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"]
+        > 0.0
+    )
+    assert (
+        assigned_transport_cost_decomposition["mean_transport_assignment_objective"]
+        >= assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"]
+    )
     assert np.isclose(
         assigned_transport_cost_decomposition["geometry_transport_fraction"]
         + assigned_transport_cost_decomposition["feature_transport_fraction"]
@@ -1041,14 +1088,23 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
         1.0,
         atol=1e-5,
     )
-    assert assigned_transport_cost_decomposition["mean_regularized_objective"] >= assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"]
+    assert (
+        assigned_transport_cost_decomposition["mean_regularized_objective"]
+        >= assigned_transport_cost_decomposition["mean_transport_plus_transform_cost"]
+    )
     assert saved_summary["cost_reliability"]["effective_eps_matrix_available"] is True
     assert "subregion_embedding_compactness" in saved_summary
     assert "boundary_separation" in saved_summary
     assert "transform_diagnostics" in saved_summary
     assert Path(saved_summary["outputs"]["candidate_cost_diagnostics"]).exists()
-    assert any(item["code"] == "cell_projection_is_approximate_assigned_subregion" for item in saved_summary["qc_warnings"])
-    assert any(item["code"] == "observed_hull_geometry_fallback_active" for item in saved_summary["qc_warnings"])
+    assert any(
+        item["code"] == "cell_projection_is_approximate_assigned_subregion"
+        for item in saved_summary["qc_warnings"]
+    )
+    assert any(
+        item["code"] == "observed_hull_geometry_fallback_active"
+        for item in saved_summary["qc_warnings"]
+    )
     required_summary_keys = {
         "summary_schema_version",
         "method_family",
@@ -1066,10 +1122,18 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
         "normalizer_diagnostics",
     }
     assert required_summary_keys <= set(saved_summary)
-    assert saved_summary["boundary_invariance_claim"] == "not_supported_observed_hull_fallback"
-    assert saved_summary["subregion_construction"]["radius_used_for_membership"] is False
+    assert (
+        saved_summary["boundary_invariance_claim"]
+        == "not_supported_observed_hull_fallback"
+    )
+    assert (
+        saved_summary["subregion_construction"]["radius_used_for_membership"] is False
+    )
     assert saved_summary["radius_used_for_subregion_membership"] is False
-    assert saved_summary["realized_subregion_statistics"]["n_cells"]["count"] == saved_summary["n_subregions"]
+    assert (
+        saved_summary["realized_subregion_statistics"]["n_cells"]["count"]
+        == saved_summary["n_subregions"]
+    )
     assert saved_summary["compute_device_requested"] == "cpu"
     assert saved_summary["compute_device_used"] == "cpu"
     assert saved_summary["deep_features"]["validation_context_mode"] == "inductive"
@@ -1099,7 +1163,9 @@ def test_run_multilevel_ot_on_h5ad_with_deep_features(tmp_path) -> None:
     assert "mlot_subregion_cluster_probs" in saved_cells.obsm
 
 
-def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallback(tmp_path) -> None:
+def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallback(
+    tmp_path,
+) -> None:
     rng = np.random.default_rng(404)
     coords = np.vstack(
         [
@@ -1129,11 +1195,21 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
                 "regions": [
                     {
                         "region_id": "r0",
-                        "polygon_vertices": [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]],
+                        "polygon_vertices": [
+                            [-1.0, -1.0],
+                            [1.0, -1.0],
+                            [1.0, 1.0],
+                            [-1.0, 1.0],
+                        ],
                     },
                     {
                         "region_id": "r1",
-                        "polygon_vertices": [[4.0, 4.0], [6.0, 4.0], [6.0, 6.0], [4.0, 6.0]],
+                        "polygon_vertices": [
+                            [4.0, 4.0],
+                            [6.0, 4.0],
+                            [6.0, 6.0],
+                            [4.0, 6.0],
+                        ],
                     },
                 ],
             }
@@ -1178,10 +1254,19 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert summary["shape_diagnostics_enabled"] is False
     assert summary["shape_leakage_balanced_accuracy"] is None
     assert "subregion" in summary["method_layers"]["layer_1_subregion_formation"]
-    assert "pooled matrix" in summary["method_layers"]["layer_2_subregion_heterogeneity_clustering"]
-    assert "downstream projections" in summary["method_layers"]["layer_3_projection_and_visualization"]
+    assert (
+        "pooled matrix"
+        in summary["method_layers"]["layer_2_subregion_heterogeneity_clustering"]
+    )
+    assert (
+        "downstream projections"
+        in summary["method_layers"]["layer_3_projection_and_visualization"]
+    )
     assert summary["capabilities"]["spot_level_latent_charts_implemented"] is True
-    assert summary["method_stack"]["spot_level_latent_projection"] == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    assert (
+        summary["method_stack"]["spot_level_latent_projection"]
+        == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    )
     assert "spot_level_latent" in summary["outputs"]
     spot_latent_path = Path(summary["outputs"]["spot_level_latent"])
     assert spot_latent_path.exists()
@@ -1192,26 +1277,75 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert spot_latent["atom_embedding"].shape[2] == 2
     assert spot_latent["aligned_coords"].shape[1] == 2
     assert np.allclose(spot_latent["atom_posteriors"].sum(axis=1), 1.0, atol=1e-5)
-    assert spot_latent["posterior_entropy"].shape[0] == spot_latent["latent_coords"].shape[0]
-    assert spot_latent["normalized_posterior_entropy"].shape[0] == spot_latent["latent_coords"].shape[0]
+    assert (
+        spot_latent["posterior_entropy"].shape[0]
+        == spot_latent["latent_coords"].shape[0]
+    )
+    assert (
+        spot_latent["normalized_posterior_entropy"].shape[0]
+        == spot_latent["latent_coords"].shape[0]
+    )
     assert spot_latent["atom_argmax"].shape[0] == spot_latent["latent_coords"].shape[0]
-    assert spot_latent["temperature_used"].shape[0] == spot_latent["latent_coords"].shape[0]
-    assert spot_latent["temperature_cost_gap"].shape[0] == spot_latent["latent_coords"].shape[0]
-    assert spot_latent["temperature_fixed"].shape[0] == spot_latent["latent_coords"].shape[0]
-    assert spot_latent["posterior_entropy_cost_gap"].shape[0] == spot_latent["latent_coords"].shape[0]
-    assert spot_latent["posterior_entropy_fixed"].shape[0] == spot_latent["latent_coords"].shape[0]
-    assert summary["spot_level_latent"]["coordinate_scope"] == "cluster_atom_measure_mds_anchors_plus_atom_posterior_barycentric_within_cluster_residual"
-    assert summary["spot_level_latent"]["chart_learning_mode"] == "model_grounded_atom_distance_mds_without_fisher_labels"
-    assert summary["spot_level_latent"]["validation_role"] == "diagnostic_visualization_not_independent_evidence"
-    assert summary["spot_level_latent"]["unsupervised_baseline_required_for_validation"] is True
-    assert summary["spot_level_latent"]["label_permutation_control_recommended"] is False
-    assert summary["spot_level_latent"]["latent_refinement"] == "atom_posterior_barycenter_without_local_pca_radius_equalization"
-    assert summary["spot_level_latent"]["includes_aligned_coordinates_in_chart_features"] is False
+    assert (
+        spot_latent["temperature_used"].shape[0]
+        == spot_latent["latent_coords"].shape[0]
+    )
+    assert (
+        spot_latent["temperature_cost_gap"].shape[0]
+        == spot_latent["latent_coords"].shape[0]
+    )
+    assert (
+        spot_latent["temperature_fixed"].shape[0]
+        == spot_latent["latent_coords"].shape[0]
+    )
+    assert (
+        spot_latent["posterior_entropy_cost_gap"].shape[0]
+        == spot_latent["latent_coords"].shape[0]
+    )
+    assert (
+        spot_latent["posterior_entropy_fixed"].shape[0]
+        == spot_latent["latent_coords"].shape[0]
+    )
+    assert (
+        summary["spot_level_latent"]["coordinate_scope"]
+        == "cluster_atom_measure_mds_anchors_plus_atom_posterior_barycentric_within_cluster_residual"
+    )
+    assert (
+        summary["spot_level_latent"]["chart_learning_mode"]
+        == "model_grounded_atom_distance_mds_without_fisher_labels"
+    )
+    assert (
+        summary["spot_level_latent"]["validation_role"]
+        == "diagnostic_visualization_not_independent_evidence"
+    )
+    assert (
+        summary["spot_level_latent"]["unsupervised_baseline_required_for_validation"]
+        is True
+    )
+    assert (
+        summary["spot_level_latent"]["label_permutation_control_recommended"] is False
+    )
+    assert (
+        summary["spot_level_latent"]["latent_refinement"]
+        == "atom_posterior_barycenter_without_local_pca_radius_equalization"
+    )
+    assert (
+        summary["spot_level_latent"]["includes_aligned_coordinates_in_chart_features"]
+        is False
+    )
     assert summary["spot_level_latent"]["uses_forced_cluster_local_radius"] is False
     assert summary["spot_level_latent"]["temperature_mode"] == "auto_entropy"
-    assert summary["spot_level_latent"]["cluster_anchor_distance_method"] == "balanced_ot"
-    assert summary["spot_level_latent"]["cluster_anchor_distance_requested_method"] == "balanced_ot"
-    assert summary["spot_level_latent"]["cluster_anchor_distance_effective_method"] == "balanced_ot"
+    assert (
+        summary["spot_level_latent"]["cluster_anchor_distance_method"] == "balanced_ot"
+    )
+    assert (
+        summary["spot_level_latent"]["cluster_anchor_distance_requested_method"]
+        == "balanced_ot"
+    )
+    assert (
+        summary["spot_level_latent"]["cluster_anchor_distance_effective_method"]
+        == "balanced_ot"
+    )
     assert summary["spot_level_latent"]["cluster_anchor_ot_fallback_fraction"] == 0.0
     assert summary["spot_level_latent"]["cluster_anchor_mds_status"] in {
         "interpretable",
@@ -1221,7 +1355,10 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert "cluster_anchor_mds_stress" in summary["spot_level_latent"]
     assert "temperature_cost_gap_summary" in summary["spot_level_latent"]
     assert "normalized_posterior_entropy_fixed_summary" in summary["spot_level_latent"]
-    assert summary["spot_level_latent"]["posterior_entropy_summary"]["count"] == spot_latent["latent_coords"].shape[0]
+    assert (
+        summary["spot_level_latent"]["posterior_entropy_summary"]["count"]
+        == spot_latent["latent_coords"].shape[0]
+    )
     saved = ad.read_h5ad(summary["outputs"]["h5ad"])
     assert "mlot_spot_latent_coords" in saved.obsm
     assert "mlot_spot_latent_unweighted_coords" in saved.obsm
@@ -1230,27 +1367,54 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert "mlot_spot_latent_cluster_int" in saved.obs
     assert "mlot_spot_latent_posterior_entropy" in saved.obs
     assert saved.uns["multilevel_ot"]["method_layers"] == summary["method_layers"]
-    assert saved.uns["multilevel_ot"]["subregion_clustering_method"] == summary["subregion_clustering_method"]
-    assert saved.uns["multilevel_ot"]["subregion_clustering_uses_spatial"] == summary["subregion_clustering_uses_spatial"]
-    assert saved.uns["multilevel_ot"]["subregion_clustering_feature_space"] == summary["subregion_clustering_feature_space"]
-    assert saved.uns["multilevel_ot"]["spot_level_latent_mode"] == "atom_barycentric_mds"
+    assert (
+        saved.uns["multilevel_ot"]["subregion_clustering_method"]
+        == summary["subregion_clustering_method"]
+    )
+    assert (
+        saved.uns["multilevel_ot"]["subregion_clustering_uses_spatial"]
+        == summary["subregion_clustering_uses_spatial"]
+    )
+    assert (
+        saved.uns["multilevel_ot"]["subregion_clustering_feature_space"]
+        == summary["subregion_clustering_feature_space"]
+    )
+    assert (
+        saved.uns["multilevel_ot"]["spot_level_latent_mode"] == "atom_barycentric_mds"
+    )
     assert (
         saved.uns["multilevel_ot"]["spot_level_latent_projection_mode"]
         == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
     )
-    assert saved.uns["multilevel_ot"]["spot_level_latent_cluster_anchor_distance_method"] == "balanced_ot"
+    assert (
+        saved.uns["multilevel_ot"]["spot_level_latent_cluster_anchor_distance_method"]
+        == "balanced_ot"
+    )
     assert (
         saved.uns["multilevel_ot"]["spot_level_latent_validation_role"]
         == "diagnostic_visualization_not_independent_evidence"
     )
     assert spot_latent["spot_latent_mode"].item() == "atom_barycentric_mds"
-    assert spot_latent["latent_projection_mode"].item() == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
-    assert spot_latent["chart_learning_mode"].item() == "model_grounded_atom_distance_mds_without_fisher_labels"
-    assert spot_latent["validation_role"].item() == "diagnostic_visualization_not_independent_evidence"
+    assert (
+        spot_latent["latent_projection_mode"].item()
+        == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    )
+    assert (
+        spot_latent["chart_learning_mode"].item()
+        == "model_grounded_atom_distance_mds_without_fisher_labels"
+    )
+    assert (
+        spot_latent["validation_role"].item()
+        == "diagnostic_visualization_not_independent_evidence"
+    )
     assert spot_latent["temperature_mode"].item() == "auto_entropy"
     assert spot_latent["cluster_anchor_distance_method"].item() == "balanced_ot"
-    assert spot_latent["cluster_anchor_distance_requested_method"].item() == "balanced_ot"
-    assert spot_latent["cluster_anchor_distance_effective_method"].item() == "balanced_ot"
+    assert (
+        spot_latent["cluster_anchor_distance_requested_method"].item() == "balanced_ot"
+    )
+    assert (
+        spot_latent["cluster_anchor_distance_effective_method"].item() == "balanced_ot"
+    )
     assert spot_latent["cluster_anchor_distance"].shape == (2, 2)
     assert spot_latent["cluster_anchor_ot_fallback_matrix"].shape == (2, 2)
     assert spot_latent["cluster_anchor_solver_status_matrix"].shape == (2, 2)
@@ -1258,9 +1422,15 @@ def test_run_multilevel_ot_on_h5ad_uses_region_geometry_json_without_hull_fallba
     assert spot_latent["atom_mds_stress"].shape == (2,)
     assert "cell_spot_latent_unweighted_coords" in spot_latent.files
     assert "cell_spot_latent_confidence_weighted_coords" in spot_latent.files
-    assert bool(spot_latent["unsupervised_baseline_required_for_validation"].item()) is True
+    assert (
+        bool(spot_latent["unsupervised_baseline_required_for_validation"].item())
+        is True
+    )
     assert bool(spot_latent["label_permutation_control_recommended"].item()) is False
-    assert bool(spot_latent["includes_aligned_coordinates_in_chart_features"].item()) is False
+    assert (
+        bool(spot_latent["includes_aligned_coordinates_in_chart_features"].item())
+        is False
+    )
     assert bool(spot_latent["uses_forced_cluster_local_radius"].item()) is False
     assert "latent_anchor_repulsion_min_distance" not in spot_latent.files
 
@@ -1311,7 +1481,9 @@ def test_region_geometry_json_rejects_unknown_units_and_bad_affine(tmp_path) -> 
         )
 
 
-def test_explicit_region_min_cell_filter_keeps_geometry_descriptors_aligned(tmp_path) -> None:
+def test_explicit_region_min_cell_filter_keeps_geometry_descriptors_aligned(
+    tmp_path,
+) -> None:
     rng = np.random.default_rng(405)
     coords = np.vstack(
         [
@@ -1342,15 +1514,30 @@ def test_explicit_region_min_cell_filter_keeps_geometry_descriptors_aligned(tmp_
                 "regions": [
                     {
                         "region_id": "drop",
-                        "polygon_vertices": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                        "polygon_vertices": [
+                            [0.0, 0.0],
+                            [1.0, 0.0],
+                            [1.0, 1.0],
+                            [0.0, 1.0],
+                        ],
                     },
                     {
                         "region_id": "keep_a",
-                        "polygon_vertices": [[95.0, 95.0], [105.0, 95.0], [105.0, 105.0], [95.0, 105.0]],
+                        "polygon_vertices": [
+                            [95.0, 95.0],
+                            [105.0, 95.0],
+                            [105.0, 105.0],
+                            [95.0, 105.0],
+                        ],
                     },
                     {
                         "region_id": "keep_b",
-                        "polygon_vertices": [[195.0, 195.0], [205.0, 195.0], [205.0, 205.0], [195.0, 205.0]],
+                        "polygon_vertices": [
+                            [195.0, 195.0],
+                            [205.0, 195.0],
+                            [205.0, 205.0],
+                            [195.0, 205.0],
+                        ],
                     },
                 ],
             }
@@ -1464,17 +1651,31 @@ def test_run_multilevel_ot_on_h5ad_reports_deep_count_reconstruction(tmp_path) -
     assert isinstance(count_summary, dict)
     assert count_summary["enabled"] is True
     assert count_summary["target_layer"] == "X"
-    assert summary["geometry_source_counts"] == {"observed_point_cloud": summary["n_subregions"]}
-    assert summary["shape_descriptor_source_counts"] == {"observed_point_cloud": summary["n_subregions"]}
-    assert summary["boundary_invariance_claim"] == "observed_geometry_normalized_not_full_shape_invariant"
-    assert summary["deep_features"]["latent_diagnostics"]["count_target_dim"] == counts.shape[1]
-    saved_summary = json.loads((tmp_path / "count_multilevel_out" / "summary.json").read_text())
+    assert summary["geometry_source_counts"] == {
+        "observed_point_cloud": summary["n_subregions"]
+    }
+    assert summary["shape_descriptor_source_counts"] == {
+        "observed_point_cloud": summary["n_subregions"]
+    }
+    assert (
+        summary["boundary_invariance_claim"]
+        == "observed_geometry_normalized_not_full_shape_invariant"
+    )
+    assert (
+        summary["deep_features"]["latent_diagnostics"]["count_target_dim"]
+        == counts.shape[1]
+    )
+    saved_summary = json.loads(
+        (tmp_path / "count_multilevel_out" / "summary.json").read_text()
+    )
     assert saved_summary["deep_features"]["count_reconstruction"]["target_layer"] == "X"
     assert "latent_diagnostics" in saved_summary["deep_features"]
     assert "runtime_memory" in saved_summary["deep_features"]
 
 
-def test_multilevel_ot_marks_visualization_like_feature_space_in_summary(tmp_path) -> None:
+def test_multilevel_ot_marks_visualization_like_feature_space_in_summary(
+    tmp_path,
+) -> None:
     rng = np.random.default_rng(222)
     coords_a = rng.normal(loc=[0.0, 0.0], scale=0.3, size=(16, 2))
     coords_b = rng.normal(loc=[5.0, 5.0], scale=0.3, size=(16, 2))
@@ -1524,8 +1725,13 @@ def test_multilevel_ot_marks_visualization_like_feature_space_in_summary(tmp_pat
     )
 
     assert summary["feature_embedding_warning"] == "visualization_embedding_like"
-    assert summary["method_stack"]["feature_space_kind"] == "visualization_like_embedding"
-    assert any(item["code"] == "visualization_like_feature_space" for item in summary["qc_warnings"])
+    assert (
+        summary["method_stack"]["feature_space_kind"] == "visualization_like_embedding"
+    )
+    assert any(
+        item["code"] == "visualization_like_feature_space"
+        for item in summary["qc_warnings"]
+    )
 
 
 def test_run_multilevel_ot_on_h5ad_with_autoencoder_context_features(tmp_path) -> None:
@@ -1601,7 +1807,9 @@ def test_run_multilevel_ot_on_h5ad_with_autoencoder_context_features(tmp_path) -
     assert saved_summary["deep_features"]["ot_feature_view_warning"] is None
 
 
-def test_run_multilevel_ot_on_h5ad_rejects_joint_ot_without_explicit_opt_in(tmp_path) -> None:
+def test_run_multilevel_ot_on_h5ad_rejects_joint_ot_without_explicit_opt_in(
+    tmp_path,
+) -> None:
     rng = np.random.default_rng(101)
     coords = rng.normal(size=(24, 2)).astype(np.float32)
     features = rng.normal(size=(24, 4)).astype(np.float32)
@@ -1711,7 +1919,10 @@ def test_run_multilevel_ot_on_h5ad_accepts_full_gene_x(tmp_path, monkeypatch) ->
 
     assert summary["feature_obsm_key_requested"] == "X"
     assert summary["feature_input_mode"] == "X"
-    assert summary["feature_source"]["preprocessing"] == "library_size_normalize_log1p_truncated_svd"
+    assert (
+        summary["feature_source"]["preprocessing"]
+        == "library_size_normalize_log1p_truncated_svd"
+    )
     assert summary["feature_dim"] == 3
     saved_summary = json.loads((output_dir / "summary.json").read_text())
     assert saved_summary["feature_source"]["svd_components_used"] == 3

@@ -7,8 +7,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from spatial_ot.feature_source import default_precomputed_x_feature_key, prepare_h5ad_feature_cache
-from spatial_ot.pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_directory
+from spatial_ot.feature_source import (
+    default_precomputed_x_feature_key,
+    prepare_h5ad_feature_cache,
+)
+from spatial_ot.pooling import (
+    distribute_pooled_feature_cache_to_inputs,
+    pool_h5ads_in_directory,
+)
 
 
 def _write_demo_h5ad(path: Path, *, offset: float) -> None:
@@ -20,10 +26,16 @@ def _write_demo_h5ad(path: Path, *, offset: float) -> None:
         ],
         dtype=np.float32,
     )
-    adata = ad.AnnData(X=x, var=pd.DataFrame(index=["gene_a", "gene_b", "gene_c", "gene_d"]))
+    adata = ad.AnnData(
+        X=x, var=pd.DataFrame(index=["gene_a", "gene_b", "gene_c", "gene_d"])
+    )
     adata.obs["cell_id"] = [f"cell_{i}" for i in range(3)]
-    adata.obs["cell_x"] = np.asarray([offset + 0.0, offset + 1.0, offset + 2.0], dtype=np.float32)
-    adata.obs["cell_y"] = np.asarray([offset + 0.5, offset + 1.5, offset + 2.5], dtype=np.float32)
+    adata.obs["cell_x"] = np.asarray(
+        [offset + 0.0, offset + 1.0, offset + 2.0], dtype=np.float32
+    )
+    adata.obs["cell_y"] = np.asarray(
+        [offset + 0.5, offset + 1.5, offset + 2.5], dtype=np.float32
+    )
     adata.obs["nucleus_x"] = adata.obs["cell_x"].to_numpy(dtype=np.float32)
     adata.obs["nucleus_y"] = adata.obs["cell_y"].to_numpy(dtype=np.float32)
     adata.obs["library_size"] = np.asarray([10, 11, 12], dtype=np.int32)
@@ -38,7 +50,9 @@ def _write_demo_h5ad(path: Path, *, offset: float) -> None:
     adata.write_h5ad(path)
 
 
-def test_pool_h5ads_in_directory_keeps_sample_labels_and_separates_coordinates(tmp_path: Path) -> None:
+def test_pool_h5ads_in_directory_keeps_sample_labels_and_separates_coordinates(
+    tmp_path: Path,
+) -> None:
     input_dir = tmp_path / "inputs"
     input_dir.mkdir()
     _write_demo_h5ad(input_dir / "sample_a_cells_marker_genes_umap3d.h5ad", offset=0.0)
@@ -69,14 +83,22 @@ def test_pool_h5ads_in_directory_keeps_sample_labels_and_separates_coordinates(t
 
     sample_a = pooled.obs["sample_id"].astype(str) == "sample_a"
     sample_b = pooled.obs["sample_id"].astype(str) == "sample_b"
-    max_a_x = float(np.asarray(pooled.obs.loc[sample_a, "pooled_cell_x"], dtype=np.float32).max())
-    min_b_x = float(np.asarray(pooled.obs.loc[sample_b, "pooled_cell_x"], dtype=np.float32).min())
+    max_a_x = float(
+        np.asarray(pooled.obs.loc[sample_a, "pooled_cell_x"], dtype=np.float32).max()
+    )
+    min_b_x = float(
+        np.asarray(pooled.obs.loc[sample_b, "pooled_cell_x"], dtype=np.float32).min()
+    )
     assert min_b_x > max_a_x
 
-    assert all(str(index).startswith(("sample_a:", "sample_b:")) for index in pooled.obs_names)
+    assert all(
+        str(index).startswith(("sample_a:", "sample_b:")) for index in pooled.obs_names
+    )
 
 
-def test_prepare_h5ad_feature_cache_reuses_matching_precomputed_x_features(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_h5ad_feature_cache_reuses_matching_precomputed_x_features(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     input_h5ad = tmp_path / "prepared_input.h5ad"
     _write_demo_h5ad(input_h5ad, offset=0.0)
 
@@ -106,7 +128,9 @@ def test_prepare_h5ad_feature_cache_reuses_matching_precomputed_x_features(tmp_p
     assert second["reused_existing"] is True
 
 
-def test_distribute_pooled_feature_cache_to_inputs_writes_shared_cache_back_to_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_distribute_pooled_feature_cache_to_inputs_writes_shared_cache_back_to_samples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     input_dir = tmp_path / "inputs"
     input_dir.mkdir()
     first = input_dir / "sample_a_cells_marker_genes_umap3d.h5ad"
@@ -141,4 +165,9 @@ def test_distribute_pooled_feature_cache_to_inputs_writes_shared_cache_back_to_s
         sample = ad.read_h5ad(sample_path)
         assert prepared_key in sample.obsm
         assert sample.obsm[prepared_key].shape == (3, 2)
-        assert sample.uns["spatial_ot_prepared_features"][prepared_key]["distributed_from_pooled"] is True
+        assert (
+            sample.uns["spatial_ot_prepared_features"][prepared_key][
+                "distributed_from_pooled"
+            ]
+            is True
+        )

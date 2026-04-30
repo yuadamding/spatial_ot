@@ -58,8 +58,8 @@ def test_package_version_matches_0_2_5_state() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
     package_init = (repo_root / "spatial_ot" / "__init__.py").read_text()
-    assert 'version = "0.2.5"' in pyproject_toml
-    assert '__version__ = "0.2.5"' in package_init
+    assert 'version = "0.2.6"' in pyproject_toml
+    assert '__version__ = "0.2.6"' in package_init
 
 
 def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
@@ -412,15 +412,27 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         'SUBREGION_LATENT_SAMPLE_PRIOR_WEIGHT="${SUBREGION_LATENT_SAMPLE_PRIOR_WEIGHT:-0.5}"'
         in run_sh
     )
-    assert 'HETEROGENEITY_COMPOSITION_WEIGHT="${HETEROGENEITY_COMPOSITION_WEIGHT:-0.20}"' in run_sh
-    assert 'HETEROGENEITY_PAIR_GRAPH_MODE="${HETEROGENEITY_PAIR_GRAPH_MODE:-all_pairs}"' in run_sh
+    assert (
+        'HETEROGENEITY_COMPOSITION_WEIGHT="${HETEROGENEITY_COMPOSITION_WEIGHT:-0.20}"'
+        in run_sh
+    )
+    assert (
+        'HETEROGENEITY_PAIR_GRAPH_MODE="${HETEROGENEITY_PAIR_GRAPH_MODE:-all_pairs}"'
+        in run_sh
+    )
     assert (
         'HETEROGENEITY_TRANSPORT_MAX_SUBREGIONS="${HETEROGENEITY_TRANSPORT_MAX_SUBREGIONS:-800}"'
         in run_sh
     )
     assert 'HETEROGENEITY_FGW_ALPHA="${HETEROGENEITY_FGW_ALPHA:-0.5}"' in run_sh
-    assert 'HETEROGENEITY_FUSED_OT_SOLVER="${HETEROGENEITY_FUSED_OT_SOLVER:-emd}"' in run_sh
-    assert '--heterogeneity-composition-weight "$HETEROGENEITY_COMPOSITION_WEIGHT"' in run_sh
+    assert (
+        'HETEROGENEITY_FUSED_OT_SOLVER="${HETEROGENEITY_FUSED_OT_SOLVER:-emd}"'
+        in run_sh
+    )
+    assert (
+        '--heterogeneity-composition-weight "$HETEROGENEITY_COMPOSITION_WEIGHT"'
+        in run_sh
+    )
     assert '--heterogeneity-pair-graph-mode "$HETEROGENEITY_PAIR_GRAPH_MODE"' in run_sh
     assert (
         '--heterogeneity-transport-max-subregions "$HETEROGENEITY_TRANSPORT_MAX_SUBREGIONS"'
@@ -462,7 +474,10 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         '--min-subregions-per-cluster "$MIN_SUBREGIONS_PER_CLUSTER"'
         in optimal_search_sh
     )
-    assert '--heterogeneity-pair-graph-mode "$HETEROGENEITY_PAIR_GRAPH_MODE"' in optimal_search_sh
+    assert (
+        '--heterogeneity-pair-graph-mode "$HETEROGENEITY_PAIR_GRAPH_MODE"'
+        in optimal_search_sh
+    )
     assert "../spatial_ot_input/" in config_toml
     assert "../outputs/" in config_toml
     assert 'feature_obsm_key = "X"' in config_toml
@@ -473,7 +488,9 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "max_subregions = 5000" in config_toml
     assert "allow_convex_hull_fallback = false" in config_toml
     assert 'subregion_construction_method = "joint_refinement"' in config_toml
-    assert 'subregion_clustering_method = "heterogeneity_descriptor_niche"' in config_toml
+    assert (
+        'subregion_clustering_method = "heterogeneity_descriptor_niche"' in config_toml
+    )
     assert 'subregion_latent_embedding_mode = "mean_std_shrunk"' in config_toml
     assert "subregion_latent_heterogeneity_weight = 0.5" in config_toml
     assert "subregion_latent_sample_prior_weight = 0.5" in config_toml
@@ -486,9 +503,13 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "heterogeneity_transport_max_subregions = 800" in config_toml
     assert 'heterogeneity_transport_feature_mode = "soft_codebook"' in config_toml
     assert 'heterogeneity_transport_feature_cost = "hellinger_codebook"' in config_toml
+    assert "heterogeneity_transport_marker_feature_weight = 0.5" in config_toml
+    assert "heterogeneity_transport_codebook_feature_weight = 0.5" in config_toml
     assert "heterogeneity_fgw_alpha = 0.5" in config_toml
     assert 'heterogeneity_fused_ot_solver = "emd"' in config_toml
     assert 'heterogeneity_fgw_solver = "conditional_gradient"' in config_toml
+    assert "heterogeneity_fgw_n_init = 1" in config_toml
+    assert 'heterogeneity_fgw_init = "outer_product"' in config_toml
     assert "joint_refinement_max_move_fraction = 0.05" in config_toml
     assert "auto_n_clusters = false" in config_toml
     assert (

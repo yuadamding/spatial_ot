@@ -1199,8 +1199,28 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument(
         "--heterogeneity-transport-feature-cost",
         default=None,
-        choices=["hellinger_codebook", "hellinger", "sqeuclidean", "squared_euclidean"],
+        choices=[
+            "hellinger_codebook",
+            "hellinger",
+            "sqeuclidean",
+            "squared_euclidean",
+            "split_marker_codebook",
+            "mixed_marker_codebook",
+            "marker_sqeuclidean_codebook_hellinger",
+        ],
         help="Pointwise feature cost used by fused-OT/FGW modes.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-transport-marker-feature-weight",
+        type=float,
+        default=None,
+        help="Marker-feature component weight for split mixed transport feature costs.",
+    )
+    multilevel.add_argument(
+        "--heterogeneity-transport-codebook-feature-weight",
+        type=float,
+        default=None,
+        help="Codebook-posterior component weight for split mixed transport feature costs.",
     )
     multilevel.add_argument(
         "--heterogeneity-fused-ot-feature-weight",
@@ -1242,15 +1262,21 @@ def build_parser() -> argparse.ArgumentParser:
     multilevel.add_argument("--heterogeneity-fgw-loss-fun", default=None)
     multilevel.add_argument("--heterogeneity-fgw-max-iter", type=int, default=None)
     multilevel.add_argument("--heterogeneity-fgw-tol", type=float, default=None)
+    multilevel.add_argument("--heterogeneity-fgw-n-init", type=int, default=None)
+    multilevel.add_argument("--heterogeneity-fgw-init", default=None)
     multilevel.add_argument("--heterogeneity-fgw-structure-scale", default=None)
-    multilevel.add_argument("--heterogeneity-fgw-structure-clip", type=float, default=None)
+    multilevel.add_argument(
+        "--heterogeneity-fgw-structure-clip", type=float, default=None
+    )
     multilevel.add_argument(
         "--heterogeneity-fgw-partial",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Use entropic partial FGW instead of balanced FGW.",
     )
-    multilevel.add_argument("--heterogeneity-fgw-partial-mass", type=float, default=None)
+    multilevel.add_argument(
+        "--heterogeneity-fgw-partial-mass", type=float, default=None
+    )
     multilevel.add_argument("--heterogeneity-fgw-partial-reg", type=float, default=None)
     multilevel.add_argument(
         "--shape-diagnostics",
@@ -1752,8 +1778,28 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument(
         "--heterogeneity-transport-feature-cost",
         default=None,
-        choices=["hellinger_codebook", "hellinger", "sqeuclidean", "squared_euclidean"],
+        choices=[
+            "hellinger_codebook",
+            "hellinger",
+            "sqeuclidean",
+            "squared_euclidean",
+            "split_marker_codebook",
+            "mixed_marker_codebook",
+            "marker_sqeuclidean_codebook_hellinger",
+        ],
         help="Pointwise feature cost used by fused-OT/FGW modes.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-transport-marker-feature-weight",
+        type=float,
+        default=None,
+        help="Marker-feature component weight for split mixed transport feature costs.",
+    )
+    optimal_search.add_argument(
+        "--heterogeneity-transport-codebook-feature-weight",
+        type=float,
+        default=None,
+        help="Codebook-posterior component weight for split mixed transport feature costs.",
     )
     optimal_search.add_argument(
         "--heterogeneity-fused-ot-feature-weight",
@@ -1795,6 +1841,8 @@ def build_parser() -> argparse.ArgumentParser:
     optimal_search.add_argument("--heterogeneity-fgw-loss-fun", default=None)
     optimal_search.add_argument("--heterogeneity-fgw-max-iter", type=int, default=None)
     optimal_search.add_argument("--heterogeneity-fgw-tol", type=float, default=None)
+    optimal_search.add_argument("--heterogeneity-fgw-n-init", type=int, default=None)
+    optimal_search.add_argument("--heterogeneity-fgw-init", default=None)
     optimal_search.add_argument("--heterogeneity-fgw-structure-scale", default=None)
     optimal_search.add_argument(
         "--heterogeneity-fgw-structure-clip", type=float, default=None
@@ -2029,6 +2077,8 @@ def _resolve_multilevel_config_from_args(
         "heterogeneity_transport_max_subregions",
         "heterogeneity_transport_feature_mode",
         "heterogeneity_transport_feature_cost",
+        "heterogeneity_transport_marker_feature_weight",
+        "heterogeneity_transport_codebook_feature_weight",
         "heterogeneity_fused_ot_feature_weight",
         "heterogeneity_fused_ot_coordinate_weight",
         "heterogeneity_fused_ot_solver",
@@ -2039,6 +2089,8 @@ def _resolve_multilevel_config_from_args(
         "heterogeneity_fgw_loss_fun",
         "heterogeneity_fgw_max_iter",
         "heterogeneity_fgw_tol",
+        "heterogeneity_fgw_n_init",
+        "heterogeneity_fgw_init",
         "heterogeneity_fgw_structure_scale",
         "heterogeneity_fgw_structure_clip",
         "heterogeneity_fgw_partial",

@@ -16,7 +16,9 @@ from sklearn.metrics import (
 from sklearn.utils.extmath import randomized_svd
 
 
-def parse_candidate_n_clusters(value: str | list[int] | tuple[int, ...] | None) -> tuple[int, ...]:
+def parse_candidate_n_clusters(
+    value: str | list[int] | tuple[int, ...] | None,
+) -> tuple[int, ...]:
     if value is None:
         return ()
     if isinstance(value, str):
@@ -47,13 +49,19 @@ def sanitize_candidate_n_clusters(
     if n_subregions is not None:
         cleaned = [k for k in cleaned if k < int(n_subregions)]
     if not cleaned:
-        upper = int(n_subregions) - 1 if n_subregions is not None else int(fallback_n_clusters)
+        upper = (
+            int(n_subregions) - 1
+            if n_subregions is not None
+            else int(fallback_n_clusters)
+        )
         upper = max(2, upper)
         cleaned = [min(max(2, int(fallback_n_clusters)), upper)]
     return tuple(cleaned)
 
 
-def effective_min_cluster_size(n_items: int, n_clusters: int, requested_min_cluster_size: int) -> int:
+def effective_min_cluster_size(
+    n_items: int, n_clusters: int, requested_min_cluster_size: int
+) -> int:
     if int(n_clusters) <= 0:
         raise ValueError("n_clusters must be positive.")
     n_items = int(n_items)
@@ -81,7 +89,9 @@ def repair_labels_to_minimum_size(
         raise ValueError("costs_to_clusters has fewer columns than n_clusters.")
     n_items = int(labels_arr.shape[0])
     n_clusters = int(n_clusters)
-    effective_min = effective_min_cluster_size(n_items, n_clusters, int(min_cluster_size))
+    effective_min = effective_min_cluster_size(
+        n_items, n_clusters, int(min_cluster_size)
+    )
     forced = np.zeros(n_items, dtype=bool)
     if n_items == 0:
         return labels_arr, forced
@@ -96,12 +106,16 @@ def repair_labels_to_minimum_size(
         target = int(deficient[np.argmin(counts[deficient])])
         feasible = (labels_arr != target) & (counts[labels_arr] > effective_min)
         if not np.any(feasible):
-            raise RuntimeError("Cannot repair cluster sizes without violating another cluster's minimum size.")
+            raise RuntimeError(
+                "Cannot repair cluster sizes without violating another cluster's minimum size."
+            )
         penalty = costs[:, target].astype(np.float64) - current_cost
         penalty[~feasible] = np.inf
         row = int(np.argmin(penalty))
         if not np.isfinite(penalty[row]):
-            raise RuntimeError("Cannot repair cluster sizes because no finite reassignment is available.")
+            raise RuntimeError(
+                "Cannot repair cluster sizes because no finite reassignment is available."
+            )
         donor = int(labels_arr[row])
         counts[donor] -= 1
         labels_arr[row] = target
@@ -116,7 +130,9 @@ def _finite_float_matrix(values: np.ndarray) -> np.ndarray:
     if x.ndim != 2:
         raise ValueError("OT landmark costs must be a 2D matrix.")
     if x.shape[0] < 3:
-        raise ValueError("At least three subregions are required for automatic K selection.")
+        raise ValueError(
+            "At least three subregions are required for automatic K selection."
+        )
     finite = np.isfinite(x)
     if not np.any(finite):
         raise ValueError("OT landmark costs contain no finite values.")
@@ -161,7 +177,9 @@ def standardize_latent_embeddings(embeddings: np.ndarray) -> np.ndarray:
     x = np.nan_to_num(x, nan=fill, posinf=fill, neginf=float(np.nanmin(finite_values)))
     if x.shape[0] > 50000:
         sample_size = min(50000, int(x.shape[0]))
-        sample_idx = np.linspace(0, int(x.shape[0]) - 1, num=sample_size, dtype=np.int64)
+        sample_idx = np.linspace(
+            0, int(x.shape[0]) - 1, num=sample_size, dtype=np.int64
+        )
         sample = x[sample_idx]
         center = np.median(sample, axis=0, keepdims=True)
         scale = np.std(sample - center, axis=0, keepdims=True)
@@ -205,9 +223,17 @@ def prepare_latent_clustering_embedding(
 
     z = standardize_latent_embeddings(latent_embeddings)
     n_items, raw_dim = int(z.shape[0]), int(z.shape[1])
-    target = _env_int("SPATIAL_OT_SUBREGION_LATENT_PCA_COMPONENTS", 64) if max_components is None else int(max_components)
+    target = (
+        _env_int("SPATIAL_OT_SUBREGION_LATENT_PCA_COMPONENTS", 64)
+        if max_components is None
+        else int(max_components)
+    )
     target = max(int(target), 0)
-    max_sample = _env_int("SPATIAL_OT_SUBREGION_LATENT_PCA_SAMPLE_SIZE", 50000) if sample_size is None else int(sample_size)
+    max_sample = (
+        _env_int("SPATIAL_OT_SUBREGION_LATENT_PCA_SAMPLE_SIZE", 50000)
+        if sample_size is None
+        else int(sample_size)
+    )
     max_sample = max(int(max_sample), 1)
     metadata: dict[str, object] = {
         "standardization": "median_center_std_scale",
@@ -227,7 +253,9 @@ def prepare_latent_clustering_embedding(
     rng = np.random.default_rng(int(random_state))
     fit_n = min(max_sample, n_items)
     if fit_n < n_items:
-        fit_idx = np.sort(rng.choice(n_items, size=fit_n, replace=False).astype(np.int64))
+        fit_idx = np.sort(
+            rng.choice(n_items, size=fit_n, replace=False).astype(np.int64)
+        )
         sample = z[fit_idx]
     else:
         sample = z
@@ -243,14 +271,19 @@ def prepare_latent_clustering_embedding(
     scale = projected.std(axis=0, keepdims=True)
     projected = projected / np.maximum(scale, 1e-8)
     total_variance = float(np.sum(np.var(sample_centered, axis=0)))
-    explained = float(np.sum(singular_values * singular_values) / max(float(sample_centered.shape[0] - 1), 1.0))
+    explained = float(
+        np.sum(singular_values * singular_values)
+        / max(float(sample_centered.shape[0] - 1), 1.0)
+    )
     explained_fraction = explained / max(total_variance, 1e-12)
     metadata.update(
         {
             "reduction": "sampled_pca_whiten",
             "embedding_dim_used": int(projected.shape[1]),
             "pca_sample_size_used": int(sample.shape[0]),
-            "pca_variance_explained_estimate": float(min(max(explained_fraction, 0.0), 1.0)),
+            "pca_variance_explained_estimate": float(
+                min(max(explained_fraction, 0.0), 1.0)
+            ),
         }
     )
     return projected.astype(np.float32), metadata
@@ -259,10 +292,14 @@ def prepare_latent_clustering_embedding(
 def _sample_rows(n_rows: int, max_rows: int, rng: np.random.Generator) -> np.ndarray:
     if int(max_rows) <= 0 or int(max_rows) >= int(n_rows):
         return np.arange(int(n_rows), dtype=np.int32)
-    return np.sort(rng.choice(int(n_rows), size=int(max_rows), replace=False).astype(np.int32))
+    return np.sort(
+        rng.choice(int(n_rows), size=int(max_rows), replace=False).astype(np.int32)
+    )
 
 
-def _classical_mds(distance_matrix: np.ndarray, n_components: int, random_state: int) -> np.ndarray:
+def _classical_mds(
+    distance_matrix: np.ndarray, n_components: int, random_state: int
+) -> np.ndarray:
     d = np.asarray(distance_matrix, dtype=np.float64)
     n = int(d.shape[0])
     if d.ndim != 2 or d.shape[0] != d.shape[1]:
@@ -271,7 +308,12 @@ def _classical_mds(distance_matrix: np.ndarray, n_components: int, random_state:
         return np.zeros((n, max(int(n_components), 1)), dtype=np.float32)
     dim = max(1, min(int(n_components), n - 1))
     d2 = d * d
-    b = -0.5 * (d2 - d2.mean(axis=0, keepdims=True) - d2.mean(axis=1, keepdims=True) + float(d2.mean()))
+    b = -0.5 * (
+        d2
+        - d2.mean(axis=0, keepdims=True)
+        - d2.mean(axis=1, keepdims=True)
+        + float(d2.mean())
+    )
     if n <= 512:
         eigvals, eigvecs = np.linalg.eigh(b)
         order = np.argsort(eigvals)[::-1]
@@ -292,11 +334,15 @@ def _classical_mds(distance_matrix: np.ndarray, n_components: int, random_state:
     return coords.astype(np.float32)
 
 
-def _squared_distances_to_centers(embedding: np.ndarray, centers: np.ndarray) -> np.ndarray:
+def _squared_distances_to_centers(
+    embedding: np.ndarray, centers: np.ndarray
+) -> np.ndarray:
     x = np.asarray(embedding, dtype=np.float64)
     c = np.asarray(centers, dtype=np.float64)
     if x.ndim != 2 or c.ndim != 2 or x.shape[1] != c.shape[1]:
-        raise ValueError("embedding and centers must be 2D matrices with the same feature dimension.")
+        raise ValueError(
+            "embedding and centers must be 2D matrices with the same feature dimension."
+        )
     x_norm = np.sum(x * x, axis=1, keepdims=True)
     c_norm = np.sum(c * c, axis=1, keepdims=True).T
     d2 = x_norm + c_norm - 2.0 * (x @ c.T)
@@ -313,8 +359,16 @@ def _centers_from_labels(
     x = np.asarray(embedding, dtype=np.float32)
     labels_arr = np.asarray(labels, dtype=np.int32)
     centers = np.zeros((int(n_clusters), x.shape[1]), dtype=np.float32)
-    fallback = np.asarray(fallback_centers, dtype=np.float32) if fallback_centers is not None else None
-    global_center = x.mean(axis=0).astype(np.float32) if x.size else np.zeros(x.shape[1], dtype=np.float32)
+    fallback = (
+        np.asarray(fallback_centers, dtype=np.float32)
+        if fallback_centers is not None
+        else None
+    )
+    global_center = (
+        x.mean(axis=0).astype(np.float32)
+        if x.size
+        else np.zeros(x.shape[1], dtype=np.float32)
+    )
     for cluster_id in range(int(n_clusters)):
         members = x[labels_arr == int(cluster_id)]
         if members.size:
@@ -338,16 +392,24 @@ def _fit_kmeans_on_standardized_embedding(
     if x.ndim != 2:
         raise ValueError("embedding must be a 2D matrix.")
     if x.shape[0] < int(n_clusters):
-        raise ValueError("n_clusters exceeds the number of subregion latent embeddings.")
+        raise ValueError(
+            "n_clusters exceeds the number of subregion latent embeddings."
+        )
     if x.shape[0] > 50000:
         max_fit_rows = 20000
         if x.shape[0] > max_fit_rows:
             rng = np.random.default_rng(int(random_state))
-            fit_idx = np.sort(rng.choice(int(x.shape[0]), size=max_fit_rows, replace=False).astype(np.int64))
+            fit_idx = np.sort(
+                rng.choice(int(x.shape[0]), size=max_fit_rows, replace=False).astype(
+                    np.int64
+                )
+            )
             fit_x = x[fit_idx]
         else:
             fit_x = x
-        batch_size = min(max(int(n_clusters) * 512, 4096), max(int(fit_x.shape[0]), 4096))
+        batch_size = min(
+            max(int(n_clusters) * 512, 4096), max(int(fit_x.shape[0]), 4096)
+        )
         model = MiniBatchKMeans(
             n_clusters=int(n_clusters),
             n_init=int(n_init),
@@ -360,7 +422,11 @@ def _fit_kmeans_on_standardized_embedding(
         model.fit(fit_x)
         labels = model.predict(x).astype(np.int32)
     else:
-        model = KMeans(n_clusters=int(n_clusters), n_init=int(n_init), random_state=int(random_state))
+        model = KMeans(
+            n_clusters=int(n_clusters),
+            n_init=int(n_init),
+            random_state=int(random_state),
+        )
         labels = model.fit_predict(x).astype(np.int32)
     costs = _squared_distances_to_centers(x, model.cluster_centers_)
     labels, forced = repair_labels_to_minimum_size(
@@ -453,7 +519,9 @@ def _metric_rank_sums(
     return rank_sums
 
 
-def _pairwise_label_stability(labels_by_seed: list[np.ndarray]) -> tuple[float | None, float | None, int]:
+def _pairwise_label_stability(
+    labels_by_seed: list[np.ndarray],
+) -> tuple[float | None, float | None, int]:
     if len(labels_by_seed) < 2:
         return None, None, 0
     ari_values: list[float] = []
@@ -465,7 +533,9 @@ def _pairwise_label_stability(labels_by_seed: list[np.ndarray]) -> tuple[float |
 
 
 def _summarize_counts(labels: np.ndarray, n_clusters: int) -> dict[str, object]:
-    counts = np.bincount(np.asarray(labels, dtype=np.int32), minlength=int(n_clusters)).astype(np.int64)
+    counts = np.bincount(
+        np.asarray(labels, dtype=np.int32), minlength=int(n_clusters)
+    ).astype(np.int64)
     return {
         "cluster_size_min": int(counts.min()) if counts.size else 0,
         "cluster_size_max": int(counts.max()) if counts.size else 0,
@@ -524,7 +594,9 @@ def comprehensive_select_k_from_latent_embeddings(
     best_centers_by_k: dict[int, np.ndarray] = {}
 
     for k in candidates:
-        effective_min = effective_min_cluster_size(n_subregions, int(k), int(min_cluster_size))
+        effective_min = effective_min_cluster_size(
+            n_subregions, int(k), int(min_cluster_size)
+        )
         seed_results: list[dict[str, object]] = []
         seed_labels: list[np.ndarray] = []
         forced_fractions: list[float] = []
@@ -553,8 +625,12 @@ def comprehensive_select_k_from_latent_embeddings(
                     "forced_repair_fraction": forced_fraction,
                     "cluster_size_min": int(counts.min()) if counts.size else 0,
                     "cluster_size_max": int(counts.max()) if counts.size else 0,
-                    "cluster_size_median": float(np.median(counts)) if counts.size else 0.0,
-                    "passes_min_cluster_size": bool(counts.size > 0 and int(counts.min()) >= int(effective_min)),
+                    "cluster_size_median": float(np.median(counts))
+                    if counts.size
+                    else 0.0,
+                    "passes_min_cluster_size": bool(
+                        counts.size > 0 and int(counts.min()) >= int(effective_min)
+                    ),
                 }
             )
 
@@ -576,7 +652,9 @@ def comprehensive_select_k_from_latent_embeddings(
             else:
                 score_labels = best_labels[score_idx]
             if 1 < np.unique(score_labels).size < score_labels.shape[0]:
-                silhouette = float(silhouette_score(score_embedding, score_labels, metric="euclidean"))
+                silhouette = float(
+                    silhouette_score(score_embedding, score_labels, metric="euclidean")
+                )
                 ch = float(calinski_harabasz_score(score_embedding, score_labels))
                 db = float(davies_bouldin_score(score_embedding, score_labels))
                 gap, gap_se = _gap_statistic(
@@ -586,7 +664,9 @@ def comprehensive_select_k_from_latent_embeddings(
                     n_references=int(gap_references),
                     random_state=int(random_state) + 13007 * int(k),
                 )
-        seed_ari_mean, seed_nmi_mean, seed_pair_count = _pairwise_label_stability(seed_labels)
+        seed_ari_mean, seed_nmi_mean, seed_pair_count = _pairwise_label_stability(
+            seed_labels
+        )
 
         bootstrap_ari_values: list[float] = []
         bootstrap_nmi_values: list[float] = []
@@ -596,11 +676,19 @@ def comprehensive_select_k_from_latent_embeddings(
             sample_size = max(int(k), min(n_subregions, sample_size))
             for repeat_idx in range(int(bootstrap_repeats)):
                 subset = np.sort(
-                    rng.choice(n_subregions, size=sample_size, replace=False).astype(np.int32)
+                    rng.choice(n_subregions, size=sample_size, replace=False).astype(
+                        np.int32
+                    )
                 )
                 subset_min = max(
                     1,
-                    int(round(float(effective_min) * float(sample_size) / float(n_subregions))),
+                    int(
+                        round(
+                            float(effective_min)
+                            * float(sample_size)
+                            / float(n_subregions)
+                        )
+                    ),
                 )
                 subset_result = _fit_kmeans_on_standardized_embedding(
                     embedding[subset],
@@ -620,9 +708,15 @@ def comprehensive_select_k_from_latent_embeddings(
                     n_clusters=int(k),
                     min_cluster_size=int(effective_min),
                 )
-                bootstrap_ari_values.append(float(adjusted_rand_score(best_labels, full_labels)))
-                bootstrap_nmi_values.append(float(normalized_mutual_info_score(best_labels, full_labels)))
-                bootstrap_forced_fractions.append(float(forced.mean()) if forced.size else 0.0)
+                bootstrap_ari_values.append(
+                    float(adjusted_rand_score(best_labels, full_labels))
+                )
+                bootstrap_nmi_values.append(
+                    float(normalized_mutual_info_score(best_labels, full_labels))
+                )
+                bootstrap_forced_fractions.append(
+                    float(forced.mean()) if forced.size else 0.0
+                )
 
         row = {
             "n_clusters": int(k),
@@ -632,25 +726,45 @@ def comprehensive_select_k_from_latent_embeddings(
             "gap": gap,
             "gap_se": gap_se,
             "best_seed_inertia": float(best_result["inertia"]),
-            "mean_seed_inertia": float(np.mean([float(item["inertia"]) for item in seed_results])),
-            "std_seed_inertia": float(np.std([float(item["inertia"]) for item in seed_results])),
+            "mean_seed_inertia": float(
+                np.mean([float(item["inertia"]) for item in seed_results])
+            ),
+            "std_seed_inertia": float(
+                np.std([float(item["inertia"]) for item in seed_results])
+            ),
             "seed_ari_mean": seed_ari_mean,
             "seed_nmi_mean": seed_nmi_mean,
             "seed_pair_count": int(seed_pair_count),
-            "bootstrap_ari_mean": float(np.mean(bootstrap_ari_values)) if bootstrap_ari_values else None,
-            "bootstrap_ari_std": float(np.std(bootstrap_ari_values)) if bootstrap_ari_values else None,
-            "bootstrap_nmi_mean": float(np.mean(bootstrap_nmi_values)) if bootstrap_nmi_values else None,
-            "bootstrap_nmi_std": float(np.std(bootstrap_nmi_values)) if bootstrap_nmi_values else None,
+            "bootstrap_ari_mean": float(np.mean(bootstrap_ari_values))
+            if bootstrap_ari_values
+            else None,
+            "bootstrap_ari_std": float(np.std(bootstrap_ari_values))
+            if bootstrap_ari_values
+            else None,
+            "bootstrap_nmi_mean": float(np.mean(bootstrap_nmi_values))
+            if bootstrap_nmi_values
+            else None,
+            "bootstrap_nmi_std": float(np.std(bootstrap_nmi_values))
+            if bootstrap_nmi_values
+            else None,
             "bootstrap_repeats": int(bootstrap_repeats),
             "bootstrap_fraction": float(bootstrap_fraction),
-            "forced_repair_fraction_mean": float(np.mean(forced_fractions)) if forced_fractions else 0.0,
-            "forced_repair_fraction_max": float(np.max(forced_fractions)) if forced_fractions else 0.0,
+            "forced_repair_fraction_mean": float(np.mean(forced_fractions))
+            if forced_fractions
+            else 0.0,
+            "forced_repair_fraction_max": float(np.max(forced_fractions))
+            if forced_fractions
+            else 0.0,
             "forced_repair_fraction_bootstrap_mean": (
-                float(np.mean(bootstrap_forced_fractions)) if bootstrap_forced_fractions else None
+                float(np.mean(bootstrap_forced_fractions))
+                if bootstrap_forced_fractions
+                else None
             ),
             "requested_min_cluster_size": int(min_cluster_size),
             "effective_min_cluster_size": int(effective_min),
-            "passes_min_cluster_size": bool(int(counts_summary["cluster_size_min"]) >= int(effective_min)),
+            "passes_min_cluster_size": bool(
+                int(counts_summary["cluster_size_min"]) >= int(effective_min)
+            ),
             "cluster_size_scope": "all_subregions",
             "effective_min_cluster_size_scope": "all_subregions",
         }
@@ -691,10 +805,14 @@ def comprehensive_select_k_from_latent_embeddings(
         vote_counts = Counter(votes.values())
         max_votes = max(vote_counts.values())
         tied = {int(k) for k, count in vote_counts.items() if count == max_votes}
-        selected = _rank_sum_tie_break(rows, tied) if len(tied) > 1 else next(iter(tied))
+        selected = (
+            _rank_sum_tie_break(rows, tied) if len(tied) > 1 else next(iter(tied))
+        )
         rule = "fallback_majority_vote_with_rank_sum_tie_break"
     else:
-        selected = int(min(candidates, key=lambda k: abs(int(k) - int(fallback_n_clusters))))
+        selected = int(
+            min(candidates, key=lambda k: abs(int(k) - int(fallback_n_clusters)))
+        )
         rule = "fallback_to_nearest_configured_k"
 
     summary: dict[str, object] = {
@@ -738,15 +856,23 @@ def comprehensive_select_k_from_latent_embeddings(
     return summary
 
 
-def _cluster_precomputed_average(distance_matrix: np.ndarray, n_clusters: int) -> np.ndarray:
+def _cluster_precomputed_average(
+    distance_matrix: np.ndarray, n_clusters: int
+) -> np.ndarray:
     try:
-        model = AgglomerativeClustering(n_clusters=int(n_clusters), metric="precomputed", linkage="average")
+        model = AgglomerativeClustering(
+            n_clusters=int(n_clusters), metric="precomputed", linkage="average"
+        )
     except TypeError:
-        model = AgglomerativeClustering(n_clusters=int(n_clusters), affinity="precomputed", linkage="average")
+        model = AgglomerativeClustering(
+            n_clusters=int(n_clusters), affinity="precomputed", linkage="average"
+        )
     return model.fit_predict(distance_matrix).astype(np.int32)
 
 
-def _cluster_distance_costs(distance_matrix: np.ndarray, labels: np.ndarray, n_clusters: int) -> np.ndarray:
+def _cluster_distance_costs(
+    distance_matrix: np.ndarray, labels: np.ndarray, n_clusters: int
+) -> np.ndarray:
     d = np.asarray(distance_matrix, dtype=np.float64)
     labels = np.asarray(labels, dtype=np.int32)
     costs = np.zeros((d.shape[0], int(n_clusters)), dtype=np.float64)
@@ -794,7 +920,10 @@ def _gap_statistic(
     observed = np.log(_within_dispersion(x, labels))
     ref_logs: list[float] = []
     for ref_idx in range(int(n_references)):
-        ref = rng.uniform(0.0, 1.0, size=x.shape).astype(np.float32) * span[None, :] + mins[None, :]
+        ref = (
+            rng.uniform(0.0, 1.0, size=x.shape).astype(np.float32) * span[None, :]
+            + mins[None, :]
+        )
         ref_labels = KMeans(
             n_clusters=int(n_clusters),
             n_init=5,
@@ -803,11 +932,17 @@ def _gap_statistic(
         ref_logs.append(float(np.log(_within_dispersion(ref, ref_labels))))
     ref_arr = np.asarray(ref_logs, dtype=np.float64)
     gap = float(ref_arr.mean() - observed)
-    se = float(np.sqrt(1.0 + 1.0 / max(int(n_references), 1)) * ref_arr.std(ddof=1)) if ref_arr.size > 1 else 0.0
+    se = (
+        float(np.sqrt(1.0 + 1.0 / max(int(n_references), 1)) * ref_arr.std(ddof=1))
+        if ref_arr.size > 1
+        else 0.0
+    )
     return gap, se
 
 
-def _best_metric_vote(rows: list[dict[str, object]], metric: str, *, higher_is_better: bool) -> int | None:
+def _best_metric_vote(
+    rows: list[dict[str, object]], metric: str, *, higher_is_better: bool
+) -> int | None:
     values: list[tuple[float, int]] = []
     for row in rows:
         value = row.get(metric)
@@ -874,14 +1009,22 @@ def select_k_from_ot_landmark_costs(
         n_subregions=int(score_costs.shape[0]),
     )
     distance = ot_landmark_distance_matrix(score_costs)
-    embedding = _classical_mds(distance, n_components=int(mds_components), random_state=int(random_state))
+    embedding = _classical_mds(
+        distance, n_components=int(mds_components), random_state=int(random_state)
+    )
 
     rows: list[dict[str, object]] = []
     for k in candidates:
         labels = _cluster_precomputed_average(distance, n_clusters=int(k))
         scaled_requested_min = max(
             1,
-            int(round(float(min_cluster_size) * float(labels.shape[0]) / float(costs.shape[0]))),
+            int(
+                round(
+                    float(min_cluster_size)
+                    * float(labels.shape[0])
+                    / float(costs.shape[0])
+                )
+            ),
         )
         effective_min = effective_min_cluster_size(
             int(labels.shape[0]),
@@ -935,7 +1078,9 @@ def select_k_from_ot_landmark_costs(
                 "effective_min_cluster_size": int(effective_min),
                 "effective_min_cluster_size_scope": "scored_subregions",
                 "min_cluster_size_repair_count": forced_count,
-                "passes_min_cluster_size": bool(counts.size > 0 and int(counts.min()) >= int(effective_min)),
+                "passes_min_cluster_size": bool(
+                    counts.size > 0 and int(counts.min()) >= int(effective_min)
+                ),
             }
         )
 
@@ -953,10 +1098,14 @@ def select_k_from_ot_landmark_costs(
         counts = Counter(votes.values())
         max_votes = max(counts.values())
         tied = {int(k) for k, count in counts.items() if count == max_votes}
-        selected = _rank_sum_tie_break(rows, tied) if len(tied) > 1 else next(iter(tied))
+        selected = (
+            _rank_sum_tie_break(rows, tied) if len(tied) > 1 else next(iter(tied))
+        )
         rule = "majority_vote_with_rank_sum_tie_break"
     else:
-        selected = int(min(candidates, key=lambda k: abs(int(k) - int(fallback_n_clusters))))
+        selected = int(
+            min(candidates, key=lambda k: abs(int(k) - int(fallback_n_clusters)))
+        )
         rule = "fallback_to_nearest_configured_k"
 
     return {
@@ -971,7 +1120,9 @@ def select_k_from_ot_landmark_costs(
             "Pairwise subregion distances are Euclidean distances between row-standardized fused OT costs "
             "to pilot cluster prototypes; this is a scalable OT-landmark approximation rather than all-pairs OT."
         ),
-        "mds_components": int(max(1, min(int(mds_components), max(int(score_costs.shape[0]) - 1, 1)))),
+        "mds_components": int(
+            max(1, min(int(mds_components), max(int(score_costs.shape[0]) - 1, 1)))
+        ),
         "gap_references": int(gap_references),
         "min_cluster_size": int(min_cluster_size),
         "min_cluster_size_scope": "full_dataset_requested; per-score rows use sampled/effective fields when score_subregion_sampled=true",
@@ -1006,12 +1157,20 @@ def select_k_from_latent_embeddings(
 
     rows: list[dict[str, object]] = []
     for k in candidates:
-        model = KMeans(n_clusters=int(k), n_init=10, random_state=int(random_state) + int(k))
+        model = KMeans(
+            n_clusters=int(k), n_init=10, random_state=int(random_state) + int(k)
+        )
         labels = model.fit_predict(score_embedding).astype(np.int32)
         costs = _squared_distances_to_centers(score_embedding, model.cluster_centers_)
         scaled_requested_min = max(
             1,
-            int(round(float(min_cluster_size) * float(labels.shape[0]) / float(embedding.shape[0]))),
+            int(
+                round(
+                    float(min_cluster_size)
+                    * float(labels.shape[0])
+                    / float(embedding.shape[0])
+                )
+            ),
         )
         effective_min = effective_min_cluster_size(
             int(labels.shape[0]),
@@ -1036,7 +1195,9 @@ def select_k_from_latent_embeddings(
         gap = None
         gap_se = None
         if 1 < unique.size < labels.shape[0]:
-            silhouette = float(silhouette_score(score_embedding, labels, metric="euclidean"))
+            silhouette = float(
+                silhouette_score(score_embedding, labels, metric="euclidean")
+            )
             ch = float(calinski_harabasz_score(score_embedding, labels))
             db = float(davies_bouldin_score(score_embedding, labels))
             gap, gap_se = _gap_statistic(
@@ -1065,7 +1226,9 @@ def select_k_from_latent_embeddings(
                 "effective_min_cluster_size": int(effective_min),
                 "effective_min_cluster_size_scope": "scored_subregions",
                 "min_cluster_size_repair_count": forced_count,
-                "passes_min_cluster_size": bool(counts.size > 0 and int(counts.min()) >= int(effective_min)),
+                "passes_min_cluster_size": bool(
+                    counts.size > 0 and int(counts.min()) >= int(effective_min)
+                ),
             }
         )
 
@@ -1083,10 +1246,14 @@ def select_k_from_latent_embeddings(
         counts = Counter(votes.values())
         max_votes = max(counts.values())
         tied = {int(k) for k, count in counts.items() if count == max_votes}
-        selected = _rank_sum_tie_break(rows, tied) if len(tied) > 1 else next(iter(tied))
+        selected = (
+            _rank_sum_tie_break(rows, tied) if len(tied) > 1 else next(iter(tied))
+        )
         rule = "majority_vote_with_rank_sum_tie_break"
     else:
-        selected = int(min(candidates, key=lambda k: abs(int(k) - int(fallback_n_clusters))))
+        selected = int(
+            min(candidates, key=lambda k: abs(int(k) - int(fallback_n_clusters)))
+        )
         rule = "fallback_to_nearest_configured_k"
 
     return {

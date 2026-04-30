@@ -122,7 +122,9 @@ def sinkhorn_semirelaxed_unbalanced_log_torch(
     # eps * KL(T || a b^T) = eps * sum T (log T - log a - log b) - eps * (sum T - sum a b)
     # Using the generalized KL convention used by POT.
     t_log_t = (t * log_t).sum(dim=(-1, -2))
-    t_log_ab = (t * log_a.unsqueeze(-1)).sum(dim=(-1, -2)) + (t * log_b.unsqueeze(-2)).sum(dim=(-1, -2))
+    t_log_ab = (t * log_a.unsqueeze(-1)).sum(dim=(-1, -2)) + (
+        t * log_b.unsqueeze(-2)
+    ).sum(dim=(-1, -2))
     mass_t = t.sum(dim=(-1, -2))
     mass_ab = a.sum(dim=-1) * beta.sum(dim=-1)
     kl_t = t_log_t - t_log_ab - mass_t + mass_ab
@@ -130,7 +132,11 @@ def sinkhorn_semirelaxed_unbalanced_log_torch(
     # rho * KL(col_mass || beta).
     col_mass = t.sum(dim=-2)
     log_col = _log(col_mass)
-    kl_col = (col_mass * (log_col - log_b)).sum(dim=-1) - col_mass.sum(dim=-1) + beta.sum(dim=-1)
+    kl_col = (
+        (col_mass * (log_col - log_b)).sum(dim=-1)
+        - col_mass.sum(dim=-1)
+        + beta.sum(dim=-1)
+    )
 
     objective = transport_cost + eps * kl_t + rho * kl_col
     return t, objective, converged, last_err

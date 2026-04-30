@@ -4,7 +4,11 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 from sklearn.decomposition import PCA
-from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
+from sklearn.metrics import (
+    calinski_harabasz_score,
+    davies_bouldin_score,
+    silhouette_score,
+)
 from sklearn.neighbors import NearestNeighbors
 
 from .geometry import _validate_mutually_exclusive_memberships
@@ -29,7 +33,9 @@ def _sample_embedding_rows(
     return x[keep], y[keep]
 
 
-def compute_subregion_embedding(weights: np.ndarray, seed: int) -> tuple[np.ndarray, str]:
+def compute_subregion_embedding(
+    weights: np.ndarray, seed: int
+) -> tuple[np.ndarray, str]:
     weights_arr = np.asarray(weights, dtype=np.float32)
     if weights_arr.ndim != 2:
         raise ValueError("weights must be a 2D array.")
@@ -45,10 +51,20 @@ def compute_subregion_embedding(weights: np.ndarray, seed: int) -> tuple[np.ndar
                 _LARGE_SUBREGION_DIAGNOSTIC_MAX,
             )
             pca.fit(weights_arr[keep])
-            return pca.transform(weights_arr).astype(np.float32), "PCA_sample_fit_large_subregion_fast_path"
-        values = weights_arr[:, 0] if weights_arr.shape[1] else np.zeros(weights_arr.shape[0], dtype=np.float32)
-        values = (values.astype(np.float32, copy=False) - float(values.mean())) / max(float(values.std()), 1e-6)
-        return np.column_stack([values, np.zeros_like(values)]).astype(np.float32), "1D_large_subregion_fast_path"
+            return pca.transform(weights_arr).astype(
+                np.float32
+            ), "PCA_sample_fit_large_subregion_fast_path"
+        values = (
+            weights_arr[:, 0]
+            if weights_arr.shape[1]
+            else np.zeros(weights_arr.shape[0], dtype=np.float32)
+        )
+        values = (values.astype(np.float32, copy=False) - float(values.mean())) / max(
+            float(values.std()), 1e-6
+        )
+        return np.column_stack([values, np.zeros_like(values)]).astype(
+            np.float32
+        ), "1D_large_subregion_fast_path"
     try:
         import umap.umap_ as umap  # type: ignore
 
@@ -65,7 +81,11 @@ def compute_subregion_embedding(weights: np.ndarray, seed: int) -> tuple[np.ndar
         if min(weights_arr.shape) >= 2:
             pca = PCA(n_components=2, random_state=seed)
             return pca.fit_transform(weights_arr).astype(np.float32), "PCA"
-        values = weights_arr[:, 0] if weights_arr.shape[1] else np.zeros(weights_arr.shape[0], dtype=np.float32)
+        values = (
+            weights_arr[:, 0]
+            if weights_arr.shape[1]
+            else np.zeros(weights_arr.shape[0], dtype=np.float32)
+        )
         values = values.astype(np.float32, copy=False)
         values = (values - float(values.mean())) / max(float(values.std()), 1e-6)
         return np.column_stack([values, np.zeros_like(values)]).astype(np.float32), "1D"
@@ -83,7 +103,11 @@ def _zscore_columns(x: np.ndarray) -> np.ndarray:
 
 def native_subregion_embedding(result: MultilevelOTResult) -> np.ndarray:
     summaries = np.asarray(result.subregion_measure_summaries, dtype=np.float32)
-    if summaries.ndim == 2 and summaries.shape[0] == result.subregion_cluster_labels.shape[0] and summaries.shape[1] > 0:
+    if (
+        summaries.ndim == 2
+        and summaries.shape[0] == result.subregion_cluster_labels.shape[0]
+        and summaries.shape[1] > 0
+    ):
         return _zscore_columns(summaries)
     weights = np.asarray(result.subregion_atom_weights, dtype=np.float32)
     return _zscore_columns(weights)
@@ -126,15 +150,21 @@ def subregion_embedding_compactness(result: MultilevelOTResult) -> dict[str, obj
     score_unique = np.unique(score_labels)
     if score_unique.size >= 2 and score_embedding.shape[0] > score_unique.size:
         try:
-            silhouette_native = float(silhouette_score(score_embedding, score_labels, metric="euclidean"))
+            silhouette_native = float(
+                silhouette_score(score_embedding, score_labels, metric="euclidean")
+            )
         except Exception:
             silhouette_native = None
         try:
-            davies_bouldin_native = float(davies_bouldin_score(score_embedding, score_labels))
+            davies_bouldin_native = float(
+                davies_bouldin_score(score_embedding, score_labels)
+            )
         except Exception:
             davies_bouldin_native = None
         try:
-            calinski_harabasz_native = float(calinski_harabasz_score(score_embedding, score_labels))
+            calinski_harabasz_native = float(
+                calinski_harabasz_score(score_embedding, score_labels)
+            )
         except Exception:
             calinski_harabasz_native = None
 
@@ -166,13 +196,24 @@ def subregion_embedding_compactness(result: MultilevelOTResult) -> dict[str, obj
         cost_by_cluster[f"C{int(cid)}"] = {
             "transport_mean": float(np.mean(cluster_transport_cost)),
             "transport_median": float(np.median(cluster_transport_cost)),
-            "transport_iqr": float(np.quantile(cluster_transport_cost, 0.75) - np.quantile(cluster_transport_cost, 0.25)),
+            "transport_iqr": float(
+                np.quantile(cluster_transport_cost, 0.75)
+                - np.quantile(cluster_transport_cost, 0.25)
+            ),
         }
 
-    within_concat = np.concatenate(within_distances) if within_distances else np.zeros(0, dtype=np.float64)
+    within_concat = (
+        np.concatenate(within_distances)
+        if within_distances
+        else np.zeros(0, dtype=np.float64)
+    )
     if len(cluster_centroids) >= 2:
         centroid_matrix = np.vstack(cluster_centroids).astype(np.float64)
-        centroid_dist = np.sqrt(np.sum((centroid_matrix[:, None, :] - centroid_matrix[None, :, :]) ** 2, axis=2))
+        centroid_dist = np.sqrt(
+            np.sum(
+                (centroid_matrix[:, None, :] - centroid_matrix[None, :, :]) ** 2, axis=2
+            )
+        )
         tri = centroid_dist[np.triu_indices(centroid_dist.shape[0], k=1)]
         between_centroid_distance_min = float(np.min(tri)) if tri.size else None
         between_centroid_distance_mean = float(np.mean(tri)) if tri.size else None
@@ -181,7 +222,9 @@ def subregion_embedding_compactness(result: MultilevelOTResult) -> dict[str, obj
         between_centroid_distance_mean = None
     compactness_ratio = (
         float(np.mean(within_concat) / max(float(between_centroid_distance_min), 1e-12))
-        if within_concat.size and between_centroid_distance_min is not None and np.isfinite(between_centroid_distance_min)
+        if within_concat.size
+        and between_centroid_distance_min is not None
+        and np.isfinite(between_centroid_distance_min)
         else None
     )
     return {
@@ -189,24 +232,52 @@ def subregion_embedding_compactness(result: MultilevelOTResult) -> dict[str, obj
         "silhouette_native": silhouette_native,
         "davies_bouldin_native": davies_bouldin_native,
         "calinski_harabasz_native": calinski_harabasz_native,
-        "within_cluster_centroid_distance_mean": float(np.mean(within_concat)) if within_concat.size else None,
-        "within_cluster_centroid_distance_median": float(np.median(within_concat)) if within_concat.size else None,
+        "within_cluster_centroid_distance_mean": float(np.mean(within_concat))
+        if within_concat.size
+        else None,
+        "within_cluster_centroid_distance_median": float(np.median(within_concat))
+        if within_concat.size
+        else None,
         "between_cluster_centroid_distance_min": between_centroid_distance_min,
         "between_cluster_centroid_distance_mean": between_centroid_distance_mean,
         "compactness_ratio": compactness_ratio,
-        "within_cluster_assigned_transport_cost_mean": float(np.mean(assigned_transport_cost)) if assigned_transport_cost.size else None,
-        "within_cluster_assigned_transport_cost_median": float(np.median(assigned_transport_cost)) if assigned_transport_cost.size else None,
+        "within_cluster_assigned_transport_cost_mean": float(
+            np.mean(assigned_transport_cost)
+        )
+        if assigned_transport_cost.size
+        else None,
+        "within_cluster_assigned_transport_cost_median": float(
+            np.median(assigned_transport_cost)
+        )
+        if assigned_transport_cost.size
+        else None,
         "within_cluster_assigned_transport_cost_iqr": (
-            float(np.quantile(assigned_transport_cost, 0.75) - np.quantile(assigned_transport_cost, 0.25))
+            float(
+                np.quantile(assigned_transport_cost, 0.75)
+                - np.quantile(assigned_transport_cost, 0.25)
+            )
             if assigned_transport_cost.size
             else None
         ),
-        "within_cluster_assigned_total_cost_mean": float(np.mean(assigned_total_cost)) if assigned_total_cost.size else None,
-        "within_cluster_assigned_total_cost_median": float(np.median(assigned_total_cost)) if assigned_total_cost.size else None,
-        "within_cluster_assigned_cost_mean": float(np.mean(assigned_total_cost)) if assigned_total_cost.size else None,
-        "within_cluster_assigned_cost_median": float(np.median(assigned_total_cost)) if assigned_total_cost.size else None,
+        "within_cluster_assigned_total_cost_mean": float(np.mean(assigned_total_cost))
+        if assigned_total_cost.size
+        else None,
+        "within_cluster_assigned_total_cost_median": float(
+            np.median(assigned_total_cost)
+        )
+        if assigned_total_cost.size
+        else None,
+        "within_cluster_assigned_cost_mean": float(np.mean(assigned_total_cost))
+        if assigned_total_cost.size
+        else None,
+        "within_cluster_assigned_cost_median": float(np.median(assigned_total_cost))
+        if assigned_total_cost.size
+        else None,
         "within_cluster_assigned_cost_iqr": (
-            float(np.quantile(assigned_total_cost, 0.75) - np.quantile(assigned_total_cost, 0.25))
+            float(
+                np.quantile(assigned_total_cost, 0.75)
+                - np.quantile(assigned_total_cost, 0.25)
+            )
             if assigned_total_cost.size
             else None
         ),
@@ -258,7 +329,9 @@ def _cell_labels_from_subregions(
     try:
         _validate_mutually_exclusive_memberships(int(n_cells), subregion_members)
     except RuntimeError as exc:
-        raise ValueError("Cannot compute cell adjacency diagnostics because subregion memberships overlap or are invalid.") from exc
+        raise ValueError(
+            "Cannot compute cell adjacency diagnostics because subregion memberships overlap or are invalid."
+        ) from exc
     labels = np.full(int(n_cells), -1, dtype=np.int32)
     membership_counts = np.zeros(int(n_cells), dtype=np.int32)
     for idx, members in enumerate(subregion_members):
@@ -268,7 +341,9 @@ def _cell_labels_from_subregions(
         labels[member_arr] = int(subregion_labels[idx])
         np.add.at(membership_counts, member_arr, 1)
     if int(membership_counts.max(initial=0)) > 1:
-        raise ValueError("Cannot compute cell adjacency diagnostics because subregion memberships overlap.")
+        raise ValueError(
+            "Cannot compute cell adjacency diagnostics because subregion memberships overlap."
+        )
     return labels
 
 
@@ -302,7 +377,9 @@ def subregion_graph_metrics(
             "high_overlap_same_label_fraction": None,
             "isolated_subregion_fraction": None,
             "cluster_connected_components": {},
-            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, cell_labels),
+            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(
+                coords_um, cell_labels
+            ),
             "diagnostic_sampled_or_skipped": True,
             "skip_reason": (
                 f"subregion graph diagnostics skipped for {int(n_subregions)} subregions; "
@@ -323,13 +400,23 @@ def subregion_graph_metrics(
             "high_overlap_same_label_fraction": None,
             "isolated_subregion_fraction": None,
             "cluster_connected_components": {},
-            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, cell_labels),
+            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(
+                coords_um, cell_labels
+            ),
         }
 
-    member_sizes = np.asarray([len(members) for members in result.subregion_members], dtype=np.int64)
-    rows = np.concatenate([np.asarray(members, dtype=np.int64) for members in result.subregion_members], dtype=np.int64)
+    member_sizes = np.asarray(
+        [len(members) for members in result.subregion_members], dtype=np.int64
+    )
+    rows = np.concatenate(
+        [np.asarray(members, dtype=np.int64) for members in result.subregion_members],
+        dtype=np.int64,
+    )
     cols = np.concatenate(
-        [np.full(len(members), idx, dtype=np.int64) for idx, members in enumerate(result.subregion_members)],
+        [
+            np.full(len(members), idx, dtype=np.int64)
+            for idx, members in enumerate(result.subregion_members)
+        ],
         dtype=np.int64,
     )
     incidence = sparse.csr_matrix(
@@ -339,7 +426,9 @@ def subregion_graph_metrics(
     )
     overlap = (incidence.T @ incidence).tocoo()
     edge_info: dict[tuple[int, int], dict[str, float | int | None]] = {}
-    for i, j, intersection in zip(overlap.row.tolist(), overlap.col.tolist(), overlap.data.tolist(), strict=False):
+    for i, j, intersection in zip(
+        overlap.row.tolist(), overlap.col.tolist(), overlap.data.tolist(), strict=False
+    ):
         if int(i) >= int(j) or int(intersection) <= 0:
             continue
         union = int(member_sizes[int(i)] + member_sizes[int(j)] - int(intersection))
@@ -356,11 +445,17 @@ def subregion_graph_metrics(
         nn.fit(centers)
         distances, neighbors = nn.radius_neighbors(centers, return_distance=True)
         for src, (nbrs, dists) in enumerate(zip(neighbors, distances, strict=False)):
-            for dst, dist in zip(np.asarray(nbrs, dtype=np.int64).tolist(), np.asarray(dists, dtype=np.float32).tolist(), strict=False):
+            for dst, dist in zip(
+                np.asarray(nbrs, dtype=np.int64).tolist(),
+                np.asarray(dists, dtype=np.float32).tolist(),
+                strict=False,
+            ):
                 if int(dst) <= int(src):
                     continue
                 key = (int(src), int(dst))
-                entry = edge_info.setdefault(key, {"intersection": 0, "jaccard": 0.0, "distance": None})
+                entry = edge_info.setdefault(
+                    key, {"intersection": 0, "jaccard": 0.0, "distance": None}
+                )
                 if entry["distance"] is None or float(dist) < float(entry["distance"]):
                     entry["distance"] = float(dist)
     if not edge_info and centers.shape[0] >= 2:
@@ -368,9 +463,15 @@ def subregion_graph_metrics(
         nn.fit(centers)
         distances, neighbors = nn.kneighbors(centers, return_distance=True)
         for src, (nbrs, dists) in enumerate(zip(neighbors, distances, strict=False)):
-            for dst, dist in zip(np.asarray(nbrs, dtype=np.int64)[1:].tolist(), np.asarray(dists, dtype=np.float32)[1:].tolist(), strict=False):
+            for dst, dist in zip(
+                np.asarray(nbrs, dtype=np.int64)[1:].tolist(),
+                np.asarray(dists, dtype=np.float32)[1:].tolist(),
+                strict=False,
+            ):
                 key = tuple(sorted((int(src), int(dst))))
-                entry = edge_info.setdefault(key, {"intersection": 0, "jaccard": 0.0, "distance": None})
+                entry = edge_info.setdefault(
+                    key, {"intersection": 0, "jaccard": 0.0, "distance": None}
+                )
                 if entry["distance"] is None or float(dist) < float(entry["distance"]):
                     entry["distance"] = float(dist)
 
@@ -387,24 +488,37 @@ def subregion_graph_metrics(
             "high_overlap_edge_count": 0,
             "high_overlap_same_label_fraction": None,
             "isolated_subregion_fraction": 1.0,
-            "cluster_connected_components": {f"C{int(cid)}": int(np.sum(labels == int(cid))) for cid in np.unique(labels).tolist()},
-            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, cell_labels),
+            "cluster_connected_components": {
+                f"C{int(cid)}": int(np.sum(labels == int(cid)))
+                for cid in np.unique(labels).tolist()
+            },
+            "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(
+                coords_um, cell_labels
+            ),
         }
 
     edge_pairs = np.asarray(list(edge_info.keys()), dtype=np.int64)
     edge_i = edge_pairs[:, 0]
     edge_j = edge_pairs[:, 1]
-    overlap_jaccard = np.asarray([float(edge_info[key]["jaccard"]) for key in edge_info], dtype=np.float64)
+    overlap_jaccard = np.asarray(
+        [float(edge_info[key]["jaccard"]) for key in edge_info], dtype=np.float64
+    )
     distances = np.asarray(
         [
-            float(edge_info[key]["distance"]) if edge_info[key]["distance"] is not None else np.nan
+            float(edge_info[key]["distance"])
+            if edge_info[key]["distance"] is not None
+            else np.nan
             for key in edge_info
         ],
         dtype=np.float64,
     )
     overlap_mask = overlap_jaccard > 0.0
-    proximity_weight = np.exp(-np.nan_to_num(distances, nan=proximity_radius) / max(proximity_radius, 1e-6))
-    edge_weight = np.where(overlap_mask, np.maximum(overlap_jaccard, proximity_weight), proximity_weight)
+    proximity_weight = np.exp(
+        -np.nan_to_num(distances, nan=proximity_radius) / max(proximity_radius, 1e-6)
+    )
+    edge_weight = np.where(
+        overlap_mask, np.maximum(overlap_jaccard, proximity_weight), proximity_weight
+    )
     edge_weight = np.clip(edge_weight.astype(np.float64), 1e-8, None)
     same_label = labels[edge_i] == labels[edge_j]
     boundary_mask = ~same_label
@@ -439,19 +553,32 @@ def subregion_graph_metrics(
             component_counts[f"C{int(cid)}"] = 1
             continue
         subgraph = adjacency[nodes][:, nodes]
-        n_components, _ = connected_components(subgraph, directed=False, return_labels=True)
+        n_components, _ = connected_components(
+            subgraph, directed=False, return_labels=True
+        )
         component_counts[f"C{int(cid)}"] = int(n_components)
 
     return {
         "subregion_graph_edge_count": int(edge_pairs.shape[0]),
         "overlap_edge_count": int(np.sum(overlap_mask)),
         "proximity_only_edge_count": int(np.sum(~overlap_mask)),
-        "same_label_edge_fraction": float(np.sum(edge_weight[same_label]) / np.sum(edge_weight)),
-        "boundary_edge_fraction": float(np.sum(edge_weight[boundary_mask]) / np.sum(edge_weight)),
-        "boundary_entropy_mean": float(np.mean(edge_entropy[boundary_mask])) if np.any(boundary_mask) else None,
-        "boundary_entropy_p95": float(np.quantile(edge_entropy[boundary_mask], 0.95)) if np.any(boundary_mask) else None,
+        "same_label_edge_fraction": float(
+            np.sum(edge_weight[same_label]) / np.sum(edge_weight)
+        ),
+        "boundary_edge_fraction": float(
+            np.sum(edge_weight[boundary_mask]) / np.sum(edge_weight)
+        ),
+        "boundary_entropy_mean": float(np.mean(edge_entropy[boundary_mask]))
+        if np.any(boundary_mask)
+        else None,
+        "boundary_entropy_p95": float(np.quantile(edge_entropy[boundary_mask], 0.95))
+        if np.any(boundary_mask)
+        else None,
         "overlap_probability_l2_mean": (
-            float(np.sum(overlap_jaccard[overlap_mask] * overlap_prob_l2[overlap_mask]) / np.sum(overlap_jaccard[overlap_mask]))
+            float(
+                np.sum(overlap_jaccard[overlap_mask] * overlap_prob_l2[overlap_mask])
+                / np.sum(overlap_jaccard[overlap_mask])
+            )
             if np.any(overlap_mask)
             else None
         ),
@@ -463,5 +590,7 @@ def subregion_graph_metrics(
         ),
         "isolated_subregion_fraction": float(np.mean((degree <= 0).astype(np.float32))),
         "cluster_connected_components": component_counts,
-        "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(coords_um, cell_labels),
+        "cell_adjacency_same_label_fraction": _cell_adjacency_same_label_fraction(
+            coords_um, cell_labels
+        ),
     }

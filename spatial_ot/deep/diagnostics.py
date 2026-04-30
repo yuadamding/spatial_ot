@@ -3,7 +3,9 @@ from __future__ import annotations
 import numpy as np
 
 
-def _deterministic_subsample_rows(*arrays: np.ndarray, max_rows: int = 1024) -> tuple[np.ndarray, ...]:
+def _deterministic_subsample_rows(
+    *arrays: np.ndarray, max_rows: int = 1024
+) -> tuple[np.ndarray, ...]:
     if not arrays:
         return ()
     n_rows = arrays[0].shape[0]
@@ -19,14 +21,24 @@ def _pairwise_distance_matrix(x: np.ndarray) -> np.ndarray:
     return np.sqrt(np.maximum(np.sum(diff * diff, axis=-1), 0.0))
 
 
-def distance_correlation(a: np.ndarray, b: np.ndarray, *, max_rows: int = 1024) -> float:
-    a_arr, b_arr = _deterministic_subsample_rows(np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32), max_rows=max_rows)
+def distance_correlation(
+    a: np.ndarray, b: np.ndarray, *, max_rows: int = 1024
+) -> float:
+    a_arr, b_arr = _deterministic_subsample_rows(
+        np.asarray(a, dtype=np.float32),
+        np.asarray(b, dtype=np.float32),
+        max_rows=max_rows,
+    )
     if a_arr.shape[0] < 2 or b_arr.shape[0] < 2:
         return 0.0
     da = _pairwise_distance_matrix(a_arr)
     db = _pairwise_distance_matrix(b_arr)
-    da = da - da.mean(axis=0, keepdims=True) - da.mean(axis=1, keepdims=True) + da.mean()
-    db = db - db.mean(axis=0, keepdims=True) - db.mean(axis=1, keepdims=True) + db.mean()
+    da = (
+        da - da.mean(axis=0, keepdims=True) - da.mean(axis=1, keepdims=True) + da.mean()
+    )
+    db = (
+        db - db.mean(axis=0, keepdims=True) - db.mean(axis=1, keepdims=True) + db.mean()
+    )
     dcov2 = float(np.mean(da * db))
     dvar_a = float(np.mean(da * da))
     dvar_b = float(np.mean(db * db))
@@ -36,7 +48,11 @@ def distance_correlation(a: np.ndarray, b: np.ndarray, *, max_rows: int = 1024) 
 
 
 def hsic_rbf(a: np.ndarray, b: np.ndarray, *, max_rows: int = 512) -> float:
-    a_arr, b_arr = _deterministic_subsample_rows(np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32), max_rows=max_rows)
+    a_arr, b_arr = _deterministic_subsample_rows(
+        np.asarray(a, dtype=np.float32),
+        np.asarray(b, dtype=np.float32),
+        max_rows=max_rows,
+    )
     n = int(a_arr.shape[0])
     if n < 4 or b_arr.shape[0] != n:
         return 0.0
@@ -93,7 +109,9 @@ def linear_r2(source: np.ndarray, target: np.ndarray) -> float:
         target = target[:, None]
     if source.shape[0] < 2 or source.shape[1] == 0 or target.shape[1] == 0:
         return 0.0
-    design = np.concatenate([source, np.ones((source.shape[0], 1), dtype=np.float32)], axis=1).astype(np.float64, copy=False)
+    design = np.concatenate(
+        [source, np.ones((source.shape[0], 1), dtype=np.float32)], axis=1
+    ).astype(np.float64, copy=False)
     target64 = target.astype(np.float64, copy=False)
     coef, *_ = np.linalg.lstsq(design, target64, rcond=None)
     pred = design @ coef
@@ -161,24 +179,37 @@ def latent_diagnostics(
     return {
         "selected_embedding": selected_embedding,
         "selected_mean_norm": float(np.mean(np.linalg.norm(selected, axis=1))),
-        "intrinsic_reconstruction_mse": float(np.mean((np.asarray(outputs["recon"], dtype=np.float32) - x_std) ** 2)),
-        "context_prediction_mse": float(np.mean((np.asarray(outputs["context_pred"], dtype=np.float32) - context_std) ** 2)),
+        "intrinsic_reconstruction_mse": float(
+            np.mean((np.asarray(outputs["recon"], dtype=np.float32) - x_std) ** 2)
+        ),
+        "context_prediction_mse": float(
+            np.mean(
+                (np.asarray(outputs["context_pred"], dtype=np.float32) - context_std)
+                ** 2
+            )
+        ),
         "intrinsic_context_mean_abs_correlation": float(ic["mean_abs_correlation"]),
         "intrinsic_context_max_abs_correlation": float(ic["max_abs_correlation"]),
         "intrinsic_context_fro_correlation": float(ic["fro_correlation"]),
         "intrinsic_context_mean_cosine_similarity": float(ic["mean_cosine_similarity"]),
         "intrinsic_context_allclose": bool(ic["allclose"]),
-        "intrinsic_context_top_canonical_correlation": top_canonical_correlation(intrinsic, context),
+        "intrinsic_context_top_canonical_correlation": top_canonical_correlation(
+            intrinsic, context
+        ),
         "intrinsic_context_distance_correlation": intrinsic_context_distcorr,
         "intrinsic_context_hsic_rbf": intrinsic_context_hsic,
         "intrinsic_joint_mean_abs_correlation": float(ij["mean_abs_correlation"]),
         "intrinsic_joint_max_abs_correlation": float(ij["max_abs_correlation"]),
         "intrinsic_joint_allclose": bool(ij["allclose"]),
-        "intrinsic_joint_top_canonical_correlation": top_canonical_correlation(intrinsic, joint),
+        "intrinsic_joint_top_canonical_correlation": top_canonical_correlation(
+            intrinsic, joint
+        ),
         "context_joint_mean_abs_correlation": float(cj["mean_abs_correlation"]),
         "context_joint_max_abs_correlation": float(cj["max_abs_correlation"]),
         "context_joint_allclose": bool(cj["allclose"]),
-        "context_joint_top_canonical_correlation": top_canonical_correlation(context, joint),
+        "context_joint_top_canonical_correlation": top_canonical_correlation(
+            context, joint
+        ),
         "intrinsic_input_r2": intrinsic_input_r2,
         "context_input_r2": context_input_r2,
         "joint_input_r2": joint_input_r2,
@@ -188,8 +219,12 @@ def latent_diagnostics(
         "intrinsic_coordinate_r2": intrinsic_coord_r2,
         "context_coordinate_r2": context_coord_r2,
         "joint_coordinate_r2": joint_coord_r2,
-        "intrinsic_minus_context_input_r2": float(intrinsic_input_r2 - context_input_r2),
-        "context_minus_intrinsic_context_target_r2": float(context_context_r2 - intrinsic_context_r2),
+        "intrinsic_minus_context_input_r2": float(
+            intrinsic_input_r2 - context_input_r2
+        ),
+        "context_minus_intrinsic_context_target_r2": float(
+            context_context_r2 - intrinsic_context_r2
+        ),
     }
 
 

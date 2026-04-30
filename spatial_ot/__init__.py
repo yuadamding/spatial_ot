@@ -10,30 +10,54 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "MultilevelPathConfig": ("config", "MultilevelPathConfig"),
     "RegionGeometry": ("multilevel", "RegionGeometry"),
     "SpatialOTFeatureEncoder": ("deep", "SpatialOTFeatureEncoder"),
-    "build_concern_resolution_report": ("multilevel", "build_concern_resolution_report"),
-    "distribute_pooled_feature_cache_to_inputs": ("pooling", "distribute_pooled_feature_cache_to_inputs"),
+    "build_concern_resolution_report": (
+        "multilevel",
+        "build_concern_resolution_report",
+    ),
+    "distribute_pooled_feature_cache_to_inputs": (
+        "pooling",
+        "distribute_pooled_feature_cache_to_inputs",
+    ),
     "fit_deep_features": ("deep", "fit_deep_features"),
     "fit_deep_features_on_h5ad": ("deep", "fit_deep_features_on_h5ad"),
     "fit_multilevel_ot": ("multilevel", "fit_multilevel_ot"),
     "fit_ot_shape_normalizer": ("multilevel", "fit_ot_shape_normalizer"),
     "load_multilevel_config": ("config", "load_multilevel_config"),
-    "make_reference_points_unit_disk": ("multilevel", "make_reference_points_unit_disk"),
+    "make_reference_points_unit_disk": (
+        "multilevel",
+        "make_reference_points_unit_disk",
+    ),
     "plot_sample_niche_maps": ("multilevel", "plot_sample_niche_maps"),
-    "plot_sample_niche_maps_from_run_dir": ("multilevel", "plot_sample_niche_maps_from_run_dir"),
+    "plot_sample_niche_maps_from_run_dir": (
+        "multilevel",
+        "plot_sample_niche_maps_from_run_dir",
+    ),
     "plot_sample_spatial_maps": ("multilevel", "plot_sample_spatial_maps"),
-    "plot_sample_spatial_maps_from_run_dir": ("multilevel", "plot_sample_spatial_maps_from_run_dir"),
+    "plot_sample_spatial_maps_from_run_dir": (
+        "multilevel",
+        "plot_sample_spatial_maps_from_run_dir",
+    ),
     "pool_h5ad_files": ("pooling", "pool_h5ad_files"),
     "pool_h5ads_in_directory": ("pooling", "pool_h5ads_in_directory"),
     "prepare_h5ad_feature_cache": ("feature_source", "prepare_h5ad_feature_cache"),
-    "run_multilevel_optimal_search": ("optimal_search", "run_multilevel_optimal_search"),
+    "run_multilevel_optimal_search": (
+        "optimal_search",
+        "run_multilevel_optimal_search",
+    ),
     "run_multilevel_ot_on_h5ad": ("multilevel", "run_multilevel_ot_on_h5ad"),
     "run_multilevel_ot_with_config": ("multilevel", "run_multilevel_ot_with_config"),
-    "spatial_niche_validation_report": ("multilevel", "spatial_niche_validation_report"),
+    "spatial_niche_validation_report": (
+        "multilevel",
+        "spatial_niche_validation_report",
+    ),
     "transform_h5ad_with_deep_model": ("deep", "transform_h5ad_with_deep_model"),
-    "write_concern_resolution_report": ("multilevel", "write_concern_resolution_report"),
+    "write_concern_resolution_report": (
+        "multilevel",
+        "write_concern_resolution_report",
+    ),
 }
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 __all__ = list(_LAZY_EXPORTS)
 
 

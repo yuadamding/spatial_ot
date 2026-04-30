@@ -710,6 +710,10 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
         str(config.ot.heterogeneity_transport_feature_mode),
         "--heterogeneity-transport-feature-cost",
         str(config.ot.heterogeneity_transport_feature_cost),
+        "--heterogeneity-transport-marker-feature-weight",
+        str(config.ot.heterogeneity_transport_marker_feature_weight),
+        "--heterogeneity-transport-codebook-feature-weight",
+        str(config.ot.heterogeneity_transport_codebook_feature_weight),
         "--heterogeneity-fused-ot-feature-weight",
         str(config.ot.heterogeneity_fused_ot_feature_weight),
         "--heterogeneity-fused-ot-coordinate-weight",
@@ -730,6 +734,10 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
         str(config.ot.heterogeneity_fgw_max_iter),
         "--heterogeneity-fgw-tol",
         str(config.ot.heterogeneity_fgw_tol),
+        "--heterogeneity-fgw-n-init",
+        str(config.ot.heterogeneity_fgw_n_init),
+        "--heterogeneity-fgw-init",
+        str(config.ot.heterogeneity_fgw_init),
         "--heterogeneity-fgw-structure-scale",
         str(config.ot.heterogeneity_fgw_structure_scale),
         "--heterogeneity-fgw-partial-mass",
@@ -782,7 +790,9 @@ def _candidate_command(config: MultilevelExperimentConfig) -> list[str]:
             ]
         )
     cmd.extend(
-        _bool_flag("heterogeneity-fgw-partial", bool(config.ot.heterogeneity_fgw_partial))
+        _bool_flag(
+            "heterogeneity-fgw-partial", bool(config.ot.heterogeneity_fgw_partial)
+        )
     )
     cmd.extend(_bool_flag("compute-spot-latent", bool(config.ot.compute_spot_latent)))
     cmd.extend(_bool_flag("auto-n-clusters", bool(config.ot.auto_n_clusters)))

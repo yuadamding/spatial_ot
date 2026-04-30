@@ -38,9 +38,13 @@ def test_detect_existing_run_status_marks_completed_run() -> None:
         run_dir = runs_dir / "example_run"
         (run_dir / "outs").mkdir(parents=True)
         (run_dir / "_finalstate").write_text("complete\n", encoding="utf-8")
-        (run_dir / "_timestamp").write_text("start: 2026-04-16 15:06:17\nend: 2026-04-16 19:55:48\n", encoding="utf-8")
+        (run_dir / "_timestamp").write_text(
+            "start: 2026-04-16 15:06:17\nend: 2026-04-16 19:55:48\n", encoding="utf-8"
+        )
 
-        status = run_spaceranger_count.detect_existing_run_status(runs_dir, "example_run")
+        status = run_spaceranger_count.detect_existing_run_status(
+            runs_dir, "example_run"
+        )
 
         assert status["completed"] is True
         assert status["finalstate_exists"] is True
@@ -59,7 +63,9 @@ def test_run_spaceranger_count_payload_marks_existing_completed_run() -> None:
         run_dir = runs_dir / run_id
         (run_dir / "outs").mkdir(parents=True)
         (run_dir / "_finalstate").write_text("complete\n", encoding="utf-8")
-        (run_dir / "_timestamp").write_text("start: 2026-04-16 15:06:17\nend: 2026-04-16 19:55:48\n", encoding="utf-8")
+        (run_dir / "_timestamp").write_text(
+            "start: 2026-04-16 15:06:17\nend: 2026-04-16 19:55:48\n", encoding="utf-8"
+        )
 
         fastqs_dir = root_dir / "fastqs"
         fastqs_dir.mkdir()
@@ -138,7 +144,9 @@ def test_detect_existing_run_status_marks_stale_lock_when_unheld() -> None:
         try:
             run_spaceranger_count.find_lock_holders = lambda path: []
             run_spaceranger_count.find_run_processes = lambda run_id: []
-            status = run_spaceranger_count.detect_existing_run_status(runs_dir, "example_run")
+            status = run_spaceranger_count.detect_existing_run_status(
+                runs_dir, "example_run"
+            )
         finally:
             run_spaceranger_count.find_lock_holders = original_lock_holders
             run_spaceranger_count.find_run_processes = original_run_processes
@@ -278,8 +286,12 @@ def test_sample_summary_treats_already_running_as_in_progress() -> None:
 
         original_prepare_workspace = generate_cohort_inputs._prepare_workspace
         original_extract_fastqs = generate_cohort_inputs._extract_fastqs
-        original_generate_spaceranger_command = generate_cohort_inputs._generate_spaceranger_command
-        original_generate_methoddev = generate_cohort_inputs._generate_methoddev_if_possible
+        original_generate_spaceranger_command = (
+            generate_cohort_inputs._generate_spaceranger_command
+        )
+        original_generate_methoddev = (
+            generate_cohort_inputs._generate_methoddev_if_possible
+        )
         original_sample_prefix = generate_cohort_inputs._sample_prefix
         try:
             generate_cohort_inputs._prepare_workspace = lambda *args, **kwargs: {
@@ -292,12 +304,18 @@ def test_sample_summary_treats_already_running_as_in_progress() -> None:
                 "runs_dir": str(root_dir / "runs"),
                 "exports_dir": str(root_dir / "exports"),
             }
-            generate_cohort_inputs._extract_fastqs = lambda *args, **kwargs: {"status": "ok"}
-            generate_cohort_inputs._generate_spaceranger_command = lambda *args, **kwargs: (
-                "run123",
-                {"status": "already_running"},
+            generate_cohort_inputs._extract_fastqs = lambda *args, **kwargs: {
+                "status": "ok"
+            }
+            generate_cohort_inputs._generate_spaceranger_command = (
+                lambda *args, **kwargs: (
+                    "run123",
+                    {"status": "already_running"},
+                )
             )
-            generate_cohort_inputs._generate_methoddev_if_possible = lambda *args, **kwargs: {}
+            generate_cohort_inputs._generate_methoddev_if_possible = (
+                lambda *args, **kwargs: {}
+            )
             generate_cohort_inputs._sample_prefix = lambda sample_input_dir: "Demo"
 
             result = generate_cohort_inputs._sample_summary(
@@ -312,8 +330,12 @@ def test_sample_summary_treats_already_running_as_in_progress() -> None:
         finally:
             generate_cohort_inputs._prepare_workspace = original_prepare_workspace
             generate_cohort_inputs._extract_fastqs = original_extract_fastqs
-            generate_cohort_inputs._generate_spaceranger_command = original_generate_spaceranger_command
-            generate_cohort_inputs._generate_methoddev_if_possible = original_generate_methoddev
+            generate_cohort_inputs._generate_spaceranger_command = (
+                original_generate_spaceranger_command
+            )
+            generate_cohort_inputs._generate_methoddev_if_possible = (
+                original_generate_methoddev
+            )
             generate_cohort_inputs._sample_prefix = original_sample_prefix
 
         assert result["status"] == "spaceranger_running_or_ready"
@@ -345,6 +367,8 @@ def test_move_spatial_ot_inputs_run_once_copies_payload() -> None:
 
 
 def test_step25_wrapper_defaults_to_non_rgb_h5ad() -> None:
-    wrapper = (PIPELINE_DIR / "25_run_cell_spatial_niche_analysis.sh").read_text(encoding="utf-8")
-    assert 'p2_crc_cells_marker_genes_umap3d.h5ad' in wrapper
-    assert 'p2_crc_cells_marker_genes_umap3d_rgb.h5ad' not in wrapper
+    wrapper = (PIPELINE_DIR / "25_run_cell_spatial_niche_analysis.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "p2_crc_cells_marker_genes_umap3d.h5ad" in wrapper
+    assert "p2_crc_cells_marker_genes_umap3d_rgb.h5ad" not in wrapper

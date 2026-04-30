@@ -11,7 +11,11 @@ import numpy as np
 
 from ..config import DeepFeatureConfig
 from ..feature_source import resolve_h5ad_features
-from .features import SpatialOTFeatureEncoder, fit_deep_features, save_deep_feature_history
+from .features import (
+    SpatialOTFeatureEncoder,
+    fit_deep_features,
+    save_deep_feature_history,
+)
 
 try:
     import tomllib
@@ -53,7 +57,9 @@ def _extract_features_and_coords(
     spatial_scale: float,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     if spatial_x_key not in adata.obs or spatial_y_key not in adata.obs:
-        raise KeyError(f"Spatial keys '{spatial_x_key}' and '{spatial_y_key}' must both be present in obs.")
+        raise KeyError(
+            f"Spatial keys '{spatial_x_key}' and '{spatial_y_key}' must both be present in obs."
+        )
     features, feature_source = resolve_h5ad_features(
         adata,
         feature_obsm_key=feature_obsm_key,
@@ -82,10 +88,16 @@ def _feature_schema_extra(
         "input_obsm_key": str(feature_obsm_key),
         "input_feature_key": str(feature_obsm_key),
         "coordinate_keys": [str(spatial_x_key), str(spatial_y_key)],
-        "preprocessing": str(feature_source.get("preprocessing", "train_only_standardization")),
+        "preprocessing": str(
+            feature_source.get("preprocessing", "train_only_standardization")
+        ),
         "spatial_scale": float(spatial_scale),
         "spatial_units_after_scaling": "um",
-        "source_feature_dim": int(feature_source.get("source_feature_dim", feature_source.get("feature_dim", 0))),
+        "source_feature_dim": int(
+            feature_source.get(
+                "source_feature_dim", feature_source.get("feature_dim", 0)
+            )
+        ),
         "feature_dim": int(feature_source.get("feature_dim", 0)),
     }
     for key in [
@@ -106,7 +118,9 @@ def _extract_count_target(adata: ad.AnnData, *, count_layer: str | None):
     layer_key = str(count_layer)
     if layer_key == "X":
         if adata.X is None:
-            raise ValueError("deep.count_layer requested the primary count matrix, but adata.X is missing.")
+            raise ValueError(
+                "deep.count_layer requested the primary count matrix, but adata.X is missing."
+            )
         return adata.X, "X"
     if layer_key not in adata.layers:
         raise KeyError(f"deep.count_layer '{layer_key}' was not found in adata.layers.")
@@ -128,7 +142,9 @@ def _deep_summary(
     extra: dict | None = None,
 ) -> dict:
     final_train_loss = history[-1].get("train_loss") if history else None
-    final_val_loss = history[-1].get("val_loss") if history and "val_loss" in history[-1] else None
+    final_val_loss = (
+        history[-1].get("val_loss") if history and "val_loss" in history[-1] else None
+    )
     count_layer_used = None if extra is None else extra.get("count_layer_used")
     payload = {
         "enabled": True,
@@ -141,8 +157,12 @@ def _deep_summary(
         "batch_key": config.batch_key,
         "neighbor_k": int(config.neighbor_k),
         "radius_um": float(config.radius_um) if config.radius_um is not None else None,
-        "short_radius_um": float(config.short_radius_um) if config.short_radius_um is not None else None,
-        "mid_radius_um": float(config.mid_radius_um) if config.mid_radius_um is not None else None,
+        "short_radius_um": float(config.short_radius_um)
+        if config.short_radius_um is not None
+        else None,
+        "mid_radius_um": float(config.mid_radius_um)
+        if config.mid_radius_um is not None
+        else None,
         "graph_layers": int(config.graph_layers),
         "graph_aggr": config.graph_aggr,
         "graph_max_neighbors": int(config.graph_max_neighbors),
@@ -154,10 +174,13 @@ def _deep_summary(
         "output_embedding": config.output_embedding,
         "ot_feature_view_warning": (
             "joint_embedding_explicit_opt_in"
-            if config.output_embedding == "joint" and bool(config.allow_joint_ot_embedding)
+            if config.output_embedding == "joint"
+            and bool(config.allow_joint_ot_embedding)
             else None
         ),
-        "final_train_loss": float(final_train_loss) if final_train_loss is not None else None,
+        "final_train_loss": float(final_train_loss)
+        if final_train_loss is not None
+        else None,
         "final_val_loss": float(final_val_loss) if final_val_loss is not None else None,
         "model_path": model_path,
         "batch_correction": "disabled",
@@ -200,7 +223,11 @@ def _deep_method_stack(
             if config.output_embedding is not None
             else "deep_unspecified"
         ),
-        "input_feature_key": str(feature_source.get("requested_feature_key", feature_source.get("feature_key", ""))),
+        "input_feature_key": str(
+            feature_source.get(
+                "requested_feature_key", feature_source.get("feature_key", "")
+            )
+        ),
         "input_feature_mode": str(feature_source.get("input_mode", "obsm")),
         "feature_space_kind": str(feature_source.get("feature_space_kind", "unknown")),
         "output_obsm_key": str(output_obsm_key),
@@ -208,7 +235,9 @@ def _deep_method_stack(
     }
 
 
-def _deep_qc_warnings(*, feature_embedding_warning: str | None, config: DeepFeatureConfig) -> list[dict[str, object]]:
+def _deep_qc_warnings(
+    *, feature_embedding_warning: str | None, config: DeepFeatureConfig
+) -> list[dict[str, object]]:
     warnings_out: list[dict[str, object]] = []
     if feature_embedding_warning == "umap_exploratory":
         warnings_out.append(
@@ -252,7 +281,9 @@ def fit_deep_features_on_h5ad(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if config.pretrained_model is not None:
-        raise ValueError("deep-fit trains a new encoder bundle. Use deep-transform to apply a pretrained model.")
+        raise ValueError(
+            "deep-fit trains a new encoder bundle. Use deep-transform to apply a pretrained model."
+        )
 
     adata = ad.read_h5ad(input_h5ad)
     features, coords_um, feature_source = _extract_features_and_coords(
@@ -265,9 +296,13 @@ def fit_deep_features_on_h5ad(
     batch = None
     if config.batch_key is not None:
         if config.batch_key not in adata.obs:
-            raise KeyError(f"Deep-feature batch key '{config.batch_key}' not found in obs.")
+            raise KeyError(
+                f"Deep-feature batch key '{config.batch_key}' not found in obs."
+            )
         batch = np.asarray(adata.obs[config.batch_key].astype(str))
-    count_matrix, count_layer_used = _extract_count_target(adata, count_layer=config.count_layer)
+    count_matrix, count_layer_used = _extract_count_target(
+        adata, count_layer=config.count_layer
+    )
 
     model_path = output_dir / "deep_feature_model.pt" if config.save_model else None
     result = fit_deep_features(
@@ -331,7 +366,9 @@ def fit_deep_features_on_h5ad(
         "git_sha": _git_sha(),
         "method_family": "deep_feature_adapter",
         "active_path": "deep-fit",
-        "latent_source": f"deep_{config.output_embedding}" if config.output_embedding is not None else "deep_unspecified",
+        "latent_source": f"deep_{config.output_embedding}"
+        if config.output_embedding is not None
+        else "deep_unspecified",
         "communication_source": "none",
         "input_h5ad": str(input_h5ad),
         "output_dir": str(output_dir),
@@ -401,7 +438,9 @@ def transform_h5ad_with_deep_model(
         spatial_scale=spatial_scale,
     )
     resolved_output_obsm_key = output_obsm_key or encoder.config.output_obsm_key
-    embedding = encoder.transform(features=features, coords_um=coords_um, batch_size=batch_size)
+    embedding = encoder.transform(
+        features=features, coords_um=coords_um, batch_size=batch_size
+    )
     adata.obsm[resolved_output_obsm_key] = np.asarray(embedding, dtype=np.float32)
 
     summary_path = output_h5ad.with_suffix(output_h5ad.suffix + ".summary.json")
@@ -417,8 +456,12 @@ def transform_h5ad_with_deep_model(
         model_path=str(model_path),
         pretrained_model_loaded=True,
         extra={
-            "transform_batch_size": int(batch_size) if batch_size is not None else int(encoder.config.batch_size),
-            "graph_inference_mode": "full_batch" if encoder.config.method == "graph_autoencoder" else "batched",
+            "transform_batch_size": int(batch_size)
+            if batch_size is not None
+            else int(encoder.config.batch_size),
+            "graph_inference_mode": "full_batch"
+            if encoder.config.method == "graph_autoencoder"
+            else "batched",
         },
     )
     summary = {

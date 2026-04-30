@@ -23,7 +23,9 @@ def build_neighbor_graph(
     if radius_um is not None:
         nn_model = NearestNeighbors(radius=float(radius_um), metric="euclidean")
         nn_model.fit(coords)
-        distances, neighborhoods = nn_model.radius_neighbors(coords, return_distance=True)
+        distances, neighborhoods = nn_model.radius_neighbors(
+            coords, return_distance=True
+        )
     else:
         n_neighbors = min(max(int(neighbor_k) + 1, 2), n)
         nn_model = NearestNeighbors(n_neighbors=n_neighbors, metric="euclidean")
@@ -32,7 +34,9 @@ def build_neighbor_graph(
 
     src_index: list[int] = []
     dst_index: list[int] = []
-    for center_idx, (neighbors, neighbor_dist) in enumerate(zip(neighborhoods, distances, strict=False)):
+    for center_idx, (neighbors, neighbor_dist) in enumerate(
+        zip(neighborhoods, distances, strict=False)
+    ):
         neigh = np.asarray(neighbors, dtype=np.int64)
         dist = np.asarray(neighbor_dist, dtype=np.float32)
         keep = neigh != center_idx
@@ -91,8 +95,12 @@ def aggregate_neighbor_mean_torch(
         return features
     src, dst = edge_index
     agg = torch.zeros_like(features)
-    deg = torch.zeros((features.shape[0], 1), dtype=features.dtype, device=features.device)
-    bytes_per_row = max(int(features.shape[1]) * max(int(features.element_size()), 1), 1)
+    deg = torch.zeros(
+        (features.shape[0], 1), dtype=features.dtype, device=features.device
+    )
+    bytes_per_row = max(
+        int(features.shape[1]) * max(int(features.element_size()), 1), 1
+    )
     chunk_size = max(int(_NEIGHBOR_AGGREGATION_MAX_GATHER_BYTES // bytes_per_row), 1)
     for start in range(0, int(src.numel()), chunk_size):
         stop = min(start + chunk_size, int(src.numel()))
@@ -102,7 +110,9 @@ def aggregate_neighbor_mean_torch(
         deg.index_add_(
             0,
             dst_chunk,
-            torch.ones((dst_chunk.numel(), 1), dtype=features.dtype, device=features.device),
+            torch.ones(
+                (dst_chunk.numel(), 1), dtype=features.dtype, device=features.device
+            ),
         )
     agg = agg / deg.clamp_min(1.0)
     isolated = deg.squeeze(1) == 0

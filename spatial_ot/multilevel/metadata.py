@@ -47,7 +47,11 @@ def git_sha() -> str | None:
 def latent_source_label(feature_source: dict, deep_summary: dict) -> str:
     if bool(deep_summary.get("enabled")):
         output_embedding = deep_summary.get("output_embedding")
-        return f"deep_{output_embedding}" if output_embedding is not None else "deep_unspecified"
+        return (
+            f"deep_{output_embedding}"
+            if output_embedding is not None
+            else "deep_unspecified"
+        )
 
     feature_key = str(feature_source.get("feature_key", ""))
     input_mode = str(feature_source.get("input_mode", "obsm"))
@@ -67,7 +71,9 @@ def extract_count_target(adata: ad.AnnData, *, count_layer: str | None):
     layer_key = str(count_layer)
     if layer_key == "X":
         if adata.X is None:
-            raise ValueError("deep.count_layer requested the primary count matrix, but adata.X is missing.")
+            raise ValueError(
+                "deep.count_layer requested the primary count matrix, but adata.X is missing."
+            )
         return adata.X, "X"
     if layer_key not in adata.layers:
         raise KeyError(f"deep.count_layer '{layer_key}' was not found in adata.layers.")

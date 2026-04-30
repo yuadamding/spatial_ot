@@ -21,7 +21,9 @@ def resolve_compute_device(device: str) -> torch.device:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     resolved = torch.device(requested)
     if resolved.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA compute was requested for multilevel OT, but torch.cuda.is_available() is False.")
+        raise RuntimeError(
+            "CUDA compute was requested for multilevel OT, but torch.cuda.is_available() is False."
+        )
     return resolved
 
 
@@ -60,7 +62,9 @@ def cuda_target_bytes(device: torch.device | None = None) -> int:
         total_bytes = int(torch.cuda.get_device_properties(dev).total_memory)
     except Exception:
         return requested
-    max_fraction = min(max(env_float("SPATIAL_OT_CUDA_MAX_TARGET_FRACTION", 0.9), 0.1), 0.98)
+    max_fraction = min(
+        max(env_float("SPATIAL_OT_CUDA_MAX_TARGET_FRACTION", 0.9), 0.1), 0.98
+    )
     safe_bytes = int(max(total_bytes * max_fraction, 1 << 30))
     return min(requested, safe_bytes)
 
@@ -123,7 +127,9 @@ def resolve_parallel_restart_workers(device_pool: list[str], n_init: int) -> int
     return max(1, min(value, len(device_pool), int(n_init)))
 
 
-def configure_local_thread_budget(torch_threads: int, torch_interop_threads: int) -> None:
+def configure_local_thread_budget(
+    torch_threads: int, torch_interop_threads: int
+) -> None:
     global _THREADPOOL_LIMITS
 
     torch_threads = max(int(torch_threads), 1)

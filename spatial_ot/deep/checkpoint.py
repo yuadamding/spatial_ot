@@ -18,7 +18,9 @@ def save_encoder_bundle(
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     torch.save(state_dict, destination)
-    destination.with_suffix(destination.suffix + ".meta.json").write_text(json.dumps(metadata, indent=2))
+    destination.with_suffix(destination.suffix + ".meta.json").write_text(
+        json.dumps(metadata, indent=2)
+    )
     np.savez_compressed(
         destination.with_suffix(destination.suffix + ".scaler.npz"),
         feature_mean=np.asarray(feature_mean, dtype=np.float32),
@@ -26,7 +28,9 @@ def save_encoder_bundle(
     )
 
 
-def load_encoder_bundle(path: str | Path, *, map_location: str = "cpu") -> tuple[dict, dict, np.ndarray, np.ndarray]:
+def load_encoder_bundle(
+    path: str | Path, *, map_location: str = "cpu"
+) -> tuple[dict, dict, np.ndarray, np.ndarray]:
     source = Path(path)
     state_dict = torch.load(source, map_location=map_location, weights_only=True)
     metadata = json.loads(source.with_suffix(source.suffix + ".meta.json").read_text())

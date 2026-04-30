@@ -35,9 +35,17 @@ def _pooled_offsets(
 
     max_span_x = max(max(spans_x), 1.0)
     max_span_y = max(max(spans_y), 1.0)
-    cols = int(layout_columns) if layout_columns is not None and int(layout_columns) > 0 else int(ceil(sqrt(n_items)))
+    cols = (
+        int(layout_columns)
+        if layout_columns is not None and int(layout_columns) > 0
+        else int(ceil(sqrt(n_items)))
+    )
     rows = int(ceil(n_items / max(cols, 1)))
-    gap = float(layout_gap) if layout_gap is not None else max(10000.0, 10.0 * max(max_span_x, max_span_y))
+    gap = (
+        float(layout_gap)
+        if layout_gap is not None
+        else max(10000.0, 10.0 * max(max_span_x, max_span_y))
+    )
     tile_w = max_span_x + gap
     tile_h = max_span_y + gap
 
@@ -118,10 +126,14 @@ def pool_h5ad_files(
             )
         for key in obsm_feature_keys:
             if key not in adata.obsm:
-                raise KeyError(f"Feature obsm key '{key}' not found in {input_path.name}.")
+                raise KeyError(
+                    f"Feature obsm key '{key}' not found in {input_path.name}."
+                )
         if preserve_x:
             if adata.X is None or int(adata.n_vars) <= 0:
-                raise ValueError(f"Feature key 'X' was requested, but {input_path.name} does not contain a usable gene matrix.")
+                raise ValueError(
+                    f"Feature key 'X' was requested, but {input_path.name} does not contain a usable gene matrix."
+                )
             if reference_var is None:
                 reference_var = adata.var.copy()
             elif not reference_var.index.equals(adata.var_names):
@@ -132,10 +144,20 @@ def pool_h5ad_files(
         obs = adata.obs.copy()
         obs[sample_obs_key] = str(sample_id)
         obs[source_file_obs_key] = str(input_path.name)
-        obs[f"original_{spatial_x_key}"] = np.asarray(obs[spatial_x_key], dtype=np.float32)
-        obs[f"original_{spatial_y_key}"] = np.asarray(obs[spatial_y_key], dtype=np.float32)
-        base_ids = obs["cell_id"].astype(str).to_numpy() if "cell_id" in obs else obs.index.astype(str).to_numpy()
-        obs.index = pd.Index([f"{sample_id}:{cell_id}" for cell_id in base_ids], dtype="object")
+        obs[f"original_{spatial_x_key}"] = np.asarray(
+            obs[spatial_x_key], dtype=np.float32
+        )
+        obs[f"original_{spatial_y_key}"] = np.asarray(
+            obs[spatial_y_key], dtype=np.float32
+        )
+        base_ids = (
+            obs["cell_id"].astype(str).to_numpy()
+            if "cell_id" in obs
+            else obs.index.astype(str).to_numpy()
+        )
+        obs.index = pd.Index(
+            [f"{sample_id}:{cell_id}" for cell_id in base_ids], dtype="object"
+        )
 
         x = np.asarray(obs[spatial_x_key], dtype=np.float32)
         y = np.asarray(obs[spatial_y_key], dtype=np.float32)
@@ -151,7 +173,9 @@ def pool_h5ad_files(
             if sparse.issparse(x_matrix):
                 sample_x.append(x_matrix.tocsr().astype(np.float32))
             else:
-                sample_x.append(sparse.csr_matrix(np.asarray(x_matrix, dtype=np.float32)))
+                sample_x.append(
+                    sparse.csr_matrix(np.asarray(x_matrix, dtype=np.float32))
+                )
         sample_frames.append(obs)
         sample_obsm.append(obsm_payload)
         sample_ids.append(sample_id)
@@ -175,24 +199,44 @@ def pool_h5ad_files(
     )
 
     pooled_obs_parts: list[pd.DataFrame] = []
-    pooled_obsm_parts: dict[str, list[np.ndarray]] = {key: [] for key in obsm_feature_keys}
-    for idx, (obs, obsm_payload) in enumerate(zip(sample_frames, sample_obsm, strict=False)):
+    pooled_obsm_parts: dict[str, list[np.ndarray]] = {
+        key: [] for key in obsm_feature_keys
+    }
+    for idx, (obs, obsm_payload) in enumerate(
+        zip(sample_frames, sample_obsm, strict=False)
+    ):
         x = np.asarray(obs[spatial_x_key], dtype=np.float32)
         y = np.asarray(obs[spatial_y_key], dtype=np.float32)
         x_shift, y_shift = offsets[idx]
         pooled_obs = obs.copy()
-        pooled_obs[pooled_spatial_x_key] = x + float(x_shift) - (float(x.min()) if x.size else 0.0)
-        pooled_obs[pooled_spatial_y_key] = y + float(y_shift) - (float(y.min()) if y.size else 0.0)
-        pooled_obs["sample_layout_col"] = int(idx % max(int(layout_meta["layout_columns"]), 1))
-        pooled_obs["sample_layout_row"] = int(idx // max(int(layout_meta["layout_columns"]), 1))
-        pooled_obs["sample_x_shift"] = float(x_shift) - (float(x.min()) if x.size else 0.0)
-        pooled_obs["sample_y_shift"] = float(y_shift) - (float(y.min()) if y.size else 0.0)
+        pooled_obs[pooled_spatial_x_key] = (
+            x + float(x_shift) - (float(x.min()) if x.size else 0.0)
+        )
+        pooled_obs[pooled_spatial_y_key] = (
+            y + float(y_shift) - (float(y.min()) if y.size else 0.0)
+        )
+        pooled_obs["sample_layout_col"] = int(
+            idx % max(int(layout_meta["layout_columns"]), 1)
+        )
+        pooled_obs["sample_layout_row"] = int(
+            idx // max(int(layout_meta["layout_columns"]), 1)
+        )
+        pooled_obs["sample_x_shift"] = float(x_shift) - (
+            float(x.min()) if x.size else 0.0
+        )
+        pooled_obs["sample_y_shift"] = float(y_shift) - (
+            float(y.min()) if y.size else 0.0
+        )
         pooled_obs_parts.append(pooled_obs)
         for key, value in obsm_payload.items():
             pooled_obsm_parts[key].append(value)
 
     pooled_obs = pd.concat(pooled_obs_parts, axis=0)
-    pooled_x = sparse.vstack(sample_x, format="csr").astype(np.float32) if preserve_x else sparse.csr_matrix((pooled_obs.shape[0], 0), dtype=np.float32)
+    pooled_x = (
+        sparse.vstack(sample_x, format="csr").astype(np.float32)
+        if preserve_x
+        else sparse.csr_matrix((pooled_obs.shape[0], 0), dtype=np.float32)
+    )
     if reference_var is not None:
         pooled = ad.AnnData(X=pooled_x, obs=pooled_obs, var=reference_var.copy())
     else:
@@ -238,7 +282,9 @@ def pool_h5ad_files(
         "sample_obs_key": str(sample_obs_key),
         "source_file_obs_key": str(source_file_obs_key),
         "layout": layout_meta,
-        "pooled_inputs_json": str(output_path.with_suffix(output_path.suffix + ".summary.json")),
+        "pooled_inputs_json": str(
+            output_path.with_suffix(output_path.suffix + ".summary.json")
+        ),
     }
 
 
@@ -261,7 +307,9 @@ def pool_h5ads_in_directory(
     input_root = Path(input_dir)
     paths = sorted(input_root.glob(sample_glob))
     if not paths:
-        raise FileNotFoundError(f"No input H5AD files matched '{sample_glob}' under {input_root}.")
+        raise FileNotFoundError(
+            f"No input H5AD files matched '{sample_glob}' under {input_root}."
+        )
     summary = pool_h5ad_files(
         paths,
         output_h5ad=output_h5ad,
@@ -276,7 +324,9 @@ def pool_h5ads_in_directory(
         layout_columns=layout_columns,
         layout_gap=layout_gap,
     )
-    summary_path = Path(output_h5ad).with_suffix(Path(output_h5ad).suffix + ".summary.json")
+    summary_path = Path(output_h5ad).with_suffix(
+        Path(output_h5ad).suffix + ".summary.json"
+    )
     summary_path.write_text(json.dumps(summary, indent=2))
     return summary
 
@@ -297,7 +347,9 @@ def distribute_pooled_feature_cache_to_inputs(
     if not pooled_path.exists():
         raise FileNotFoundError(f"Pooled H5AD not found: {pooled_path}")
     if not paths:
-        raise FileNotFoundError(f"No input H5AD files matched '{sample_glob}' under {input_root}.")
+        raise FileNotFoundError(
+            f"No input H5AD files matched '{sample_glob}' under {input_root}."
+        )
 
     pooled = ad.read_h5ad(pooled_path, backed="r")
     try:
@@ -307,7 +359,9 @@ def distribute_pooled_feature_cache_to_inputs(
         pooled.file.close()
 
     if source_file_obs_key not in pooled_obs.columns:
-        raise KeyError(f"Pooled H5AD is missing source-file obs key '{source_file_obs_key}'.")
+        raise KeyError(
+            f"Pooled H5AD is missing source-file obs key '{source_file_obs_key}'."
+        )
     if prepared_obsm_key not in pooled_uns:
         raise KeyError(
             f"Pooled H5AD does not contain prepared feature metadata for '{prepared_obsm_key}'. "
@@ -319,7 +373,9 @@ def distribute_pooled_feature_cache_to_inputs(
     pooled_cell_ids = (
         pooled_obs["cell_id"].astype(str).to_numpy()
         if "cell_id" in pooled_obs.columns
-        else np.asarray([str(index).split(":", 1)[-1] for index in pooled_obs.index], dtype=object)
+        else np.asarray(
+            [str(index).split(":", 1)[-1] for index in pooled_obs.index], dtype=object
+        )
     )
     row_indices_by_source = {
         str(source_name): np.flatnonzero(source_files == str(source_name))
@@ -333,7 +389,12 @@ def distribute_pooled_feature_cache_to_inputs(
         feature_dataset = handle["obsm"][prepared_obsm_key]
         feature_dim = int(feature_dataset.shape[1])
         for input_path in paths:
-            row_indices = np.asarray(row_indices_by_source.get(str(input_path.name), np.asarray([], dtype=np.int64)), dtype=np.int64)
+            row_indices = np.asarray(
+                row_indices_by_source.get(
+                    str(input_path.name), np.asarray([], dtype=np.int64)
+                ),
+                dtype=np.int64,
+            )
             if row_indices.size == 0:
                 raise KeyError(
                     f"No pooled rows were tagged with source file '{input_path.name}'. "
@@ -341,22 +402,30 @@ def distribute_pooled_feature_cache_to_inputs(
                 )
 
             sample_adata = ad.read_h5ad(input_path)
-            expected_metadata = dict(sample_adata.uns.get(PREPARED_FEATURES_UNS_KEY, {})).get(prepared_obsm_key, {})
+            expected_metadata = dict(
+                sample_adata.uns.get(PREPARED_FEATURES_UNS_KEY, {})
+            ).get(prepared_obsm_key, {})
             reusable = (
                 not bool(overwrite)
                 and prepared_obsm_key in sample_adata.obsm
                 and bool(expected_metadata)
                 and bool(expected_metadata.get("distributed_from_pooled", False))
-                and str(expected_metadata.get("pooled_source_h5ad", "")) == str(pooled_path.name)
-                and int(expected_metadata.get("svd_components_requested", -1)) == int(prepared_metadata.get("svd_components_requested", -1))
-                and float(expected_metadata.get("target_sum", float("nan"))) == float(prepared_metadata.get("target_sum", float("nan")))
-                and np.asarray(sample_adata.obsm[prepared_obsm_key]).shape == (int(sample_adata.n_obs), feature_dim)
+                and str(expected_metadata.get("pooled_source_h5ad", ""))
+                == str(pooled_path.name)
+                and int(expected_metadata.get("svd_components_requested", -1))
+                == int(prepared_metadata.get("svd_components_requested", -1))
+                and float(expected_metadata.get("target_sum", float("nan")))
+                == float(prepared_metadata.get("target_sum", float("nan")))
+                and np.asarray(sample_adata.obsm[prepared_obsm_key]).shape
+                == (int(sample_adata.n_obs), feature_dim)
             )
             if reusable:
                 distributed.append(
                     {
                         "input_h5ad": str(input_path),
-                        "sample_id": str(sample_adata.obs[sample_obs_key].iloc[0]) if sample_obs_key in sample_adata.obs and sample_adata.n_obs > 0 else input_path.stem,
+                        "sample_id": str(sample_adata.obs[sample_obs_key].iloc[0])
+                        if sample_obs_key in sample_adata.obs and sample_adata.n_obs > 0
+                        else input_path.stem,
                         "n_cells": int(sample_adata.n_obs),
                         "feature_dim": int(feature_dim),
                         "reused_existing": True,
@@ -381,16 +450,22 @@ def distribute_pooled_feature_cache_to_inputs(
                 lookup = pd.Index(pooled_source_cell_ids)
                 mapped = lookup.get_indexer(sample_cell_ids)
                 if np.any(mapped < 0):
-                    raise ValueError(f"Could not align pooled prepared features back to {input_path.name} by cell_id/obs_name.")
+                    raise ValueError(
+                        f"Could not align pooled prepared features back to {input_path.name} by cell_id/obs_name."
+                    )
                 ordered_rows = row_indices[mapped]
 
             order = np.argsort(ordered_rows)
             sorted_rows = ordered_rows[order]
-            sorted_features = np.asarray(feature_dataset[sorted_rows, :], dtype=np.float32)
+            sorted_features = np.asarray(
+                feature_dataset[sorted_rows, :], dtype=np.float32
+            )
             features = np.empty_like(sorted_features)
             features[order] = sorted_features
             sample_adata.obsm[prepared_obsm_key] = features
-            sample_prepared_uns = dict(sample_adata.uns.get(PREPARED_FEATURES_UNS_KEY, {}))
+            sample_prepared_uns = dict(
+                sample_adata.uns.get(PREPARED_FEATURES_UNS_KEY, {})
+            )
             sample_prepared_uns[prepared_obsm_key] = {
                 **prepared_metadata,
                 "output_feature_key": str(prepared_obsm_key),
@@ -403,7 +478,9 @@ def distribute_pooled_feature_cache_to_inputs(
             distributed.append(
                 {
                     "input_h5ad": str(input_path),
-                    "sample_id": str(sample_adata.obs[sample_obs_key].iloc[0]) if sample_obs_key in sample_adata.obs and sample_adata.n_obs > 0 else input_path.stem,
+                    "sample_id": str(sample_adata.obs[sample_obs_key].iloc[0])
+                    if sample_obs_key in sample_adata.obs and sample_adata.n_obs > 0
+                    else input_path.stem,
                     "n_cells": int(sample_adata.n_obs),
                     "feature_dim": int(feature_dim),
                     "reused_existing": False,

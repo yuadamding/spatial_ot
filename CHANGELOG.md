@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.6
+
+- Add an explicit split marker/codebook feature cost for mixed transport node features: signed whitened marker features use squared Euclidean cost while soft codebook posteriors use Hellinger cost, with separate component weights and fitted scales.
+- Add non-entropic balanced-FGW multi-start initialization controls (`outer_product`, `feature_ot`, `coordinate_ot`, `random`) and record objective-by-initialization, best initialization, objective spread, and unstable-pair metadata.
+- Thread mixed-feature weights and FGW initialization controls through config, CLI, scripts, summaries, and optimal-search command generation.
+- Keep generated Python bytecode and `.DS_Store` artifacts removed from the tracked tree.
+- Align package metadata with the local `0.2.6` state.
+
 ## 0.2.5
 
 - Fit global transport cost scales across sampled subregion pairs for fused-OT/FGW distance matrices instead of re-normalizing each pair independently.

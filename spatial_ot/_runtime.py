@@ -3,7 +3,9 @@ from __future__ import annotations
 import torch
 
 
-def runtime_memory_snapshot(device: torch.device) -> dict[str, float | int | bool | str]:
+def runtime_memory_snapshot(
+    device: torch.device,
+) -> dict[str, float | int | bool | str]:
     snapshot: dict[str, float | int | bool | str] = {
         "device": str(device),
         "cuda": bool(device.type == "cuda" and torch.cuda.is_available()),

@@ -14,7 +14,13 @@ DEFAULT_LOCAL_POSTERIOR_RADII: tuple[float, ...] = (0.25, 0.5, 1.0)
 SPOT_LATENT_MODE_ATOM_BARYCENTRIC_MDS = "atom_barycentric_mds"
 SPOT_LATENT_MODE_DIAGNOSTIC_FISHER = "diagnostic_fisher_current"
 DEFAULT_SPOT_LATENT_MODE = SPOT_LATENT_MODE_ATOM_BARYCENTRIC_MDS
-ANCHOR_DISTANCE_MODES = {"balanced_ot", "sinkhorn_ot", "expected_cross_cost", "feature_only_ot", "geometry_only_ot"}
+ANCHOR_DISTANCE_MODES = {
+    "balanced_ot",
+    "sinkhorn_ot",
+    "expected_cross_cost",
+    "feature_only_ot",
+    "geometry_only_ot",
+}
 
 ANCHOR_SOLVER_STATUS_DIAGONAL = 0
 ANCHOR_SOLVER_STATUS_EXPECTED_CROSS_COST = 1
@@ -45,7 +51,9 @@ def _normalize_spot_latent_mode(mode: str | None) -> str:
     }
     if requested not in aliases:
         valid = ", ".join(sorted(set(aliases.values())))
-        raise ValueError(f"Unknown spot latent mode '{mode}'. Expected one of: {valid}.")
+        raise ValueError(
+            f"Unknown spot latent mode '{mode}'. Expected one of: {valid}."
+        )
     return aliases[requested]
 
 
@@ -94,7 +102,9 @@ def empty_spot_level_latent_charts(
         "spot_latent_coords": np.zeros((0, 2), dtype=np.float32),
         "spot_latent_within_coords": np.zeros((0, 2), dtype=np.float32),
         "spot_latent_cluster_anchors": np.zeros((n_clusters, 2), dtype=np.float32),
-        "spot_latent_atom_embedding": np.zeros((n_clusters, int(atoms_per_cluster), 2), dtype=np.float32),
+        "spot_latent_atom_embedding": np.zeros(
+            (n_clusters, int(atoms_per_cluster), 2), dtype=np.float32
+        ),
         "spot_latent_aligned_coords": np.zeros((0, 2), dtype=np.float32),
         "spot_latent_cluster_probs": np.zeros(0, dtype=np.float32),
         "spot_latent_atom_confidence": np.zeros(0, dtype=np.float32),
@@ -105,27 +115,53 @@ def empty_spot_level_latent_charts(
         "spot_latent_temperature_cost_gap": np.zeros(0, dtype=np.float32),
         "spot_latent_temperature_fixed": np.zeros(0, dtype=np.float32),
         "spot_latent_weights": np.zeros(0, dtype=np.float32),
-        "spot_latent_atom_posteriors": np.zeros((0, int(atoms_per_cluster)), dtype=np.float32),
+        "spot_latent_atom_posteriors": np.zeros(
+            (0, int(atoms_per_cluster)), dtype=np.float32
+        ),
         "spot_latent_posterior_entropy_cost_gap": np.zeros(0, dtype=np.float32),
-        "spot_latent_normalized_posterior_entropy_cost_gap": np.zeros(0, dtype=np.float32),
+        "spot_latent_normalized_posterior_entropy_cost_gap": np.zeros(
+            0, dtype=np.float32
+        ),
         "spot_latent_posterior_entropy_fixed": np.zeros(0, dtype=np.float32),
         "spot_latent_normalized_posterior_entropy_fixed": np.zeros(0, dtype=np.float32),
-        "spot_latent_cluster_anchor_distance": np.zeros((n_clusters, n_clusters), dtype=np.float32),
-        "spot_latent_cluster_anchor_ot_fallback_matrix": np.zeros((n_clusters, n_clusters), dtype=bool),
-        "spot_latent_cluster_anchor_solver_status_matrix": np.zeros((n_clusters, n_clusters), dtype=np.int8),
-        "spot_latent_cluster_anchor_ot_fallback_fraction": np.array(0.0, dtype=np.float32),
+        "spot_latent_cluster_anchor_distance": np.zeros(
+            (n_clusters, n_clusters), dtype=np.float32
+        ),
+        "spot_latent_cluster_anchor_ot_fallback_matrix": np.zeros(
+            (n_clusters, n_clusters), dtype=bool
+        ),
+        "spot_latent_cluster_anchor_solver_status_matrix": np.zeros(
+            (n_clusters, n_clusters), dtype=np.int8
+        ),
+        "spot_latent_cluster_anchor_ot_fallback_fraction": np.array(
+            0.0, dtype=np.float32
+        ),
         "spot_latent_atom_mds_stress": np.full(n_clusters, np.nan, dtype=np.float32),
-        "spot_latent_atom_mds_positive_eigenvalue_mass_2d": np.full(n_clusters, np.nan, dtype=np.float32),
-        "spot_latent_atom_mds_negative_eigenvalue_mass_fraction": np.full(n_clusters, np.nan, dtype=np.float32),
-        "cell_spot_latent_unweighted_coords": np.full((int(n_cells), 2), np.nan, dtype=np.float32),
-        "cell_spot_latent_confidence_weighted_coords": np.full((int(n_cells), 2), np.nan, dtype=np.float32),
+        "spot_latent_atom_mds_positive_eigenvalue_mass_2d": np.full(
+            n_clusters, np.nan, dtype=np.float32
+        ),
+        "spot_latent_atom_mds_negative_eigenvalue_mass_fraction": np.full(
+            n_clusters, np.nan, dtype=np.float32
+        ),
+        "cell_spot_latent_unweighted_coords": np.full(
+            (int(n_cells), 2), np.nan, dtype=np.float32
+        ),
+        "cell_spot_latent_confidence_weighted_coords": np.full(
+            (int(n_cells), 2), np.nan, dtype=np.float32
+        ),
         "cell_spot_latent_coords": np.full((int(n_cells), 2), np.nan, dtype=np.float32),
         "cell_spot_latent_cluster_labels": np.full(int(n_cells), -1, dtype=np.int32),
         "cell_spot_latent_weights": np.zeros(int(n_cells), dtype=np.float32),
-        "cell_spot_latent_posterior_entropy": np.full(int(n_cells), np.nan, dtype=np.float32),
+        "cell_spot_latent_posterior_entropy": np.full(
+            int(n_cells), np.nan, dtype=np.float32
+        ),
         "spot_latent_mode": np.array(str(metadata["mode"])),
-        "spot_latent_chart_learning_mode": np.array(str(metadata["chart_learning_mode"])),
-        "spot_latent_projection_mode": np.array(str(metadata["latent_projection_mode"])),
+        "spot_latent_chart_learning_mode": np.array(
+            str(metadata["chart_learning_mode"])
+        ),
+        "spot_latent_projection_mode": np.array(
+            str(metadata["latent_projection_mode"])
+        ),
         "spot_latent_validation_role": np.array(str(metadata["validation_role"])),
         "spot_latent_global_within_scale": np.array(np.nan, dtype=np.float32),
         "spot_latent_assignment_temperature": np.array(np.nan, dtype=np.float32),
@@ -134,8 +170,12 @@ def empty_spot_level_latent_charts(
         "spot_latent_cluster_anchor_distance_requested_method": np.array("balanced_ot"),
         "spot_latent_cluster_anchor_distance_effective_method": np.array("balanced_ot"),
         "spot_latent_cluster_mds_stress": np.array(np.nan, dtype=np.float32),
-        "spot_latent_cluster_mds_positive_eigenvalue_mass_2d": np.array(np.nan, dtype=np.float32),
-        "spot_latent_cluster_mds_negative_eigenvalue_mass_fraction": np.array(np.nan, dtype=np.float32),
+        "spot_latent_cluster_mds_positive_eigenvalue_mass_2d": np.array(
+            np.nan, dtype=np.float32
+        ),
+        "spot_latent_cluster_mds_negative_eigenvalue_mass_fraction": np.array(
+            np.nan, dtype=np.float32
+        ),
     }
 
 
@@ -147,10 +187,15 @@ def weighted_atom_posteriors(
 ) -> np.ndarray:
     temp = max(float(temperature), 1e-5)
     weights = np.clip(np.asarray(prototype_weights, dtype=np.float32), 1e-8, None)
-    logits = -np.asarray(total_cost, dtype=np.float32) / temp + np.log(weights).astype(np.float32)[None, :]
+    logits = (
+        -np.asarray(total_cost, dtype=np.float32) / temp
+        + np.log(weights).astype(np.float32)[None, :]
+    )
     logits = logits - np.max(logits, axis=1, keepdims=True)
     exp_logits = np.exp(np.clip(logits, -80.0, 80.0)).astype(np.float32)
-    return (exp_logits / np.maximum(exp_logits.sum(axis=1, keepdims=True), 1e-8)).astype(np.float32)
+    return (
+        exp_logits / np.maximum(exp_logits.sum(axis=1, keepdims=True), 1e-8)
+    ).astype(np.float32)
 
 
 def _cost_gap_temperature(total_cost: np.ndarray, base_temperature: float) -> float:
@@ -190,7 +235,12 @@ def _resolve_posterior_temperature(
         return base
     if requested in {"auto_cost_gap", "cost_gap", "auto"}:
         return _cost_gap_temperature(cost, base)
-    if requested not in {"auto_entropy", "entropy", "entropy_target", "auto_cost_gap_entropy"}:
+    if requested not in {
+        "auto_entropy",
+        "entropy",
+        "entropy_target",
+        "auto_cost_gap_entropy",
+    }:
         return _cost_gap_temperature(cost, base)
 
     target = float(
@@ -290,10 +340,18 @@ def _empty_mds_diagnostics() -> dict[str, float]:
     }
 
 
-def _mds_stress(sqdist: np.ndarray, coords: np.ndarray, weights: np.ndarray | None = None) -> float:
+def _mds_stress(
+    sqdist: np.ndarray, coords: np.ndarray, weights: np.ndarray | None = None
+) -> float:
     d2 = np.asarray(sqdist, dtype=np.float64)
     z = np.asarray(coords, dtype=np.float64)
-    if d2.ndim != 2 or d2.shape[0] != d2.shape[1] or z.ndim != 2 or z.shape[0] != d2.shape[0] or d2.shape[0] < 2:
+    if (
+        d2.ndim != 2
+        or d2.shape[0] != d2.shape[1]
+        or z.ndim != 2
+        or z.shape[0] != d2.shape[0]
+        or d2.shape[0] < 2
+    ):
         return float("nan")
     d = np.sqrt(np.maximum(0.5 * (d2 + d2.T), 0.0))
     dz = np.sqrt(np.maximum(_pairwise_sqdist_np(z, z).astype(np.float64), 0.0))
@@ -318,7 +376,9 @@ def _classical_mds_from_sqdist_with_diagnostics(
 ) -> tuple[np.ndarray, dict[str, float]]:
     d2 = np.asarray(sqdist, dtype=np.float64)
     if d2.ndim != 2 or d2.shape[0] != d2.shape[1]:
-        return np.zeros((0, int(n_components)), dtype=np.float32), _empty_mds_diagnostics()
+        return np.zeros(
+            (0, int(n_components)), dtype=np.float32
+        ), _empty_mds_diagnostics()
     n = int(d2.shape[0])
     n_components = int(n_components)
     if n == 0:
@@ -347,7 +407,9 @@ def _classical_mds_from_sqdist_with_diagnostics(
     basis = eigvecs[:, order[:n_components]]
     coords = basis * np.sqrt(positive)[None, :]
     if coords.shape[1] < n_components:
-        coords = np.pad(coords, ((0, 0), (0, n_components - coords.shape[1])), constant_values=0.0)
+        coords = np.pad(
+            coords, ((0, 0), (0, n_components - coords.shape[1])), constant_values=0.0
+        )
     for dim in range(coords.shape[1]):
         anchor = int(np.argmax(np.abs(coords[:, dim])))
         if coords[anchor, dim] < 0:
@@ -422,9 +484,13 @@ def _cluster_atom_measure_sqdist(
         dtype=np.int8,
     )
     for left in range(n_clusters):
-        weights_left = _normalised_weights(prototype_weights[left], atom_coords.shape[1])
+        weights_left = _normalised_weights(
+            prototype_weights[left], atom_coords.shape[1]
+        )
         for right in range(left + 1, n_clusters):
-            weights_right = _normalised_weights(prototype_weights[right], atom_coords.shape[1])
+            weights_right = _normalised_weights(
+                prototype_weights[right], atom_coords.shape[1]
+            )
             cross_cost = _atom_metric_sqdist(
                 atom_coords[left],
                 atom_features[left],
@@ -438,12 +504,17 @@ def _cluster_atom_measure_sqdist(
                 include_features=include_features,
             )
             if use_expected:
-                value = float(weights_left @ cross_cost.astype(np.float64) @ weights_right)
+                value = float(
+                    weights_left @ cross_cost.astype(np.float64) @ weights_right
+                )
                 solver_status = ANCHOR_SOLVER_STATUS_EXPECTED_CROSS_COST
             else:
                 try:
                     if use_sinkhorn:
-                        eps = max(_env_float("SPATIAL_OT_SPOT_LATENT_ANCHOR_OT_EPS", 0.03), 1e-6)
+                        eps = max(
+                            _env_float("SPATIAL_OT_SPOT_LATENT_ANCHOR_OT_EPS", 0.03),
+                            1e-6,
+                        )
                         value = float(
                             ot.sinkhorn2(
                                 weights_left,
@@ -455,18 +526,30 @@ def _cluster_atom_measure_sqdist(
                             )
                         )
                     else:
-                        value = float(ot.emd2(weights_left, weights_right, cross_cost.astype(np.float64)))
+                        value = float(
+                            ot.emd2(
+                                weights_left,
+                                weights_right,
+                                cross_cost.astype(np.float64),
+                            )
+                        )
                     solver_status = ANCHOR_SOLVER_STATUS_OT_SUCCESS
                 except Exception:
-                    value = float(weights_left @ cross_cost.astype(np.float64) @ weights_right)
+                    value = float(
+                        weights_left @ cross_cost.astype(np.float64) @ weights_right
+                    )
                     solver_status = ANCHOR_SOLVER_STATUS_EXPECTED_CROSS_COST_FALLBACK
                     fallback_matrix[left, right] = fallback_matrix[right, left] = True
             distances[left, right] = distances[right, left] = max(value, 0.0)
-            solver_status_matrix[left, right] = solver_status_matrix[right, left] = solver_status
+            solver_status_matrix[left, right] = solver_status_matrix[right, left] = (
+                solver_status
+            )
     if not return_diagnostics:
         return distances
     pair_mask = np.triu(np.ones((n_clusters, n_clusters), dtype=bool), k=1)
-    fallback_fraction = float(np.mean(fallback_matrix[pair_mask])) if np.any(pair_mask) else 0.0
+    fallback_fraction = (
+        float(np.mean(fallback_matrix[pair_mask])) if np.any(pair_mask) else 0.0
+    )
     effective_method = requested
     if fallback_fraction > 0.0:
         effective_method = f"{requested}_with_expected_cross_cost_fallback"
@@ -516,11 +599,15 @@ def _atom_barycentric_mds_chart(
             atom_embeddings,
             1.0,
             {
-                "cluster_anchor_distance": np.zeros((n_clusters, n_clusters), dtype=np.float32),
+                "cluster_anchor_distance": np.zeros(
+                    (n_clusters, n_clusters), dtype=np.float32
+                ),
                 "cluster_anchor_distance_method": "balanced_ot",
                 "cluster_anchor_distance_requested_method": "balanced_ot",
                 "cluster_anchor_distance_effective_method": "balanced_ot",
-                "cluster_anchor_ot_fallback_matrix": np.zeros((n_clusters, n_clusters), dtype=bool),
+                "cluster_anchor_ot_fallback_matrix": np.zeros(
+                    (n_clusters, n_clusters), dtype=bool
+                ),
                 "cluster_anchor_solver_status_matrix": empty_status,
                 "cluster_anchor_ot_fallback_fraction": 0.0,
                 "cluster_anchor_solver_status_codebook": {
@@ -553,13 +640,23 @@ def _atom_barycentric_mds_chart(
         )
         atom_embeddings[cluster_id] = embedding.astype(np.float32)
         atom_mds_stress[cluster_id] = float(atom_diag["stress"])
-        atom_mds_positive_mass[cluster_id] = float(atom_diag["positive_eigenvalue_mass_2d"])
-        atom_mds_negative_mass[cluster_id] = float(atom_diag["negative_eigenvalue_mass_fraction"])
+        atom_mds_positive_mass[cluster_id] = float(
+            atom_diag["positive_eigenvalue_mass_2d"]
+        )
+        atom_mds_negative_mass[cluster_id] = float(
+            atom_diag["negative_eigenvalue_mass_fraction"]
+        )
         idx = np.flatnonzero(labels == cluster_id)
         if idx.size:
-            within[idx] = (posteriors[idx].astype(np.float32) @ embedding.astype(np.float32)).astype(np.float32)
+            within[idx] = (
+                posteriors[idx].astype(np.float32) @ embedding.astype(np.float32)
+            ).astype(np.float32)
 
-    anchor_distance_method = os.environ.get("SPATIAL_OT_SPOT_LATENT_ANCHOR_DISTANCE", "balanced_ot").strip().lower()
+    anchor_distance_method = (
+        os.environ.get("SPATIAL_OT_SPOT_LATENT_ANCHOR_DISTANCE", "balanced_ot")
+        .strip()
+        .lower()
+    )
     cluster_sqdist, anchor_diagnostics = _cluster_atom_measure_sqdist(
         atom_coords,
         atom_features,
@@ -573,7 +670,9 @@ def _atom_barycentric_mds_chart(
     )
     anchors, cluster_mds_diag = _classical_mds_from_sqdist_with_diagnostics(
         cluster_sqdist,
-        weights=np.maximum(np.asarray(prototype_weights, dtype=np.float32).sum(axis=1), 1e-8),
+        weights=np.maximum(
+            np.asarray(prototype_weights, dtype=np.float32).sum(axis=1), 1e-8
+        ),
         n_components=2,
     )
     latent = np.zeros_like(within, dtype=np.float32)
@@ -584,18 +683,41 @@ def _atom_barycentric_mds_chart(
     diagnostics = {
         "cluster_anchor_distance": cluster_sqdist.astype(np.float32),
         "cluster_anchor_distance_method": str(anchor_diagnostics["requested_method"]),
-        "cluster_anchor_distance_requested_method": str(anchor_diagnostics["requested_method"]),
-        "cluster_anchor_distance_effective_method": str(anchor_diagnostics["effective_method"]),
-        "cluster_anchor_ot_fallback_matrix": np.asarray(anchor_diagnostics["fallback_matrix"], dtype=bool),
-        "cluster_anchor_solver_status_matrix": np.asarray(anchor_diagnostics["solver_status_matrix"], dtype=np.int8),
-        "cluster_anchor_ot_fallback_fraction": float(anchor_diagnostics["fallback_fraction"]),
-        "cluster_anchor_solver_status_codebook": dict(anchor_diagnostics["solver_status_codebook"]),
+        "cluster_anchor_distance_requested_method": str(
+            anchor_diagnostics["requested_method"]
+        ),
+        "cluster_anchor_distance_effective_method": str(
+            anchor_diagnostics["effective_method"]
+        ),
+        "cluster_anchor_ot_fallback_matrix": np.asarray(
+            anchor_diagnostics["fallback_matrix"], dtype=bool
+        ),
+        "cluster_anchor_solver_status_matrix": np.asarray(
+            anchor_diagnostics["solver_status_matrix"], dtype=np.int8
+        ),
+        "cluster_anchor_ot_fallback_fraction": float(
+            anchor_diagnostics["fallback_fraction"]
+        ),
+        "cluster_anchor_solver_status_codebook": dict(
+            anchor_diagnostics["solver_status_codebook"]
+        ),
         "cluster_mds": cluster_mds_diag,
         "atom_mds_stress": atom_mds_stress.astype(np.float32),
-        "atom_mds_positive_eigenvalue_mass_2d": atom_mds_positive_mass.astype(np.float32),
-        "atom_mds_negative_eigenvalue_mass_fraction": atom_mds_negative_mass.astype(np.float32),
+        "atom_mds_positive_eigenvalue_mass_2d": atom_mds_positive_mass.astype(
+            np.float32
+        ),
+        "atom_mds_negative_eigenvalue_mass_fraction": atom_mds_negative_mass.astype(
+            np.float32
+        ),
     }
-    return latent.astype(np.float32), within.astype(np.float32), anchors.astype(np.float32), atom_embeddings, 1.0, diagnostics
+    return (
+        latent.astype(np.float32),
+        within.astype(np.float32),
+        anchors.astype(np.float32),
+        atom_embeddings,
+        1.0,
+        diagnostics,
+    )
 
 
 def _local_posterior_features(
@@ -612,7 +734,9 @@ def _local_posterior_features(
     for ridx, radius in enumerate(radii):
         neighbors = d2 <= float(radius) ** 2
         counts = np.maximum(neighbors.sum(axis=1, keepdims=True), 1)
-        local_mean = (neighbors.astype(np.float32) @ posterior) / counts.astype(np.float32)
+        local_mean = (neighbors.astype(np.float32) @ posterior) / counts.astype(
+            np.float32
+        )
         start = ridx * n_atoms
         features[:, start : start + n_atoms] = local_mean.astype(np.float32)
     return features
@@ -663,7 +787,9 @@ def _weighted_standardize(x: np.ndarray, weights: np.ndarray) -> np.ndarray:
     var = (w[:, None] * centered * centered).sum(axis=0) / w_sum
     std = np.sqrt(np.maximum(var, 1e-8))
     std[std < 1e-4] = 1.0
-    return ((x_arr - mean.astype(np.float32)[None, :]) / std.astype(np.float32)[None, :]).astype(np.float32)
+    return (
+        (x_arr - mean.astype(np.float32)[None, :]) / std.astype(np.float32)[None, :]
+    ).astype(np.float32)
 
 
 def _normalize_local_latent(
@@ -704,7 +830,9 @@ def _cluster_centroids(
     if w.ndim != 1 or w.shape[0] != x_arr.shape[0] or not np.any(w > 0):
         w = np.ones(x_arr.shape[0], dtype=np.float64)
     w = np.clip(w, 0.0, None)
-    global_center = np.average(x_arr.astype(np.float64), axis=0, weights=np.maximum(w, 1e-8))
+    global_center = np.average(
+        x_arr.astype(np.float64), axis=0, weights=np.maximum(w, 1e-8)
+    )
     centroids = np.tile(global_center[None, :], (int(n_clusters), 1)).astype(np.float32)
     masses = np.zeros(int(n_clusters), dtype=np.float64)
     for cluster_id in range(int(n_clusters)):
@@ -713,11 +841,15 @@ def _cluster_centroids(
             continue
         local_w = np.maximum(w[idx], 1e-8)
         masses[cluster_id] = float(local_w.sum())
-        centroids[cluster_id] = np.average(x_arr[idx].astype(np.float64), axis=0, weights=local_w).astype(np.float32)
+        centroids[cluster_id] = np.average(
+            x_arr[idx].astype(np.float64), axis=0, weights=local_w
+        ).astype(np.float32)
     return centroids, masses.astype(np.float32)
 
 
-def _weighted_pca_scores(x: np.ndarray, weights: np.ndarray, *, n_components: int = 2) -> np.ndarray:
+def _weighted_pca_scores(
+    x: np.ndarray, weights: np.ndarray, *, n_components: int = 2
+) -> np.ndarray:
     x_arr = np.asarray(x, dtype=np.float64)
     if x_arr.ndim != 2 or x_arr.shape[0] == 0:
         return np.zeros((x_arr.shape[0], int(n_components)), dtype=np.float32)
@@ -733,7 +865,9 @@ def _weighted_pca_scores(x: np.ndarray, weights: np.ndarray, *, n_components: in
     basis = eigvecs[:, order[: max(1, int(n_components))]]
     scores = centered @ basis
     if scores.shape[1] < int(n_components):
-        scores = np.column_stack([scores, np.zeros((scores.shape[0], int(n_components) - scores.shape[1]))])
+        scores = np.column_stack(
+            [scores, np.zeros((scores.shape[0], int(n_components) - scores.shape[1]))]
+        )
     for dim in range(int(n_components)):
         anchor = int(np.argmax(np.abs(scores[:, dim]))) if scores.shape[0] else 0
         if scores.shape[0] and scores[anchor, dim] < 0:
@@ -790,7 +924,11 @@ def _weighted_fisher_scores(
         keep = eigvals_w > max(float(np.max(eigvals_w)) * 1e-8, 1e-10)
         if not np.any(keep):
             return _weighted_pca_scores(x_arr, w, n_components=int(n_components))
-        whitening = eigvecs_w[:, keep] @ np.diag(1.0 / np.sqrt(eigvals_w[keep])) @ eigvecs_w[:, keep].T
+        whitening = (
+            eigvecs_w[:, keep]
+            @ np.diag(1.0 / np.sqrt(eigvals_w[keep]))
+            @ eigvecs_w[:, keep].T
+        )
         fisher = whitening @ sb @ whitening
         eigvals_f, eigvecs_f = np.linalg.eigh((fisher + fisher.T) * 0.5)
         order = np.argsort(eigvals_f)[::-1]
@@ -800,7 +938,9 @@ def _weighted_fisher_scores(
         return _weighted_pca_scores(x_arr, w, n_components=int(n_components))
 
     if scores.shape[1] < int(n_components):
-        scores = np.column_stack([scores, np.zeros((scores.shape[0], int(n_components) - scores.shape[1]))])
+        scores = np.column_stack(
+            [scores, np.zeros((scores.shape[0], int(n_components) - scores.shape[1]))]
+        )
     if not np.all(np.isfinite(scores)) or float(np.nanmax(np.abs(scores))) < 1e-8:
         return _weighted_pca_scores(x_arr, w, n_components=int(n_components))
     for dim_idx in range(int(n_components)):
@@ -860,7 +1000,12 @@ def spot_latent_separation_diagnostics(
 ) -> dict[str, object]:
     latent = np.asarray(latent_coords, dtype=np.float32)
     labels = np.asarray(cluster_labels, dtype=np.int32)
-    if latent.ndim != 2 or latent.shape[1] != 2 or labels.ndim != 1 or labels.shape[0] != latent.shape[0]:
+    if (
+        latent.ndim != 2
+        or latent.shape[1] != 2
+        or labels.ndim != 1
+        or labels.shape[0] != latent.shape[0]
+    ):
         return {
             "n_occurrences": int(latent.shape[0]) if latent.ndim >= 1 else 0,
             "n_clusters": 0,
@@ -882,8 +1027,7 @@ def spot_latent_separation_diagnostics(
     present_labels = np.unique(labels[valid])
     n_clusters = int(labels[valid].max()) + 1 if np.any(valid) else 0
     cluster_occurrence_counts = [
-        int(np.sum(labels[valid] == cluster_id))
-        for cluster_id in range(n_clusters)
+        int(np.sum(labels[valid] == cluster_id)) for cluster_id in range(n_clusters)
     ]
     centers = []
     within = []
@@ -895,14 +1039,26 @@ def spot_latent_separation_diagnostics(
         local_w = w[idx]
         center = np.average(latent[idx].astype(np.float64), axis=0, weights=local_w)
         centers.append(center.astype(np.float32))
-        radius = np.sqrt(np.sum((latent[idx].astype(np.float64) - center[None, :]) ** 2, axis=1))
+        radius = np.sqrt(
+            np.sum((latent[idx].astype(np.float64) - center[None, :]) ** 2, axis=1)
+        )
         within.append(float(np.average(radius, weights=local_w)))
-    center_arr = np.vstack(centers).astype(np.float32) if centers else np.zeros((0, 2), dtype=np.float32)
+    center_arr = (
+        np.vstack(centers).astype(np.float32)
+        if centers
+        else np.zeros((0, 2), dtype=np.float32)
+    )
     finite_centers = np.all(np.isfinite(center_arr), axis=1)
     if int(np.sum(finite_centers)) >= 2:
         distances = np.sqrt(
             np.maximum(
-                ((center_arr[finite_centers, None, :] - center_arr[finite_centers][None, :, :]) ** 2).sum(axis=2),
+                (
+                    (
+                        center_arr[finite_centers, None, :]
+                        - center_arr[finite_centers][None, :, :]
+                    )
+                    ** 2
+                ).sum(axis=2),
                 0.0,
             )
         )
@@ -916,8 +1072,12 @@ def spot_latent_separation_diagnostics(
         "n_present_clusters": int(present_labels.size),
         "cluster_occurrence_counts": cluster_occurrence_counts,
         "mean_within_cluster_radius": mean_within,
-        "median_between_cluster_center_distance": float(np.median(between)) if between.size else None,
-        "min_between_cluster_center_distance": float(np.min(between)) if between.size else None,
+        "median_between_cluster_center_distance": float(np.median(between))
+        if between.size
+        else None,
+        "min_between_cluster_center_distance": float(np.min(between))
+        if between.size
+        else None,
         "separation_ratio_median_between_over_mean_within": (
             float(np.median(between) / max(float(mean_within), 1e-8))
             if between.size and mean_within is not None
@@ -927,7 +1087,11 @@ def spot_latent_separation_diagnostics(
     }
     if subregion_ids is not None:
         subregion_arr = np.asarray(subregion_ids)
-        out["n_subregions"] = int(np.unique(subregion_arr).size) if subregion_arr.shape[0] == labels.shape[0] else None
+        out["n_subregions"] = (
+            int(np.unique(subregion_arr).size)
+            if subregion_arr.shape[0] == labels.shape[0]
+            else None
+        )
     return out
 
 
@@ -953,9 +1117,13 @@ def compute_spot_level_latent_charts(
 ) -> dict[str, np.ndarray]:
     compute_device = compute_device or torch.device("cpu")
     mode = _normalize_spot_latent_mode(
-        os.environ.get("SPATIAL_OT_SPOT_LATENT_MODE", spot_latent_mode or DEFAULT_SPOT_LATENT_MODE)
+        os.environ.get(
+            "SPATIAL_OT_SPOT_LATENT_MODE", spot_latent_mode or DEFAULT_SPOT_LATENT_MODE
+        )
     )
-    temperature_mode = os.environ.get("SPATIAL_OT_SPOT_LATENT_TEMPERATURE_MODE", "auto_entropy")
+    temperature_mode = os.environ.get(
+        "SPATIAL_OT_SPOT_LATENT_TEMPERATURE_MODE", "auto_entropy"
+    )
     metadata = spot_latent_mode_metadata(mode)
     needs_fisher_chart_features = mode == SPOT_LATENT_MODE_DIAGNOSTIC_FISHER
     features = np.asarray(features, dtype=np.float32)
@@ -998,7 +1166,9 @@ def compute_spot_level_latent_charts(
     normalized_posterior_entropy_fixed = np.zeros(n_occurrences, dtype=np.float32)
     cluster_anchor_distance = np.zeros((n_clusters, n_clusters), dtype=np.float32)
     cluster_anchor_ot_fallback_matrix = np.zeros((n_clusters, n_clusters), dtype=bool)
-    cluster_anchor_solver_status_matrix = np.zeros((n_clusters, n_clusters), dtype=np.int8)
+    cluster_anchor_solver_status_matrix = np.zeros(
+        (n_clusters, n_clusters), dtype=np.int8
+    )
     cluster_anchor_ot_fallback_fraction = 0.0
     atom_mds_stress = np.full(n_clusters, np.nan, dtype=np.float32)
     atom_mds_positive_mass = np.full(n_clusters, np.nan, dtype=np.float32)
@@ -1025,8 +1195,12 @@ def compute_spot_level_latent_charts(
         k = int(subregion_labels[r])
         canonical = measure.normalizer.transform(coords_um[members]).astype(np.float32)
         aligned = apply_similarity(canonical, assigned_transforms[r]).astype(np.float32)
-        cx = pairwise_sqdist_array(aligned, atom_coords[k], device=compute_device) / max(float(cost_scale_x), 1e-5)
-        cy = pairwise_sqdist_array(features[members], atom_features[k], device=compute_device) / max(float(cost_scale_y), 1e-5)
+        cx = pairwise_sqdist_array(
+            aligned, atom_coords[k], device=compute_device
+        ) / max(float(cost_scale_x), 1e-5)
+        cy = pairwise_sqdist_array(
+            features[members], atom_features[k], device=compute_device
+        ) / max(float(cost_scale_y), 1e-5)
         total_cost = float(lambda_x) * cx + float(lambda_y) * cy
         fixed_temperature = max(float(assignment_temperature), 1e-5)
         cost_gap_temperature = _cost_gap_temperature(total_cost, fixed_temperature)
@@ -1054,7 +1228,9 @@ def compute_spot_level_latent_charts(
             temperature=fixed_temperature,
         )
         entropy_fixed, norm_entropy_fixed = _posterior_entropy(fixed_posterior)
-        assigned_cluster_prob = np.full(n_members, float(subregion_cluster_probs[r, k]), dtype=np.float32)
+        assigned_cluster_prob = np.full(
+            n_members, float(subregion_cluster_probs[r, k]), dtype=np.float32
+        )
         confidence = posterior.max(axis=1).astype(np.float32)
         occurrence_weight = (assigned_cluster_prob * confidence).astype(np.float32)
 
@@ -1105,7 +1281,9 @@ def compute_spot_level_latent_charts(
         weights = weights[:offset]
         atom_posteriors = atom_posteriors[:offset]
         posterior_entropy_cost_gap = posterior_entropy_cost_gap[:offset]
-        normalized_posterior_entropy_cost_gap = normalized_posterior_entropy_cost_gap[:offset]
+        normalized_posterior_entropy_cost_gap = normalized_posterior_entropy_cost_gap[
+            :offset
+        ]
         posterior_entropy_fixed = posterior_entropy_fixed[:offset]
         normalized_posterior_entropy_fixed = normalized_posterior_entropy_fixed[:offset]
         chart_features = chart_features[:offset]
@@ -1139,24 +1317,24 @@ def compute_spot_level_latent_charts(
             atom_embedding,
             global_within_scale,
             mds_diagnostics,
-        ) = (
-            _atom_barycentric_mds_chart(
-                atom_coords=atom_coords,
-                atom_features=atom_features,
-                prototype_weights=prototype_weights,
-                atom_posteriors=atom_posteriors,
-                cluster_labels=cluster_labels,
-                lambda_x=lambda_x,
-                lambda_y=lambda_y,
-                cost_scale_x=cost_scale_x,
-                cost_scale_y=cost_scale_y,
-            )
+        ) = _atom_barycentric_mds_chart(
+            atom_coords=atom_coords,
+            atom_features=atom_features,
+            prototype_weights=prototype_weights,
+            atom_posteriors=atom_posteriors,
+            cluster_labels=cluster_labels,
+            lambda_x=lambda_x,
+            lambda_y=lambda_y,
+            cost_scale_x=cost_scale_x,
+            cost_scale_y=cost_scale_y,
         )
         cluster_anchor_distance = np.asarray(
             mds_diagnostics["cluster_anchor_distance"],
             dtype=np.float32,
         )
-        atom_mds_stress = np.asarray(mds_diagnostics["atom_mds_stress"], dtype=np.float32)
+        atom_mds_stress = np.asarray(
+            mds_diagnostics["atom_mds_stress"], dtype=np.float32
+        )
         atom_mds_positive_mass = np.asarray(
             mds_diagnostics["atom_mds_positive_eigenvalue_mass_2d"],
             dtype=np.float32,
@@ -1165,9 +1343,15 @@ def compute_spot_level_latent_charts(
             mds_diagnostics["atom_mds_negative_eigenvalue_mass_fraction"],
             dtype=np.float32,
         )
-        cluster_anchor_distance_method = str(mds_diagnostics["cluster_anchor_distance_method"])
-        cluster_anchor_distance_requested_method = str(mds_diagnostics["cluster_anchor_distance_requested_method"])
-        cluster_anchor_distance_effective_method = str(mds_diagnostics["cluster_anchor_distance_effective_method"])
+        cluster_anchor_distance_method = str(
+            mds_diagnostics["cluster_anchor_distance_method"]
+        )
+        cluster_anchor_distance_requested_method = str(
+            mds_diagnostics["cluster_anchor_distance_requested_method"]
+        )
+        cluster_anchor_distance_effective_method = str(
+            mds_diagnostics["cluster_anchor_distance_effective_method"]
+        )
         cluster_anchor_ot_fallback_matrix = np.asarray(
             mds_diagnostics["cluster_anchor_ot_fallback_matrix"],
             dtype=bool,
@@ -1176,11 +1360,15 @@ def compute_spot_level_latent_charts(
             mds_diagnostics["cluster_anchor_solver_status_matrix"],
             dtype=np.int8,
         )
-        cluster_anchor_ot_fallback_fraction = float(mds_diagnostics["cluster_anchor_ot_fallback_fraction"])
+        cluster_anchor_ot_fallback_fraction = float(
+            mds_diagnostics["cluster_anchor_ot_fallback_fraction"]
+        )
         cluster_mds = mds_diagnostics["cluster_mds"]
         cluster_mds_stress = float(cluster_mds["stress"])
         cluster_mds_positive_mass = float(cluster_mds["positive_eigenvalue_mass_2d"])
-        cluster_mds_negative_mass = float(cluster_mds["negative_eigenvalue_mass_fraction"])
+        cluster_mds_negative_mass = float(
+            cluster_mds["negative_eigenvalue_mass_fraction"]
+        )
 
     cell_latent_num = np.zeros((n_cells, n_clusters, 2), dtype=np.float32)
     cell_latent_den = np.zeros((n_cells, n_clusters), dtype=np.float32)
@@ -1197,8 +1385,16 @@ def compute_spot_level_latent_charts(
         np.add.at(cell_latent_num[:, cluster_id, 0], members, weighted_latent[:, 0])
         np.add.at(cell_latent_num[:, cluster_id, 1], members, weighted_latent[:, 1])
         np.add.at(cell_latent_den[:, cluster_id], members, occurrence_weight)
-        np.add.at(cell_latent_num_unweighted[:, cluster_id, 0], members, latent_coords[mask, 0])
-        np.add.at(cell_latent_num_unweighted[:, cluster_id, 1], members, latent_coords[mask, 1])
+        np.add.at(
+            cell_latent_num_unweighted[:, cluster_id, 0],
+            members,
+            latent_coords[mask, 0],
+        )
+        np.add.at(
+            cell_latent_num_unweighted[:, cluster_id, 1],
+            members,
+            latent_coords[mask, 1],
+        )
         np.add.at(cell_latent_den_unweighted[:, cluster_id], members, 1.0)
         np.add.at(
             cell_entropy_num,
@@ -1208,10 +1404,14 @@ def compute_spot_level_latent_charts(
 
     cell_spot_labels = cell_latent_den.argmax(axis=1).astype(np.int32)
     row_idx = np.arange(n_cells, dtype=np.int64)
-    cell_spot_weights = cell_latent_den[row_idx, cell_spot_labels.astype(np.int64)].astype(np.float32)
+    cell_spot_weights = cell_latent_den[
+        row_idx, cell_spot_labels.astype(np.int64)
+    ].astype(np.float32)
     cell_spot_coords = np.full((n_cells, 2), np.nan, dtype=np.float32)
     cell_spot_unweighted_coords = np.full((n_cells, 2), np.nan, dtype=np.float32)
-    cell_spot_confidence_weighted_coords = np.full((n_cells, 2), np.nan, dtype=np.float32)
+    cell_spot_confidence_weighted_coords = np.full(
+        (n_cells, 2), np.nan, dtype=np.float32
+    )
     cell_spot_entropy = np.full(n_cells, np.nan, dtype=np.float32)
     covered = cell_spot_weights > 0
     if np.any(covered):
@@ -1221,7 +1421,9 @@ def compute_spot_level_latent_charts(
             cell_latent_num[covered_idx, covered_labels]
             / np.maximum(cell_spot_weights[covered_idx, None], 1e-8)
         ).astype(np.float32)
-        cell_spot_confidence_weighted_coords[covered_idx] = cell_spot_coords[covered_idx]
+        cell_spot_confidence_weighted_coords[covered_idx] = cell_spot_coords[
+            covered_idx
+        ]
         unweighted_den = cell_latent_den_unweighted[covered_idx, covered_labels]
         cell_spot_unweighted_coords[covered_idx] = (
             cell_latent_num_unweighted[covered_idx, covered_labels]
@@ -1229,7 +1431,8 @@ def compute_spot_level_latent_charts(
         ).astype(np.float32)
         cell_spot_coords[covered_idx] = cell_spot_unweighted_coords[covered_idx]
         cell_spot_entropy[covered_idx] = (
-            cell_entropy_num[covered_idx, covered_labels] / np.maximum(cell_spot_weights[covered_idx], 1e-8)
+            cell_entropy_num[covered_idx, covered_labels]
+            / np.maximum(cell_spot_weights[covered_idx], 1e-8)
         ).astype(np.float32)
     cell_spot_labels[~covered] = -1
 
@@ -1245,47 +1448,87 @@ def compute_spot_level_latent_charts(
         "spot_latent_cluster_probs": cluster_probs.astype(np.float32),
         "spot_latent_atom_confidence": atom_confidence.astype(np.float32),
         "spot_latent_posterior_entropy": posterior_entropy.astype(np.float32),
-        "spot_latent_normalized_posterior_entropy": normalized_posterior_entropy.astype(np.float32),
+        "spot_latent_normalized_posterior_entropy": normalized_posterior_entropy.astype(
+            np.float32
+        ),
         "spot_latent_atom_argmax": atom_argmax.astype(np.int32),
         "spot_latent_temperature_used": temperature_used.astype(np.float32),
         "spot_latent_temperature_cost_gap": temperature_cost_gap.astype(np.float32),
         "spot_latent_temperature_fixed": temperature_fixed.astype(np.float32),
         "spot_latent_weights": weights.astype(np.float32),
         "spot_latent_atom_posteriors": atom_posteriors.astype(np.float32),
-        "spot_latent_posterior_entropy_cost_gap": posterior_entropy_cost_gap.astype(np.float32),
-        "spot_latent_normalized_posterior_entropy_cost_gap": normalized_posterior_entropy_cost_gap.astype(np.float32),
-        "spot_latent_posterior_entropy_fixed": posterior_entropy_fixed.astype(np.float32),
-        "spot_latent_normalized_posterior_entropy_fixed": normalized_posterior_entropy_fixed.astype(np.float32),
-        "spot_latent_cluster_anchor_distance": cluster_anchor_distance.astype(np.float32),
-        "spot_latent_cluster_anchor_ot_fallback_matrix": cluster_anchor_ot_fallback_matrix.astype(bool),
-        "spot_latent_cluster_anchor_solver_status_matrix": cluster_anchor_solver_status_matrix.astype(np.int8),
+        "spot_latent_posterior_entropy_cost_gap": posterior_entropy_cost_gap.astype(
+            np.float32
+        ),
+        "spot_latent_normalized_posterior_entropy_cost_gap": normalized_posterior_entropy_cost_gap.astype(
+            np.float32
+        ),
+        "spot_latent_posterior_entropy_fixed": posterior_entropy_fixed.astype(
+            np.float32
+        ),
+        "spot_latent_normalized_posterior_entropy_fixed": normalized_posterior_entropy_fixed.astype(
+            np.float32
+        ),
+        "spot_latent_cluster_anchor_distance": cluster_anchor_distance.astype(
+            np.float32
+        ),
+        "spot_latent_cluster_anchor_ot_fallback_matrix": cluster_anchor_ot_fallback_matrix.astype(
+            bool
+        ),
+        "spot_latent_cluster_anchor_solver_status_matrix": cluster_anchor_solver_status_matrix.astype(
+            np.int8
+        ),
         "spot_latent_cluster_anchor_ot_fallback_fraction": np.array(
             float(cluster_anchor_ot_fallback_fraction),
             dtype=np.float32,
         ),
         "spot_latent_atom_mds_stress": atom_mds_stress.astype(np.float32),
-        "spot_latent_atom_mds_positive_eigenvalue_mass_2d": atom_mds_positive_mass.astype(np.float32),
-        "spot_latent_atom_mds_negative_eigenvalue_mass_fraction": atom_mds_negative_mass.astype(np.float32),
-        "cell_spot_latent_unweighted_coords": cell_spot_unweighted_coords.astype(np.float32),
-        "cell_spot_latent_confidence_weighted_coords": cell_spot_confidence_weighted_coords.astype(np.float32),
+        "spot_latent_atom_mds_positive_eigenvalue_mass_2d": atom_mds_positive_mass.astype(
+            np.float32
+        ),
+        "spot_latent_atom_mds_negative_eigenvalue_mass_fraction": atom_mds_negative_mass.astype(
+            np.float32
+        ),
+        "cell_spot_latent_unweighted_coords": cell_spot_unweighted_coords.astype(
+            np.float32
+        ),
+        "cell_spot_latent_confidence_weighted_coords": cell_spot_confidence_weighted_coords.astype(
+            np.float32
+        ),
         "cell_spot_latent_coords": cell_spot_coords.astype(np.float32),
         "cell_spot_latent_cluster_labels": cell_spot_labels.astype(np.int32),
         "cell_spot_latent_weights": cell_spot_weights.astype(np.float32),
         "cell_spot_latent_posterior_entropy": cell_spot_entropy.astype(np.float32),
         "spot_latent_mode": np.array(str(metadata["mode"])),
-        "spot_latent_chart_learning_mode": np.array(str(metadata["chart_learning_mode"])),
-        "spot_latent_projection_mode": np.array(str(metadata["latent_projection_mode"])),
+        "spot_latent_chart_learning_mode": np.array(
+            str(metadata["chart_learning_mode"])
+        ),
+        "spot_latent_projection_mode": np.array(
+            str(metadata["latent_projection_mode"])
+        ),
         "spot_latent_validation_role": np.array(str(metadata["validation_role"])),
-        "spot_latent_global_within_scale": np.array(float(global_within_scale), dtype=np.float32),
+        "spot_latent_global_within_scale": np.array(
+            float(global_within_scale), dtype=np.float32
+        ),
         "spot_latent_assignment_temperature": np.array(
-            float(np.median(temperature_used)) if temperature_used.size else float(assignment_temperature),
+            float(np.median(temperature_used))
+            if temperature_used.size
+            else float(assignment_temperature),
             dtype=np.float32,
         ),
         "spot_latent_temperature_mode": np.array(str(temperature_mode)),
-        "spot_latent_cluster_anchor_distance_method": np.array(str(cluster_anchor_distance_method)),
-        "spot_latent_cluster_anchor_distance_requested_method": np.array(str(cluster_anchor_distance_requested_method)),
-        "spot_latent_cluster_anchor_distance_effective_method": np.array(str(cluster_anchor_distance_effective_method)),
-        "spot_latent_cluster_mds_stress": np.array(float(cluster_mds_stress), dtype=np.float32),
+        "spot_latent_cluster_anchor_distance_method": np.array(
+            str(cluster_anchor_distance_method)
+        ),
+        "spot_latent_cluster_anchor_distance_requested_method": np.array(
+            str(cluster_anchor_distance_requested_method)
+        ),
+        "spot_latent_cluster_anchor_distance_effective_method": np.array(
+            str(cluster_anchor_distance_effective_method)
+        ),
+        "spot_latent_cluster_mds_stress": np.array(
+            float(cluster_mds_stress), dtype=np.float32
+        ),
         "spot_latent_cluster_mds_positive_eigenvalue_mass_2d": np.array(
             float(cluster_mds_positive_mass),
             dtype=np.float32,

@@ -22,11 +22,21 @@ def _candidate_cost_source(result: MultilevelOTResult) -> str:
     return "pooled_subregion_latent_embedding_squared_euclidean"
 
 
-def assigned_transport_cost_decomposition(result: MultilevelOTResult) -> dict[str, float]:
-    geometry = np.asarray(result.subregion_assigned_geometry_transport_costs, dtype=np.float64)
-    feature = np.asarray(result.subregion_assigned_feature_transport_costs, dtype=np.float64)
-    transform = np.asarray(result.subregion_assigned_transform_penalties, dtype=np.float64)
-    overlap = np.asarray(result.subregion_assigned_overlap_consistency_penalties, dtype=np.float64)
+def assigned_transport_cost_decomposition(
+    result: MultilevelOTResult,
+) -> dict[str, float]:
+    geometry = np.asarray(
+        result.subregion_assigned_geometry_transport_costs, dtype=np.float64
+    )
+    feature = np.asarray(
+        result.subregion_assigned_feature_transport_costs, dtype=np.float64
+    )
+    transform = np.asarray(
+        result.subregion_assigned_transform_penalties, dtype=np.float64
+    )
+    overlap = np.asarray(
+        result.subregion_assigned_overlap_consistency_penalties, dtype=np.float64
+    )
     transport_plus_transform = geometry + feature + transform
     if result.subregion_clustering_uses_spatial:
         assigned_transport_objective = np.asarray(
@@ -39,7 +49,9 @@ def assigned_transport_cost_decomposition(result: MultilevelOTResult) -> dict[st
         assignment_cost_source = _candidate_cost_source(result)
     else:
         assigned_transport_objective = transport_plus_transform
-        assignment_cost_source = "fixed_label_ot_atom_diagnostics_not_primary_label_cost"
+        assignment_cost_source = (
+            "fixed_label_ot_atom_diagnostics_not_primary_label_cost"
+        )
     assigned_total_objective = np.asarray(
         result.subregion_cluster_costs[
             np.arange(result.subregion_cluster_labels.shape[0], dtype=np.int64),
@@ -54,53 +66,104 @@ def assigned_transport_cost_decomposition(result: MultilevelOTResult) -> dict[st
     transport_objective_denom = max(transport_objective_sum, 1e-12)
     total_objective_denom = max(total_objective_sum, 1e-12)
     return {
-        "mean_geometry_transport_cost": float(np.mean(geometry)) if geometry.size else 0.0,
+        "mean_geometry_transport_cost": float(np.mean(geometry))
+        if geometry.size
+        else 0.0,
         "mean_feature_transport_cost": float(np.mean(feature)) if feature.size else 0.0,
         "mean_transform_penalty": float(np.mean(transform)) if transform.size else 0.0,
-        "mean_overlap_consistency_penalty": float(np.mean(overlap)) if overlap.size else 0.0,
-        "mean_transport_plus_transform_cost": float(np.mean(transport_plus_transform)) if transport_plus_transform.size else 0.0,
-        "mean_regularized_objective": float(np.mean(assigned_transport_objective)) if assigned_transport_objective.size else 0.0,
-        "mean_transport_assignment_objective": float(np.mean(assigned_transport_objective)) if assigned_transport_objective.size else 0.0,
-        "mean_total_assignment_cost": float(np.mean(assigned_total_objective)) if assigned_total_objective.size else 0.0,
-        "mean_ot_regularization_gap": float(np.mean(assigned_transport_objective - transport_plus_transform)) if assigned_transport_objective.size else 0.0,
+        "mean_overlap_consistency_penalty": float(np.mean(overlap))
+        if overlap.size
+        else 0.0,
+        "mean_transport_plus_transform_cost": float(np.mean(transport_plus_transform))
+        if transport_plus_transform.size
+        else 0.0,
+        "mean_regularized_objective": float(np.mean(assigned_transport_objective))
+        if assigned_transport_objective.size
+        else 0.0,
+        "mean_transport_assignment_objective": float(
+            np.mean(assigned_transport_objective)
+        )
+        if assigned_transport_objective.size
+        else 0.0,
+        "mean_total_assignment_cost": float(np.mean(assigned_total_objective))
+        if assigned_total_objective.size
+        else 0.0,
+        "mean_ot_regularization_gap": float(
+            np.mean(assigned_transport_objective - transport_plus_transform)
+        )
+        if assigned_transport_objective.size
+        else 0.0,
         "assignment_cost_source": assignment_cost_source,
         "geometry_transport_fraction": float(np.sum(geometry) / transport_denom),
         "feature_transport_fraction": float(np.sum(feature) / transport_denom),
         "transform_penalty_fraction": float(np.sum(transform) / transport_denom),
-        "overlap_consistency_fraction_of_total": float(np.sum(overlap) / total_objective_denom),
+        "overlap_consistency_fraction_of_total": float(
+            np.sum(overlap) / total_objective_denom
+        ),
         "ot_regularization_gap_fraction_of_transport_objective": float(
-            np.sum(assigned_transport_objective - transport_plus_transform) / transport_objective_denom
+            np.sum(assigned_transport_objective - transport_plus_transform)
+            / transport_objective_denom
         ),
     }
 
 
 def cost_reliability_metrics(result: MultilevelOTResult) -> dict[str, object]:
-    effective_eps = np.asarray(result.subregion_candidate_effective_eps_matrix, dtype=np.float64)
-    used_fallback = np.asarray(result.subregion_candidate_used_ot_fallback_matrix, dtype=bool)
-    sorted_costs = np.sort(np.asarray(result.subregion_cluster_costs, dtype=np.float64), axis=1)
+    effective_eps = np.asarray(
+        result.subregion_candidate_effective_eps_matrix, dtype=np.float64
+    )
+    used_fallback = np.asarray(
+        result.subregion_candidate_used_ot_fallback_matrix, dtype=bool
+    )
+    sorted_costs = np.sort(
+        np.asarray(result.subregion_cluster_costs, dtype=np.float64), axis=1
+    )
     margins = (
         sorted_costs[:, 1] - sorted_costs[:, 0]
         if sorted_costs.shape[1] >= 2
         else np.full(sorted_costs.shape[0], np.nan, dtype=np.float64)
     )
     finite_margins = margins[np.isfinite(margins)]
-    mixed_eps = np.mean((np.max(effective_eps, axis=1) - np.min(effective_eps, axis=1)) > 1e-8) if effective_eps.size else 0.0
-    mixed_fallback = np.mean(np.any(used_fallback != used_fallback[:, :1], axis=1)) if used_fallback.size else 0.0
+    mixed_eps = (
+        np.mean((np.max(effective_eps, axis=1) - np.min(effective_eps, axis=1)) > 1e-8)
+        if effective_eps.size
+        else 0.0
+    )
+    mixed_fallback = (
+        np.mean(np.any(used_fallback != used_fallback[:, :1], axis=1))
+        if used_fallback.size
+        else 0.0
+    )
     return {
         "effective_eps_matrix_available": True,
         "candidate_cost_source": _candidate_cost_source(result),
         "candidate_cost_uses_spatial": bool(result.subregion_clustering_uses_spatial),
-        "fallback_fraction_all_costs": float(np.mean(used_fallback.astype(np.float32))) if used_fallback.size else 0.0,
-        "fallback_fraction_assigned": float(np.mean(result.subregion_assigned_used_ot_fallback.astype(np.float32))),
+        "fallback_fraction_all_costs": float(np.mean(used_fallback.astype(np.float32)))
+        if used_fallback.size
+        else 0.0,
+        "fallback_fraction_assigned": float(
+            np.mean(result.subregion_assigned_used_ot_fallback.astype(np.float32))
+        ),
         "mixed_candidate_effective_eps_fraction": float(mixed_eps),
         "mixed_candidate_fallback_fraction": float(mixed_fallback),
-        "effective_eps_min": float(np.min(effective_eps)) if effective_eps.size else None,
-        "effective_eps_max": float(np.max(effective_eps)) if effective_eps.size else None,
-        "assignment_margin_mean": float(np.mean(finite_margins)) if finite_margins.size else None,
-        "assignment_margin_median": float(np.median(finite_margins)) if finite_margins.size else None,
-        "assignment_margin_p10": float(np.quantile(finite_margins, 0.10)) if finite_margins.size else None,
+        "effective_eps_min": float(np.min(effective_eps))
+        if effective_eps.size
+        else None,
+        "effective_eps_max": float(np.max(effective_eps))
+        if effective_eps.size
+        else None,
+        "assignment_margin_mean": float(np.mean(finite_margins))
+        if finite_margins.size
+        else None,
+        "assignment_margin_median": float(np.median(finite_margins))
+        if finite_margins.size
+        else None,
+        "assignment_margin_p10": float(np.quantile(finite_margins, 0.10))
+        if finite_margins.size
+        else None,
         "fallback_fraction_by_cluster": {
-            f"C{int(cid)}": float(np.mean(used_fallback[:, int(cid)].astype(np.float32)))
+            f"C{int(cid)}": float(
+                np.mean(used_fallback[:, int(cid)].astype(np.float32))
+            )
             for cid in range(used_fallback.shape[1])
         }
         if used_fallback.ndim == 2
@@ -109,10 +172,14 @@ def cost_reliability_metrics(result: MultilevelOTResult) -> dict[str, object]:
 
 
 def transform_diagnostics(result: MultilevelOTResult) -> dict[str, float | None]:
-    rotation = np.asarray(result.subregion_assigned_transform_rotation_deg, dtype=np.float64)
+    rotation = np.asarray(
+        result.subregion_assigned_transform_rotation_deg, dtype=np.float64
+    )
     reflection = np.asarray(result.subregion_assigned_transform_reflection, dtype=bool)
     scale = np.asarray(result.subregion_assigned_transform_scale, dtype=np.float64)
-    translation_norm = np.asarray(result.subregion_assigned_transform_translation_norm, dtype=np.float64)
+    translation_norm = np.asarray(
+        result.subregion_assigned_transform_translation_norm, dtype=np.float64
+    )
     if rotation.size == 0:
         return {
             "mean_abs_rotation_deg": None,
@@ -138,7 +205,9 @@ def transform_diagnostics(result: MultilevelOTResult) -> dict[str, float | None]
     }
 
 
-def _qc_warning(code: str, severity: str, message: str, *, value: float | int | str | None = None) -> dict[str, object]:
+def _qc_warning(
+    code: str, severity: str, message: str, *, value: float | int | str | None = None
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "code": str(code),
         "severity": str(severity),
@@ -177,9 +246,14 @@ def _leakage_qc_warning(
         permutation = {}
     perm_p95 = _finite_metric(permutation.get("perm_p95"))
     excess = _finite_metric(permutation.get("excess"))
-    above_null = perm_p95 is not None and observed > perm_p95 + LEAKAGE_PERMUTATION_P95_MARGIN_WARNING
+    above_null = (
+        perm_p95 is not None
+        and observed > perm_p95 + LEAKAGE_PERMUTATION_P95_MARGIN_WARNING
+    )
     high_absolute = observed >= LEAKAGE_BALANCED_ACCURACY_WARNING
-    high_excess = excess is not None and excess >= LEAKAGE_PERMUTATION_MEAN_EXCESS_WARNING
+    high_excess = (
+        excess is not None and excess >= LEAKAGE_PERMUTATION_MEAN_EXCESS_WARNING
+    )
     if not (above_null or high_absolute or high_excess):
         return None
     return _qc_warning(
@@ -218,7 +292,9 @@ def build_qc_warnings(
             "Auxiliary cell-level projection scores are approximate; primary cell labels are inherited from fitted mutually exclusive subregions.",
         )
     ]
-    if subregion_construction and not bool(subregion_construction.get("radius_used_for_membership", True)):
+    if subregion_construction and not bool(
+        subregion_construction.get("radius_used_for_membership", True)
+    ):
         warnings_out.append(
             _qc_warning(
                 "subregion_radius_not_membership_radius",
@@ -226,7 +302,9 @@ def build_qc_warnings(
                 "Generated subregion membership is a data-driven mutually exclusive partition; radius_um is not a fixed neighborhood membership radius.",
             )
         )
-    if subregion_construction and bool(subregion_construction.get("feature_boundary_circularity_risk", False)):
+    if subregion_construction and bool(
+        subregion_construction.get("feature_boundary_circularity_risk", False)
+    ):
         warnings_out.append(
             _qc_warning(
                 "feature_aware_boundary_circularity_risk",
@@ -236,7 +314,11 @@ def build_qc_warnings(
         )
     if (
         subregion_construction
-        and bool(subregion_construction.get("requires_full_cell_coverage_for_generated_partitions", False))
+        and bool(
+            subregion_construction.get(
+                "requires_full_cell_coverage_for_generated_partitions", False
+            )
+        )
         and not bool(subregion_construction.get("coordinate_only_baseline", False))
     ):
         warnings_out.append(
@@ -285,7 +367,12 @@ def build_qc_warnings(
         )
     if realized_subregion_statistics:
         area_target = realized_subregion_statistics.get("maximum_area_qc_target_um2")
-        violation_count = int(realized_subregion_statistics.get("maximum_area_qc_target_violation_count", 0) or 0)
+        violation_count = int(
+            realized_subregion_statistics.get(
+                "maximum_area_qc_target_violation_count", 0
+            )
+            or 0
+        )
         if area_target is not None and violation_count > 0:
             warnings_out.append(
                 _qc_warning(
@@ -351,7 +438,11 @@ def build_qc_warnings(
                 value=float(coverage_fraction),
             )
         )
-    if mean_assignment_margin is not None and np.isfinite(mean_assignment_margin) and mean_assignment_margin < 0.05:
+    if (
+        mean_assignment_margin is not None
+        and np.isfinite(mean_assignment_margin)
+        and mean_assignment_margin < 0.05
+    ):
         warnings_out.append(
             _qc_warning(
                 "low_mean_assignment_margin",
@@ -360,13 +451,22 @@ def build_qc_warnings(
                 value=float(mean_assignment_margin),
             )
         )
-    if float(assigned_transport_cost_decomposition.get("geometry_transport_fraction", 0.0)) >= 0.75:
+    if (
+        float(
+            assigned_transport_cost_decomposition.get(
+                "geometry_transport_fraction", 0.0
+            )
+        )
+        >= 0.75
+    ):
         warnings_out.append(
             _qc_warning(
                 "geometry_dominates_assigned_cost",
                 "warning",
                 "Most of the assigned transport cost comes from geometry rather than feature matching.",
-                value=float(assigned_transport_cost_decomposition["geometry_transport_fraction"]),
+                value=float(
+                    assigned_transport_cost_decomposition["geometry_transport_fraction"]
+                ),
             )
         )
     shape_warning = _leakage_qc_warning(
@@ -392,8 +492,12 @@ def build_qc_warnings(
                 value=float(forced_label_fraction),
             )
         )
-    mixed_candidate_fallback_fraction = float(cost_reliability.get("mixed_candidate_fallback_fraction", 0.0) or 0.0)
-    mixed_candidate_effective_eps_fraction = float(cost_reliability.get("mixed_candidate_effective_eps_fraction", 0.0) or 0.0)
+    mixed_candidate_fallback_fraction = float(
+        cost_reliability.get("mixed_candidate_fallback_fraction", 0.0) or 0.0
+    )
+    mixed_candidate_effective_eps_fraction = float(
+        cost_reliability.get("mixed_candidate_effective_eps_fraction", 0.0) or 0.0
+    )
     if mixed_candidate_effective_eps_fraction > 0.0:
         warnings_out.append(
             _qc_warning(
@@ -432,7 +536,10 @@ def build_qc_warnings(
                 value=float(scale_deviation_p95),
             )
         )
-    if bool(deep_summary.get("enabled")) and deep_summary.get("output_embedding") == "joint":
+    if (
+        bool(deep_summary.get("enabled"))
+        and deep_summary.get("output_embedding") == "joint"
+    ):
         warnings_out.append(
             _qc_warning(
                 "joint_embedding_used_for_ot",
@@ -462,7 +569,9 @@ def probability_diagnostics(probs: np.ndarray, *, prefix: str) -> dict[str, floa
     }
 
 
-def cell_subregion_coverage(n_cells: int, subregion_members: list[np.ndarray]) -> dict[str, object]:
+def cell_subregion_coverage(
+    n_cells: int, subregion_members: list[np.ndarray]
+) -> dict[str, object]:
     if n_cells <= 0:
         return {
             "covered_cell_count": 0,

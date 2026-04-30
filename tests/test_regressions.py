@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 
-from spatial_ot.config import DeepFeatureConfig, MultilevelExperimentConfig, load_multilevel_config, validate_multilevel_config
+from spatial_ot.config import (
+    DeepFeatureConfig,
+    MultilevelExperimentConfig,
+    load_multilevel_config,
+    validate_multilevel_config,
+)
 
 
 def test_multilevel_config_rejects_unknown_sections() -> None:
@@ -59,4 +64,6 @@ def test_multilevel_config_requires_region_obs_key_for_region_geometry_json() ->
     except ValueError as exc:
         assert "region_obs_key" in str(exc)
     else:
-        raise AssertionError("Expected region_geometry_json without region_obs_key to be rejected")
+        raise AssertionError(
+            "Expected region_geometry_json without region_obs_key to be rejected"
+        )

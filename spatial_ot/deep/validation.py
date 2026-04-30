@@ -36,7 +36,11 @@ def split_validation(
 
 
 def context_radii(config: DeepFeatureConfig) -> tuple[float | None, float | None]:
-    short_radius = config.short_radius_um if config.short_radius_um is not None else config.radius_um
+    short_radius = (
+        config.short_radius_um
+        if config.short_radius_um is not None
+        else config.radius_um
+    )
     mid_radius = config.mid_radius_um
     if mid_radius is None and short_radius is not None:
         mid_radius = float(short_radius) * 2.0
@@ -73,7 +77,9 @@ def build_split_context_targets(
     device: torch.device,
 ) -> np.ndarray:
     if config.validation_context_mode == "transductive" or not np.any(val_mask):
-        return build_context_targets(coords_um, features_std, config=config, device=device)
+        return build_context_targets(
+            coords_um, features_std, config=config, device=device
+        )
 
     target_dim = int(features_std.shape[1]) * 4 + 2
     context = np.zeros((features_std.shape[0], target_dim), dtype=np.float32)

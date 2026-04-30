@@ -161,9 +161,9 @@ def test_candidate_command_preserves_pretrained_deep_model_and_regularization_fl
     assert command[command.index("--joint-refinement-max-move-fraction") + 1] == str(
         config.ot.joint_refinement_max_move_fraction
     )
-    assert command[command.index("--heterogeneity-transport-max-subregions") + 1] == str(
-        config.ot.heterogeneity_transport_max_subregions
-    )
+    assert command[
+        command.index("--heterogeneity-transport-max-subregions") + 1
+    ] == str(config.ot.heterogeneity_transport_max_subregions)
     assert command[command.index("--heterogeneity-transport-feature-mode") + 1] == str(
         config.ot.heterogeneity_transport_feature_mode
     )

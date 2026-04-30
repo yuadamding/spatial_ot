@@ -57,7 +57,9 @@ def test_cuda_target_bytes_respects_visible_gpu_capacity(monkeypatch) -> None:
     assert target_bytes == int(9 * (1024**3))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable in this environment")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable in this environment"
+)
 def test_pairwise_sqdist_array_cpu_gpu_parity() -> None:
     rng = np.random.default_rng(1234)
     x = rng.normal(size=(17, 4)).astype(np.float32)
@@ -74,7 +76,9 @@ def test_pairwise_sqdist_array_cpu_gpu_parity() -> None:
     assert np.allclose(cpu, gpu, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable in this environment")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable in this environment"
+)
 def test_cluster_cost_matrix_cpu_gpu_parity() -> None:
     rng = np.random.default_rng(5678)
     u_aligned = rng.normal(size=(11, 2)).astype(np.float32)
@@ -107,7 +111,9 @@ def test_cluster_cost_matrix_cpu_gpu_parity() -> None:
     assert np.allclose(cpu, gpu.detach().cpu().numpy(), atol=1e-6, rtol=1e-6)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable in this environment")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable in this environment"
+)
 def test_saved_encoder_transform_cpu_gpu_parity(tmp_path) -> None:
     rng = np.random.default_rng(2468)
     features = rng.normal(size=(24, 5)).astype(np.float32)
@@ -130,8 +136,12 @@ def test_saved_encoder_transform_cpu_gpu_parity(tmp_path) -> None:
     model_path = tmp_path / "cpu_gpu_parity_model.pt"
     encoder.save(model_path)
 
-    cpu_loaded = SpatialOTFeatureEncoder.load(model_path, map_location="cpu", device="cpu")
-    gpu_loaded = SpatialOTFeatureEncoder.load(model_path, map_location="cpu", device="cuda")
+    cpu_loaded = SpatialOTFeatureEncoder.load(
+        model_path, map_location="cpu", device="cpu"
+    )
+    gpu_loaded = SpatialOTFeatureEncoder.load(
+        model_path, map_location="cpu", device="cuda"
+    )
     cpu_embedding = cpu_loaded.transform(features=features, coords_um=coords)
     gpu_embedding = gpu_loaded.transform(features=features, coords_um=coords)
     assert np.allclose(cpu_embedding, gpu_embedding, atol=1e-5, rtol=1e-5)

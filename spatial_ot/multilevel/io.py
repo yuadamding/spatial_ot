@@ -125,13 +125,19 @@ def _method_stack_summary(
     subregion_clustering_uses_spatial: bool,
 ) -> dict[str, object]:
     if str(subregion_clustering_method) == HETEROGENEITY_DESCRIPTOR_MODE:
-        core_model = "internal_heterogeneity_descriptor_spatial_cell_state_motif_clustering"
+        core_model = (
+            "internal_heterogeneity_descriptor_spatial_cell_state_motif_clustering"
+        )
     elif str(subregion_clustering_method) == "heterogeneity_fused_ot_niche":
         core_model = "internal_heterogeneity_fused_ot_transport_distance_clustering"
     elif str(subregion_clustering_method) == "heterogeneity_fgw_niche":
-        core_model = "internal_heterogeneity_fused_gromov_wasserstein_distance_clustering"
+        core_model = (
+            "internal_heterogeneity_fused_gromov_wasserstein_distance_clustering"
+        )
     elif not bool(subregion_clustering_uses_spatial):
-        core_model = "pooled_raw_member_feature_distribution_subregion_latent_clustering"
+        core_model = (
+            "pooled_raw_member_feature_distribution_subregion_latent_clustering"
+        )
     else:
         core_model = "shape_normalized_multilevel_semi_relaxed_ot"
     return {
@@ -1652,6 +1658,8 @@ def run_multilevel_ot_on_h5ad(
     heterogeneity_transport_max_subregions: int = 800,
     heterogeneity_transport_feature_mode: str = "soft_codebook",
     heterogeneity_transport_feature_cost: str = "hellinger_codebook",
+    heterogeneity_transport_marker_feature_weight: float = 0.5,
+    heterogeneity_transport_codebook_feature_weight: float = 0.5,
     heterogeneity_fused_ot_feature_weight: float = 0.5,
     heterogeneity_fused_ot_coordinate_weight: float = 0.5,
     heterogeneity_fused_ot_solver: str = "emd",
@@ -1662,6 +1670,8 @@ def run_multilevel_ot_on_h5ad(
     heterogeneity_fgw_loss_fun: str = "square_loss",
     heterogeneity_fgw_max_iter: int = 500,
     heterogeneity_fgw_tol: float = 1e-7,
+    heterogeneity_fgw_n_init: int = 1,
+    heterogeneity_fgw_init: str | tuple[str, ...] | list[str] | None = "outer_product",
     heterogeneity_fgw_structure_scale: str | float = "global_median",
     heterogeneity_fgw_structure_clip: float | None = 3.0,
     heterogeneity_fgw_partial: bool = False,
@@ -2010,6 +2020,8 @@ def run_multilevel_ot_on_h5ad(
         heterogeneity_transport_max_subregions=heterogeneity_transport_max_subregions,
         heterogeneity_transport_feature_mode=heterogeneity_transport_feature_mode,
         heterogeneity_transport_feature_cost=heterogeneity_transport_feature_cost,
+        heterogeneity_transport_marker_feature_weight=heterogeneity_transport_marker_feature_weight,
+        heterogeneity_transport_codebook_feature_weight=heterogeneity_transport_codebook_feature_weight,
         heterogeneity_fused_ot_feature_weight=heterogeneity_fused_ot_feature_weight,
         heterogeneity_fused_ot_coordinate_weight=heterogeneity_fused_ot_coordinate_weight,
         heterogeneity_fused_ot_solver=heterogeneity_fused_ot_solver,
@@ -2020,6 +2032,8 @@ def run_multilevel_ot_on_h5ad(
         heterogeneity_fgw_loss_fun=heterogeneity_fgw_loss_fun,
         heterogeneity_fgw_max_iter=heterogeneity_fgw_max_iter,
         heterogeneity_fgw_tol=heterogeneity_fgw_tol,
+        heterogeneity_fgw_n_init=heterogeneity_fgw_n_init,
+        heterogeneity_fgw_init=heterogeneity_fgw_init,
         heterogeneity_fgw_structure_scale=heterogeneity_fgw_structure_scale,
         heterogeneity_fgw_structure_clip=heterogeneity_fgw_structure_clip,
         heterogeneity_fgw_partial=heterogeneity_fgw_partial,
@@ -2507,8 +2521,18 @@ def run_multilevel_ot_on_h5ad(
         "heterogeneity_transport_max_subregions": int(
             heterogeneity_transport_max_subregions
         ),
-        "heterogeneity_transport_feature_mode": str(heterogeneity_transport_feature_mode),
-        "heterogeneity_transport_feature_cost": str(heterogeneity_transport_feature_cost),
+        "heterogeneity_transport_feature_mode": str(
+            heterogeneity_transport_feature_mode
+        ),
+        "heterogeneity_transport_feature_cost": str(
+            heterogeneity_transport_feature_cost
+        ),
+        "heterogeneity_transport_marker_feature_weight": float(
+            heterogeneity_transport_marker_feature_weight
+        ),
+        "heterogeneity_transport_codebook_feature_weight": float(
+            heterogeneity_transport_codebook_feature_weight
+        ),
         "heterogeneity_fused_ot_feature_weight": float(
             heterogeneity_fused_ot_feature_weight
         ),
@@ -2523,6 +2547,8 @@ def run_multilevel_ot_on_h5ad(
         "heterogeneity_fgw_loss_fun": str(heterogeneity_fgw_loss_fun),
         "heterogeneity_fgw_max_iter": int(heterogeneity_fgw_max_iter),
         "heterogeneity_fgw_tol": float(heterogeneity_fgw_tol),
+        "heterogeneity_fgw_n_init": int(heterogeneity_fgw_n_init),
+        "heterogeneity_fgw_init": str(heterogeneity_fgw_init),
         "heterogeneity_fgw_structure_scale": str(heterogeneity_fgw_structure_scale),
         "heterogeneity_fgw_structure_clip": float(heterogeneity_fgw_structure_clip)
         if heterogeneity_fgw_structure_clip is not None
@@ -2801,6 +2827,12 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         heterogeneity_transport_max_subregions=config.ot.heterogeneity_transport_max_subregions,
         heterogeneity_transport_feature_mode=config.ot.heterogeneity_transport_feature_mode,
         heterogeneity_transport_feature_cost=config.ot.heterogeneity_transport_feature_cost,
+        heterogeneity_transport_marker_feature_weight=(
+            config.ot.heterogeneity_transport_marker_feature_weight
+        ),
+        heterogeneity_transport_codebook_feature_weight=(
+            config.ot.heterogeneity_transport_codebook_feature_weight
+        ),
         heterogeneity_fused_ot_feature_weight=config.ot.heterogeneity_fused_ot_feature_weight,
         heterogeneity_fused_ot_coordinate_weight=config.ot.heterogeneity_fused_ot_coordinate_weight,
         heterogeneity_fused_ot_solver=config.ot.heterogeneity_fused_ot_solver,
@@ -2811,6 +2843,8 @@ def run_multilevel_ot_with_config(config: MultilevelExperimentConfig) -> dict:
         heterogeneity_fgw_loss_fun=config.ot.heterogeneity_fgw_loss_fun,
         heterogeneity_fgw_max_iter=config.ot.heterogeneity_fgw_max_iter,
         heterogeneity_fgw_tol=config.ot.heterogeneity_fgw_tol,
+        heterogeneity_fgw_n_init=config.ot.heterogeneity_fgw_n_init,
+        heterogeneity_fgw_init=config.ot.heterogeneity_fgw_init,
         heterogeneity_fgw_structure_scale=config.ot.heterogeneity_fgw_structure_scale,
         heterogeneity_fgw_structure_clip=config.ot.heterogeneity_fgw_structure_clip,
         heterogeneity_fgw_partial=config.ot.heterogeneity_fgw_partial,

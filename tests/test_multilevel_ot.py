@@ -1561,8 +1561,9 @@ def test_default_subregion_clustering_pools_feature_latents_without_spatial_labe
     assert labels[0] != labels[1]
 
 
-def test_internal_heterogeneity_embedding_separates_arrangement_not_composition(
-) -> None:
+def test_internal_heterogeneity_embedding_separates_arrangement_not_composition() -> (
+    None
+):
     rng = np.random.default_rng(2028)
 
     def make_measure(subregion_id: int, arrangement: str) -> SubregionMeasure:
@@ -1662,8 +1663,7 @@ def test_internal_heterogeneity_embedding_separates_arrangement_not_composition(
     assert dist[1, 3] < dist[1, 0]
 
 
-def test_internal_heterogeneity_composition_only_loses_arrangement(
-) -> None:
+def test_internal_heterogeneity_composition_only_loses_arrangement() -> None:
     rng = np.random.default_rng(2029)
 
     def make_measure(subregion_id: int, arrangement: str) -> SubregionMeasure:
@@ -1758,8 +1758,7 @@ def test_internal_heterogeneity_composition_only_loses_arrangement(
     assert np.max(pairwise_dist) < 1e-6
 
 
-def test_internal_heterogeneity_pair_block_detects_contact_motif(
-) -> None:
+def test_internal_heterogeneity_pair_block_detects_contact_motif() -> None:
     def make_measure(subregion_id: int, motif: str) -> SubregionMeasure:
         ys = np.linspace(-0.35, 0.35, 8, dtype=np.float32)
         if motif == "intermixed":
@@ -1936,6 +1935,119 @@ def test_hellinger_feature_cost_rejects_signed_whitened_features() -> None:
         feature_cost(left, right, feature_cost_kind="hellinger_codebook")
 
 
+def test_split_mixed_feature_cost_uses_marker_and_codebook_components() -> None:
+    coords = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64)
+    base = _fgw_measure(
+        coords,
+        np.array(
+            [
+                [0.0, 0.0, 1.0, 0.0],
+                [2.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    shifted = _fgw_measure(
+        coords,
+        np.array(
+            [
+                [1.0, 0.0, 0.0, 1.0],
+                [2.0, 1.0, 1.0, 0.0],
+            ],
+            dtype=np.float64,
+        ),
+    )
+    left = SubregionFGWMeasure(
+        coords=base.coords,
+        features=base.features,
+        weights=base.weights,
+        structure=base.structure,
+        feature_mode="whitened_features_plus_soft_codebook",
+        n_whitened_features=2,
+        n_codebook_features=2,
+    )
+    right = SubregionFGWMeasure(
+        coords=shifted.coords,
+        features=shifted.features,
+        weights=shifted.weights,
+        structure=shifted.structure,
+        feature_mode="whitened_features_plus_soft_codebook",
+        n_whitened_features=2,
+        n_codebook_features=2,
+    )
+
+    marker_only = feature_cost(
+        left,
+        right,
+        feature_cost_kind="split_marker_codebook",
+        marker_feature_weight=1.0,
+        codebook_feature_weight=0.0,
+        marker_feature_scale=1.0,
+        codebook_feature_scale=1.0,
+    )
+    codebook_only = feature_cost(
+        left,
+        right,
+        feature_cost_kind="split_marker_codebook",
+        marker_feature_weight=0.0,
+        codebook_feature_weight=1.0,
+        marker_feature_scale=1.0,
+        codebook_feature_scale=1.0,
+    )
+
+    assert marker_only[0, 0] == pytest.approx(1.0)
+    assert marker_only[0, 1] == pytest.approx(5.0)
+    assert codebook_only[0, 0] > 0.0
+    assert codebook_only[0, 1] == pytest.approx(0.0)
+
+    scales, metadata = fit_transport_cost_scales(
+        [left, right],
+        feature_cost_kind="split_marker_codebook",
+    )
+    assert scales.marker_feature_scale is not None
+    assert scales.codebook_feature_scale is not None
+    assert metadata["marker_feature_scale"] == pytest.approx(
+        scales.marker_feature_scale
+    )
+    assert metadata["codebook_feature_scale"] == pytest.approx(
+        scales.codebook_feature_scale
+    )
+
+
+def test_balanced_fgw_records_multistart_audit_metadata() -> None:
+    coords_left = np.array([[0.0, 0.0], [1.0, 0.0], [0.2, 0.9]], dtype=np.float64)
+    coords_right = np.array([[0.0, 0.0], [0.8, 0.1], [0.1, 0.7]], dtype=np.float64)
+    features = np.eye(3, dtype=np.float64)
+    left = _fgw_measure(coords_left, features)
+    right = _fgw_measure(coords_right, features[[1, 0, 2]])
+
+    distance, coupling, meta = fgw_distance(
+        left,
+        right,
+        alpha=0.5,
+        feature_cost_kind="sqeuclidean",
+        max_iter=80,
+        tol=1e-8,
+        n_init=3,
+        init="outer_product,feature_ot,coordinate_ot",
+        return_coupling=True,
+    )
+
+    assert np.isfinite(distance)
+    assert coupling is not None
+    assert meta["distance_family"] == "balanced_fgw"
+    assert meta["fgw_n_init"] == 3
+    assert set(meta["fgw_objective_by_init"]) == {
+        "outer_product",
+        "feature_ot",
+        "coordinate_ot",
+    }
+    assert meta["fgw_best_init"] in meta["fgw_objective_by_init"]
+    assert meta["fgw_objective_spread"] is not None
+    assert meta["source_marginal_error"] < 1e-5
+    assert meta["target_marginal_error"] < 1e-5
+
+
 def test_fused_ot_distance_uses_cross_coordinate_cost() -> None:
     features = np.tile(np.array([[1.0, 0.0]], dtype=np.float64), (3, 1))
     left = _fgw_measure(
@@ -2030,7 +2142,9 @@ def test_build_subregion_fgw_measures_and_pairwise_transport_cap() -> None:
     assert distance_meta["transport_cost_scales"]["feature_scale"] > 0
     assert distance_meta["transport_cost_scales"]["coordinate_scale"] > 0
 
-    with pytest.raises(ValueError, match="exceeds heterogeneity_transport_max_subregions"):
+    with pytest.raises(
+        ValueError, match="exceeds heterogeneity_transport_max_subregions"
+    ):
         pairwise_transport_distance_matrix(
             transport_measures,
             mode=HETEROGENEITY_FGW_MODE,

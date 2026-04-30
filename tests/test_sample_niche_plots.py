@@ -13,12 +13,21 @@ from spatial_ot.multilevel import (
 )
 
 
-def test_plot_sample_niche_maps_from_run_dir_writes_one_plot_per_sample(tmp_path: Path) -> None:
+def test_plot_sample_niche_maps_from_run_dir_writes_one_plot_per_sample(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     adata = ad.AnnData(X=np.zeros((6, 0), dtype=np.float32))
-    adata.obs["sample_id"] = ["sample_a", "sample_a", "sample_a", "sample_b", "sample_b", "sample_b"]
+    adata.obs["sample_id"] = [
+        "sample_a",
+        "sample_a",
+        "sample_a",
+        "sample_b",
+        "sample_b",
+        "sample_b",
+    ]
     adata.obs["source_h5ad"] = [
         "sample_a_cells_marker_genes_umap3d.h5ad",
         "sample_a_cells_marker_genes_umap3d.h5ad",
@@ -33,7 +42,14 @@ def test_plot_sample_niche_maps_from_run_dir_writes_one_plot_per_sample(tmp_path
     adata.obs["original_cell_y"] = adata.obs["cell_y"].to_numpy(dtype=np.float32)
     adata.obs["mlot_cluster_int"] = np.asarray([0, 1, 0, 1, 1, 0], dtype=np.int32)
     adata.obs["mlot_cluster_id"] = ["C0", "C1", "C0", "C1", "C1", "C0"]
-    adata.obs["mlot_cluster_hex"] = ["#1f77b4", "#ff7f0e", "#1f77b4", "#ff7f0e", "#ff7f0e", "#1f77b4"]
+    adata.obs["mlot_cluster_hex"] = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#1f77b4",
+        "#ff7f0e",
+        "#ff7f0e",
+        "#1f77b4",
+    ]
     adata.obs["mlot_subregion_id"] = np.asarray([0, 0, 0, 1, 1, 1], dtype=np.int32)
     adata.uns["multilevel_ot"] = {
         "spatial_scale": 2.0,
@@ -52,7 +68,10 @@ def test_plot_sample_niche_maps_from_run_dir_writes_one_plot_per_sample(tmp_path
 
     assert manifest["n_samples"] == 2
     assert manifest["rendering"] == "subregion_polygons_and_cell_scatter"
-    assert manifest["views"] == ["subregion_wise_filled_polygons", "cell_wise_inherited_label_scatter"]
+    assert manifest["views"] == [
+        "subregion_wise_filled_polygons",
+        "cell_wise_inherited_label_scatter",
+    ]
     assert manifest["subregion_membership_source"] == "obs[mlot_subregion_id]"
     assert manifest["plot_spatial_x_key"] == "original_cell_x"
     assert manifest["plot_spatial_y_key"] == "original_cell_y"
@@ -70,12 +89,21 @@ def test_plot_sample_niche_maps_from_run_dir_writes_one_plot_per_sample(tmp_path
         assert int(item["n_filled_subregions"]) == 1
 
 
-def test_plot_sample_niche_maps_recovers_subregions_from_spot_latent_npz(tmp_path: Path) -> None:
+def test_plot_sample_niche_maps_recovers_subregions_from_spot_latent_npz(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     adata = ad.AnnData(X=np.zeros((6, 0), dtype=np.float32))
-    adata.obs["sample_id"] = ["sample_a", "sample_a", "sample_a", "sample_b", "sample_b", "sample_b"]
+    adata.obs["sample_id"] = [
+        "sample_a",
+        "sample_a",
+        "sample_a",
+        "sample_b",
+        "sample_b",
+        "sample_b",
+    ]
     adata.obs["source_h5ad"] = [
         "sample_a_cells_marker_genes_umap3d.h5ad",
         "sample_a_cells_marker_genes_umap3d.h5ad",
@@ -90,7 +118,14 @@ def test_plot_sample_niche_maps_recovers_subregions_from_spot_latent_npz(tmp_pat
     adata.obs["original_cell_y"] = adata.obs["cell_y"].to_numpy(dtype=np.float32)
     adata.obs["mlot_cluster_int"] = np.asarray([0, 0, 0, 1, 1, 1], dtype=np.int32)
     adata.obs["mlot_cluster_id"] = ["C0", "C0", "C0", "C1", "C1", "C1"]
-    adata.obs["mlot_cluster_hex"] = ["#1f77b4", "#1f77b4", "#1f77b4", "#ff7f0e", "#ff7f0e", "#ff7f0e"]
+    adata.obs["mlot_cluster_hex"] = [
+        "#1f77b4",
+        "#1f77b4",
+        "#1f77b4",
+        "#ff7f0e",
+        "#ff7f0e",
+        "#ff7f0e",
+    ]
     adata.uns["multilevel_ot"] = {
         "spatial_scale": 1.0,
         "spatial_x_key": "cell_x",
@@ -116,8 +151,13 @@ def test_plot_sample_niche_maps_recovers_subregions_from_spot_latent_npz(tmp_pat
     )
 
     assert manifest["rendering"] == "subregion_polygons_and_cell_scatter"
-    assert manifest["subregion_membership_source"] == "spot_level_latent_npz[cell_indices,subregion_ids]"
-    assert str(manifest["subregion_membership_npz"]).endswith("spot_level_latent_multilevel_ot.npz")
+    assert (
+        manifest["subregion_membership_source"]
+        == "spot_level_latent_npz[cell_indices,subregion_ids]"
+    )
+    assert str(manifest["subregion_membership_npz"]).endswith(
+        "spot_level_latent_multilevel_ot.npz"
+    )
     plots = manifest["plots"]
     assert isinstance(plots, list)
     assert len(plots) == 2
@@ -129,7 +169,9 @@ def test_plot_sample_niche_maps_recovers_subregions_from_spot_latent_npz(tmp_pat
         assert output_png.stat().st_size > 0
 
 
-def test_plot_sample_niche_maps_rejects_overlapping_npz_subregions(tmp_path: Path) -> None:
+def test_plot_sample_niche_maps_rejects_overlapping_npz_subregions(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -163,12 +205,21 @@ def test_plot_sample_niche_maps_rejects_overlapping_npz_subregions(tmp_path: Pat
         )
 
 
-def test_plot_sample_spatial_maps_from_run_dir_writes_one_plot_per_sample(tmp_path: Path) -> None:
+def test_plot_sample_spatial_maps_from_run_dir_writes_one_plot_per_sample(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     adata = ad.AnnData(X=np.zeros((6, 0), dtype=np.float32))
-    adata.obs["sample_id"] = ["sample_a", "sample_a", "sample_a", "sample_b", "sample_b", "sample_b"]
+    adata.obs["sample_id"] = [
+        "sample_a",
+        "sample_a",
+        "sample_a",
+        "sample_b",
+        "sample_b",
+        "sample_b",
+    ]
     adata.obs["source_h5ad"] = [
         "sample_a_cells_marker_genes_umap3d.h5ad",
         "sample_a_cells_marker_genes_umap3d.h5ad",
@@ -183,7 +234,14 @@ def test_plot_sample_spatial_maps_from_run_dir_writes_one_plot_per_sample(tmp_pa
     adata.obs["original_cell_y"] = adata.obs["cell_y"].to_numpy(dtype=np.float32)
     adata.obs["mlot_cluster_int"] = np.asarray([0, 1, 0, 1, 1, 0], dtype=np.int32)
     adata.obs["mlot_cluster_id"] = ["C0", "C1", "C0", "C1", "C1", "C0"]
-    adata.obs["mlot_cluster_hex"] = ["#1f77b4", "#ff7f0e", "#1f77b4", "#ff7f0e", "#ff7f0e", "#1f77b4"]
+    adata.obs["mlot_cluster_hex"] = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#1f77b4",
+        "#ff7f0e",
+        "#ff7f0e",
+        "#1f77b4",
+    ]
     adata.uns["multilevel_ot"] = {
         "spatial_scale": 2.0,
         "spatial_x_key": "pooled_cell_x",
@@ -213,12 +271,21 @@ def test_plot_sample_spatial_maps_from_run_dir_writes_one_plot_per_sample(tmp_pa
         assert output_png.stat().st_size > 0
 
 
-def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tmp_path: Path) -> None:
+def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
     adata = ad.AnnData(X=np.zeros((6, 0), dtype=np.float32))
-    adata.obs["sample_id"] = ["sample_a", "sample_a", "sample_a", "sample_b", "sample_b", "sample_b"]
+    adata.obs["sample_id"] = [
+        "sample_a",
+        "sample_a",
+        "sample_a",
+        "sample_b",
+        "sample_b",
+        "sample_b",
+    ]
     adata.obs["source_h5ad"] = [
         "sample_a_cells_marker_genes_umap3d.h5ad",
         "sample_a_cells_marker_genes_umap3d.h5ad",
@@ -231,7 +298,9 @@ def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tm
     adata.obs["cell_y"] = np.asarray([0.0, 0.5, 1.0, 2.0, 2.5, 3.0], dtype=np.float32)
     adata.obs["original_cell_x"] = adata.obs["cell_x"].to_numpy(dtype=np.float32)
     adata.obs["original_cell_y"] = adata.obs["cell_y"].to_numpy(dtype=np.float32)
-    adata.obs["mlot_spot_latent_cluster_int"] = np.asarray([0, 0, 1, 1, 1, 0], dtype=np.int32)
+    adata.obs["mlot_spot_latent_cluster_int"] = np.asarray(
+        [0, 0, 1, 1, 1, 0], dtype=np.int32
+    )
     adata.obsm["mlot_spot_latent_coords"] = np.asarray(
         [
             [0.0, 0.0],
@@ -284,8 +353,12 @@ def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tm
         weights=np.ones(8, dtype=np.float32),
         cluster_anchor_distance=np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
         spot_latent_mode=np.array("atom_barycentric_mds"),
-        latent_projection_mode=np.array("balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"),
-        chart_learning_mode=np.array("model_grounded_atom_distance_mds_without_fisher_labels"),
+        latent_projection_mode=np.array(
+            "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+        ),
+        chart_learning_mode=np.array(
+            "model_grounded_atom_distance_mds_without_fisher_labels"
+        ),
         validation_role=np.array("diagnostic_visualization_not_independent_evidence"),
         cluster_anchor_distance_method=np.array("balanced_ot"),
         cluster_anchor_mds_stress=np.array(0.08, dtype=np.float32),
@@ -307,23 +380,38 @@ def test_plot_sample_spot_latent_maps_from_run_dir_writes_one_plot_per_sample(tm
         manifest["coordinate_scope"]
         == "cluster_atom_measure_mds_anchors_plus_atom_posterior_barycentric_within_cluster_residual"
     )
-    assert manifest["chart_learning_mode"] == "model_grounded_atom_distance_mds_without_fisher_labels"
-    assert manifest["validation_role"] == "diagnostic_visualization_not_independent_evidence"
+    assert (
+        manifest["chart_learning_mode"]
+        == "model_grounded_atom_distance_mds_without_fisher_labels"
+    )
+    assert (
+        manifest["validation_role"]
+        == "diagnostic_visualization_not_independent_evidence"
+    )
     assert manifest["spot_latent_mode"] == "atom_barycentric_mds"
-    assert manifest["latent_projection_mode"] == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    assert (
+        manifest["latent_projection_mode"]
+        == "balanced_ot_atom_barycentric_mds_over_cluster_atom_posteriors"
+    )
     assert manifest["cluster_anchor_distance_method"] == "balanced_ot"
     assert np.isclose(manifest["cluster_anchor_mds_stress"], 0.08)
     assert manifest["color_scale_mode"] == "global"
     assert manifest["includes_aligned_coordinates_in_chart_features"] is False
     assert manifest["uses_forced_cluster_local_radius"] is False
     assert manifest["global_latent_key_dimension"] == 3
-    assert manifest["global_latent_key_mode"] == "cluster_anchor_distance_mds3d_plus_within_xy"
+    assert (
+        manifest["global_latent_key_mode"]
+        == "cluster_anchor_distance_mds3d_plus_within_xy"
+    )
     assert "global_latent_key_limits" in manifest
     assert "diagnostic visualization" in manifest["color_encoding"]
     assert "3D global latent display" in manifest["color_encoding"]
     assert manifest["latent_source"] == "occurrence_npz"
     assert manifest["subregion_id_source"] == "occurrence_npz[subregion_ids]"
-    assert manifest["subregion_boundary_overlay"] == "concave_hull_of_sample_occurrence_subregion_members"
+    assert (
+        manifest["subregion_boundary_overlay"]
+        == "concave_hull_of_sample_occurrence_subregion_members"
+    )
     assert manifest["latent_obsm_key"] == "mlot_spot_latent_coords"
     assert set(manifest["within_niche_latent_color_limits"]) == {"0", "1"}
     assert "display_latent_limits" in manifest

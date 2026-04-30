@@ -87,6 +87,8 @@ class MultilevelOTConfig:
     heterogeneity_transport_max_subregions: int = 800
     heterogeneity_transport_feature_mode: str = "soft_codebook"
     heterogeneity_transport_feature_cost: str = "hellinger_codebook"
+    heterogeneity_transport_marker_feature_weight: float = 0.5
+    heterogeneity_transport_codebook_feature_weight: float = 0.5
     heterogeneity_fused_ot_feature_weight: float = 0.5
     heterogeneity_fused_ot_coordinate_weight: float = 0.5
     heterogeneity_fused_ot_solver: str = "emd"
@@ -97,6 +99,8 @@ class MultilevelOTConfig:
     heterogeneity_fgw_loss_fun: str = "square_loss"
     heterogeneity_fgw_max_iter: int = 500
     heterogeneity_fgw_tol: float = 1e-7
+    heterogeneity_fgw_n_init: int = 1
+    heterogeneity_fgw_init: str = "outer_product"
     heterogeneity_fgw_structure_scale: str = "global_median"
     heterogeneity_fgw_structure_clip: float | None = 3.0
     heterogeneity_fgw_partial: bool = False
@@ -363,10 +367,7 @@ def _validate_multilevel_experiment(
     if sum(float(weight) for weight in heterogeneity_weights) <= 1e-12:
         raise ValueError("at least one ot.heterogeneity_*_weight must be positive")
     config.ot.heterogeneity_pair_graph_mode = (
-        str(config.ot.heterogeneity_pair_graph_mode)
-        .strip()
-        .lower()
-        .replace("-", "_")
+        str(config.ot.heterogeneity_pair_graph_mode).strip().lower().replace("-", "_")
     )
     if config.ot.heterogeneity_pair_graph_mode not in {"all_pairs", "knn", "radius"}:
         raise ValueError(
@@ -408,10 +409,13 @@ def _validate_multilevel_experiment(
         "hellinger",
         "sqeuclidean",
         "squared_euclidean",
+        "split_marker_codebook",
+        "mixed_marker_codebook",
+        "marker_sqeuclidean_codebook_hellinger",
     }:
         raise ValueError(
             "ot.heterogeneity_transport_feature_cost must be hellinger_codebook "
-            "or sqeuclidean"
+            "sqeuclidean, or split_marker_codebook"
         )
     if (
         config.ot.heterogeneity_transport_feature_cost
@@ -421,6 +425,36 @@ def _validate_multilevel_experiment(
         raise ValueError(
             "ot.heterogeneity_transport_feature_cost=hellinger requires "
             "ot.heterogeneity_transport_feature_mode='soft_codebook'"
+        )
+    if (
+        config.ot.heterogeneity_transport_feature_cost
+        in {
+            "split_marker_codebook",
+            "mixed_marker_codebook",
+            "marker_sqeuclidean_codebook_hellinger",
+        }
+        and config.ot.heterogeneity_transport_feature_mode
+        != "whitened_features_plus_soft_codebook"
+    ):
+        raise ValueError(
+            "ot.heterogeneity_transport_feature_cost=split_marker_codebook "
+            "requires ot.heterogeneity_transport_feature_mode="
+            "'whitened_features_plus_soft_codebook'"
+        )
+    if (
+        config.ot.heterogeneity_transport_marker_feature_weight < 0
+        or config.ot.heterogeneity_transport_codebook_feature_weight < 0
+    ):
+        raise ValueError(
+            "ot.heterogeneity_transport_marker/codebook_feature_weight values must be >= 0"
+        )
+    if (
+        config.ot.heterogeneity_transport_marker_feature_weight
+        + config.ot.heterogeneity_transport_codebook_feature_weight
+        <= 1e-12
+    ):
+        raise ValueError(
+            "at least one mixed transport feature component weight must be positive"
         )
     if (
         config.ot.heterogeneity_fused_ot_feature_weight < 0
@@ -466,6 +500,28 @@ def _validate_multilevel_experiment(
         raise ValueError("ot.heterogeneity_fgw_max_iter must be >= 1")
     if config.ot.heterogeneity_fgw_tol <= 0:
         raise ValueError("ot.heterogeneity_fgw_tol must be > 0")
+    if config.ot.heterogeneity_fgw_n_init < 1:
+        raise ValueError("ot.heterogeneity_fgw_n_init must be >= 1")
+    init_names = [
+        part.strip().lower()
+        for part in str(config.ot.heterogeneity_fgw_init).split(",")
+        if part.strip()
+    ]
+    valid_inits = {
+        "outer_product",
+        "outer",
+        "product",
+        "feature_ot",
+        "feature",
+        "coordinate_ot",
+        "coord_ot",
+        "random",
+    }
+    if not init_names or any(name not in valid_inits for name in init_names):
+        raise ValueError(
+            "ot.heterogeneity_fgw_init must contain outer_product, feature_ot, "
+            "coordinate_ot, or random"
+        )
     if (
         config.ot.heterogeneity_fgw_structure_clip is not None
         and config.ot.heterogeneity_fgw_structure_clip <= 0

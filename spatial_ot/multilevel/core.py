@@ -2285,7 +2285,9 @@ def _cluster_precomputed_transport_distances(
         "inertia": assigned_medoid_distance_sum,
         "assigned_medoid_distance_sum": assigned_medoid_distance_sum,
         "n_labels_not_nearest_medoid_initial": int(np.sum(initial_non_nearest)),
-        "fraction_labels_not_nearest_medoid_initial": float(np.mean(initial_non_nearest)),
+        "fraction_labels_not_nearest_medoid_initial": float(
+            np.mean(initial_non_nearest)
+        ),
         "n_labels_not_nearest_medoid": int(np.sum(non_nearest)),
         "fraction_labels_not_nearest_medoid": float(np.mean(non_nearest)),
         "n_forced_by_min_size_repair": int(np.sum(forced_mask)),
@@ -4117,6 +4119,8 @@ def fit_multilevel_ot(
     heterogeneity_transport_max_subregions: int = 800,
     heterogeneity_transport_feature_mode: str = "soft_codebook",
     heterogeneity_transport_feature_cost: str = "hellinger_codebook",
+    heterogeneity_transport_marker_feature_weight: float = 0.5,
+    heterogeneity_transport_codebook_feature_weight: float = 0.5,
     heterogeneity_fused_ot_feature_weight: float = 0.5,
     heterogeneity_fused_ot_coordinate_weight: float = 0.5,
     heterogeneity_fused_ot_solver: str = "emd",
@@ -4127,6 +4131,8 @@ def fit_multilevel_ot(
     heterogeneity_fgw_loss_fun: str = "square_loss",
     heterogeneity_fgw_max_iter: int = 500,
     heterogeneity_fgw_tol: float = 1e-7,
+    heterogeneity_fgw_n_init: int = 1,
+    heterogeneity_fgw_init: str | tuple[str, ...] | list[str] | None = "outer_product",
     heterogeneity_fgw_structure_scale: str | float = "global_median",
     heterogeneity_fgw_structure_clip: float | None = 3.0,
     heterogeneity_fgw_partial: bool = False,
@@ -4221,7 +4227,9 @@ def fit_multilevel_ot(
         "pair_cooccurrence": max(float(heterogeneity_pair_cooccurrence_weight), 0.0),
     }
     if sum(heterogeneity_block_weights.values()) <= 1e-12:
-        raise ValueError("at least one heterogeneity descriptor block weight must be positive")
+        raise ValueError(
+            "at least one heterogeneity descriptor block weight must be positive"
+        )
     heterogeneity_pair_graph_mode = (
         str(heterogeneity_pair_graph_mode).strip().lower().replace("-", "_")
     )
@@ -4244,6 +4252,11 @@ def fit_multilevel_ot(
     heterogeneity_transport_feature_cost = (
         str(heterogeneity_transport_feature_cost).strip().lower()
     )
+    split_feature_costs = {
+        "split_marker_codebook",
+        "mixed_marker_codebook",
+        "marker_sqeuclidean_codebook_hellinger",
+    }
     if (
         heterogeneity_transport_feature_cost in {"hellinger_codebook", "hellinger"}
         and heterogeneity_transport_feature_mode != "soft_codebook"
@@ -4251,6 +4264,29 @@ def fit_multilevel_ot(
         raise ValueError(
             "Hellinger heterogeneity transport feature cost requires "
             "heterogeneity_transport_feature_mode='soft_codebook'."
+        )
+    if (
+        heterogeneity_transport_feature_cost in split_feature_costs
+        and heterogeneity_transport_feature_mode
+        != "whitened_features_plus_soft_codebook"
+    ):
+        raise ValueError(
+            "split marker/codebook heterogeneity transport feature cost requires "
+            "heterogeneity_transport_feature_mode='whitened_features_plus_soft_codebook'."
+        )
+    heterogeneity_transport_marker_feature_weight = max(
+        float(heterogeneity_transport_marker_feature_weight), 0.0
+    )
+    heterogeneity_transport_codebook_feature_weight = max(
+        float(heterogeneity_transport_codebook_feature_weight), 0.0
+    )
+    if (
+        heterogeneity_transport_marker_feature_weight
+        + heterogeneity_transport_codebook_feature_weight
+        <= 1e-12
+    ):
+        raise ValueError(
+            "at least one mixed transport feature component weight must be positive"
         )
     heterogeneity_fused_ot_feature_weight = max(
         float(heterogeneity_fused_ot_feature_weight), 0.0
@@ -4263,8 +4299,7 @@ def fit_multilevel_ot(
         raise ValueError("heterogeneity_fused_ot_solver must be 'emd' or 'sinkhorn'")
     heterogeneity_fused_ot_epsilon = max(float(heterogeneity_fused_ot_epsilon), 1e-8)
     if (
-        heterogeneity_fused_ot_feature_weight
-        + heterogeneity_fused_ot_coordinate_weight
+        heterogeneity_fused_ot_feature_weight + heterogeneity_fused_ot_coordinate_weight
         <= 1e-12
     ):
         raise ValueError("at least one heterogeneity fused-OT weight must be positive")
@@ -4274,6 +4309,7 @@ def fit_multilevel_ot(
     heterogeneity_fgw_loss_fun = str(heterogeneity_fgw_loss_fun).strip().lower()
     heterogeneity_fgw_max_iter = max(int(heterogeneity_fgw_max_iter), 1)
     heterogeneity_fgw_tol = max(float(heterogeneity_fgw_tol), 1e-12)
+    heterogeneity_fgw_n_init = max(int(heterogeneity_fgw_n_init), 1)
     if (
         heterogeneity_fgw_structure_clip is not None
         and float(heterogeneity_fgw_structure_clip) <= 0
@@ -4535,7 +4571,10 @@ def fit_multilevel_ot(
             raise ValueError(
                 "subregion_construction_method='joint_refinement' requires generated subregions."
             )
-        if clustering_method not in {"pooled_subregion_latent", HETEROGENEITY_DESCRIPTOR_MODE}:
+        if clustering_method not in {
+            "pooled_subregion_latent",
+            HETEROGENEITY_DESCRIPTOR_MODE,
+        }:
             raise ValueError(
                 "subregion_construction_method='joint_refinement' requires "
                 "an embedding-based subregion_clustering_method."
@@ -4805,7 +4844,9 @@ def fit_multilevel_ot(
         subregion_latent_embedding_mode = HETEROGENEITY_DESCRIPTOR_MODE
         subregion_latent_diagnostics = {
             "shrinkage_alpha": np.ones(len(subregion_members), dtype=np.float32),
-            "raw_to_shrunk_distance": np.zeros(len(subregion_members), dtype=np.float32),
+            "raw_to_shrunk_distance": np.zeros(
+                len(subregion_members), dtype=np.float32
+            ),
             "sample_ids": _subregion_sample_ids_from_members(
                 sample_ids, subregion_members
             ),
@@ -4824,7 +4865,9 @@ def fit_multilevel_ot(
             codebook_size=int(subregion_latent_codebook_size),
             codebook_sample_size=int(subregion_latent_codebook_sample_size),
             random_state=int(seed),
-            sample_ids=_subregion_sample_ids_from_members(sample_ids, subregion_members),
+            sample_ids=_subregion_sample_ids_from_members(
+                sample_ids, subregion_members
+            ),
         )
         subregion_latent_embeddings = np.zeros((len(measures), 0), dtype=np.float32)
         subregion_latent_embedding_metadata = {
@@ -4843,7 +4886,9 @@ def fit_multilevel_ot(
         subregion_latent_embedding_mode = str(clustering_method)
         subregion_latent_diagnostics = {
             "shrinkage_alpha": np.ones(len(subregion_members), dtype=np.float32),
-            "raw_to_shrunk_distance": np.zeros(len(subregion_members), dtype=np.float32),
+            "raw_to_shrunk_distance": np.zeros(
+                len(subregion_members), dtype=np.float32
+            ),
             "sample_ids": _subregion_sample_ids_from_members(
                 sample_ids, subregion_members
             ),
@@ -4905,7 +4950,10 @@ def fit_multilevel_ot(
             "automatic K selection enabled; candidate K="
             + ",".join(str(k) for k in candidate_ks)
         )
-        if clustering_method in {"pooled_subregion_latent", HETEROGENEITY_DESCRIPTOR_MODE}:
+        if clustering_method in {
+            "pooled_subregion_latent",
+            HETEROGENEITY_DESCRIPTOR_MODE,
+        }:
             stability_seed_count = max(
                 3, min(8, _env_int("SPATIAL_OT_AUTO_K_STABILITY_SEEDS", 5))
             )
@@ -5030,7 +5078,9 @@ def fit_multilevel_ot(
                 f"(K={n_clusters}; uses canonical within-subregion arrangement, "
                 "not raw tissue position or sample labels)"
             )
-            label_assignment_source = "internal_heterogeneity_descriptor_motif_embeddings"
+            label_assignment_source = (
+                "internal_heterogeneity_descriptor_motif_embeddings"
+            )
         elif clustering_method in TRANSPORT_HETEROGENEITY_MODES:
             _progress(
                 f"clustering subregions by precomputed {clustering_method} "
@@ -5045,7 +5095,9 @@ def fit_multilevel_ot(
             label_assignment_source = "pooled_subregion_latent_embeddings"
         if clustering_method in TRANSPORT_HETEROGENEITY_MODES:
             if transport_measures is None:
-                raise RuntimeError("transport measures were not built before clustering.")
+                raise RuntimeError(
+                    "transport measures were not built before clustering."
+                )
             transport_distance_matrix, transport_distance_metadata = (
                 pairwise_transport_distance_matrix(
                     transport_measures,
@@ -5057,12 +5109,16 @@ def fit_multilevel_ot(
                     fused_ot_solver=heterogeneity_fused_ot_solver,
                     fused_ot_epsilon=heterogeneity_fused_ot_epsilon,
                     feature_cost_kind=heterogeneity_transport_feature_cost,
+                    marker_feature_weight=heterogeneity_transport_marker_feature_weight,
+                    codebook_feature_weight=heterogeneity_transport_codebook_feature_weight,
                     fgw_alpha=heterogeneity_fgw_alpha,
                     fgw_solver=heterogeneity_fgw_solver,
                     fgw_epsilon=heterogeneity_fgw_epsilon,
                     fgw_loss_fun=heterogeneity_fgw_loss_fun,
                     fgw_max_iter=heterogeneity_fgw_max_iter,
                     fgw_tol=heterogeneity_fgw_tol,
+                    fgw_n_init=heterogeneity_fgw_n_init,
+                    fgw_init=heterogeneity_fgw_init,
                     fgw_partial=bool(heterogeneity_fgw_partial),
                     fgw_partial_mass=heterogeneity_fgw_partial_mass,
                     fgw_partial_reg=heterogeneity_fgw_partial_reg,

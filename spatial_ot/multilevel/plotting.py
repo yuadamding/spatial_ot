@@ -32,7 +32,9 @@ def _marker_size(n_points: int, *, low: float = 0.5, high: float = 8.0) -> float
 
 
 def _safe_filename_component(value: str) -> str:
-    cleaned = "".join(char if char.isalnum() or char in "._-" else "_" for char in value.strip())
+    cleaned = "".join(
+        char if char.isalnum() or char in "._-" else "_" for char in value.strip()
+    )
     cleaned = cleaned.strip("._")
     return cleaned or "sample"
 
@@ -87,7 +89,9 @@ def _resolve_spot_latent_npz(
     for candidate in candidates:
         if candidate.exists():
             return candidate
-        resolved = candidate if candidate.is_absolute() else cells_h5ad.parent / candidate
+        resolved = (
+            candidate if candidate.is_absolute() else cells_h5ad.parent / candidate
+        )
         if resolved.exists():
             return resolved
     return None
@@ -120,17 +124,30 @@ def _subregion_table_latent_preview(
     required = {"subregion_id", "embed1", "embed2", "cluster_int"}
     if not required.issubset(table.columns) or table.empty:
         return None
-    max_id = int(max(int(table["subregion_id"].max()), int(np.max(np.asarray(obs["mlot_subregion_id"], dtype=np.int64)))))
+    max_id = int(
+        max(
+            int(table["subregion_id"].max()),
+            int(np.max(np.asarray(obs["mlot_subregion_id"], dtype=np.int64))),
+        )
+    )
     coords_by_subregion = np.full((max_id + 1, 2), np.nan, dtype=np.float32)
     labels_by_subregion = np.full(max_id + 1, -1, dtype=np.int32)
     ids = np.asarray(table["subregion_id"], dtype=np.int64)
     valid_table = (ids >= 0) & (ids <= max_id)
-    coords_by_subregion[ids[valid_table], 0] = np.asarray(table.loc[valid_table, "embed1"], dtype=np.float32)
-    coords_by_subregion[ids[valid_table], 1] = np.asarray(table.loc[valid_table, "embed2"], dtype=np.float32)
-    labels_by_subregion[ids[valid_table]] = np.asarray(table.loc[valid_table, "cluster_int"], dtype=np.int32)
+    coords_by_subregion[ids[valid_table], 0] = np.asarray(
+        table.loc[valid_table, "embed1"], dtype=np.float32
+    )
+    coords_by_subregion[ids[valid_table], 1] = np.asarray(
+        table.loc[valid_table, "embed2"], dtype=np.float32
+    )
+    labels_by_subregion[ids[valid_table]] = np.asarray(
+        table.loc[valid_table, "cluster_int"], dtype=np.int32
+    )
     cell_subregion_ids = np.asarray(obs["mlot_subregion_id"], dtype=np.int64)
     valid_cells = (cell_subregion_ids >= 0) & (cell_subregion_ids <= max_id)
-    valid_cells &= np.all(np.isfinite(coords_by_subregion[cell_subregion_ids.clip(0, max_id)]), axis=1)
+    valid_cells &= np.all(
+        np.isfinite(coords_by_subregion[cell_subregion_ids.clip(0, max_id)]), axis=1
+    )
     cell_indices = np.flatnonzero(valid_cells).astype(np.int64)
     if cell_indices.size == 0:
         return None
@@ -138,10 +155,19 @@ def _subregion_table_latent_preview(
     cluster_ids = labels_by_subregion[cell_subregion_ids[cell_indices]].astype(np.int32)
     weights = np.ones(cell_indices.size, dtype=np.float32)
     subregion_ids = cell_subregion_ids[cell_indices].astype(np.int32)
-    return cell_indices, latent, cluster_ids, weights, subregion_ids, "subregion_table_embed_preview"
+    return (
+        cell_indices,
+        latent,
+        cluster_ids,
+        weights,
+        subregion_ids,
+        "subregion_table_embed_preview",
+    )
 
 
-def _subregion_memberships_from_obs(obs: pd.DataFrame) -> tuple[dict[int, np.ndarray], str | None]:
+def _subregion_memberships_from_obs(
+    obs: pd.DataFrame,
+) -> tuple[dict[int, np.ndarray], str | None]:
     for key in ("mlot_subregion_id", "mlot_subregion_int"):
         if key not in obs.columns:
             continue
@@ -150,33 +176,41 @@ def _subregion_memberships_from_obs(obs: pd.DataFrame) -> tuple[dict[int, np.nda
         if valid_ids.size == 0:
             continue
         groups = {
-            int(subregion_id): np.flatnonzero(subregion_ids == int(subregion_id)).astype(np.int64)
+            int(subregion_id): np.flatnonzero(
+                subregion_ids == int(subregion_id)
+            ).astype(np.int64)
             for subregion_id in valid_ids.tolist()
         }
         return groups, f"obs[{key}]"
     return {}, None
 
 
-def _subregion_memberships_from_npz(npz_path: Path, *, n_obs: int) -> dict[int, np.ndarray]:
+def _subregion_memberships_from_npz(
+    npz_path: Path, *, n_obs: int
+) -> dict[int, np.ndarray]:
     with np.load(npz_path) as payload:
         if "cell_indices" not in payload.files or "subregion_ids" not in payload.files:
             return {}
         cell_indices = np.asarray(payload["cell_indices"], dtype=np.int64)
         subregion_ids = np.asarray(payload["subregion_ids"], dtype=np.int32)
-    if cell_indices.ndim != 1 or subregion_ids.ndim != 1 or cell_indices.shape[0] != subregion_ids.shape[0]:
-        raise ValueError(f"Subregion membership arrays in '{npz_path}' are inconsistent.")
-    valid = (
-        (cell_indices >= 0)
-        & (cell_indices < int(n_obs))
-        & (subregion_ids >= 0)
-    )
+    if (
+        cell_indices.ndim != 1
+        or subregion_ids.ndim != 1
+        or cell_indices.shape[0] != subregion_ids.shape[0]
+    ):
+        raise ValueError(
+            f"Subregion membership arrays in '{npz_path}' are inconsistent."
+        )
+    valid = (cell_indices >= 0) & (cell_indices < int(n_obs)) & (subregion_ids >= 0)
     if not np.any(valid):
         return {}
     valid_cells = cell_indices[valid]
     valid_subregions = subregion_ids[valid]
     groups: dict[int, np.ndarray] = {}
     for subregion_id in np.unique(valid_subregions).tolist():
-        members = np.unique(valid_cells[valid_subregions == int(subregion_id)]).astype(np.int64)
+        members = np.unique(valid_cells[valid_subregions == int(subregion_id)]).astype(
+            np.int64
+        )
         if members.size:
             groups[int(subregion_id)] = members
     return groups
@@ -190,7 +224,10 @@ def _validate_loaded_subregion_groups(
 ) -> None:
     if not groups:
         return
-    members = [np.asarray(groups[int(subregion_id)], dtype=np.int64) for subregion_id in sorted(groups)]
+    members = [
+        np.asarray(groups[int(subregion_id)], dtype=np.int64)
+        for subregion_id in sorted(groups)
+    ]
     try:
         _validate_mutually_exclusive_memberships(int(n_obs), members)
     except RuntimeError as exc:
@@ -208,7 +245,9 @@ def _load_subregion_memberships(
 ) -> tuple[dict[int, np.ndarray], str, Path | None]:
     obs_groups, obs_source = _subregion_memberships_from_obs(obs)
     if obs_groups:
-        _validate_loaded_subregion_groups(obs_groups, n_obs=obs.shape[0], source=str(obs_source))
+        _validate_loaded_subregion_groups(
+            obs_groups, n_obs=obs.shape[0], source=str(obs_source)
+        )
         return obs_groups, str(obs_source), None
     resolved_npz = _resolve_spot_latent_npz(
         cells_h5ad=cells_h5ad,
@@ -247,7 +286,9 @@ def _polygon_exteriors_from_geometry(geometry) -> list[np.ndarray]:
     return []
 
 
-def _subregion_boundary_polygons(coords: np.ndarray, *, concave_ratio: float = 0.35) -> list[np.ndarray]:
+def _subregion_boundary_polygons(
+    coords: np.ndarray, *, concave_ratio: float = 0.35
+) -> list[np.ndarray]:
     coords_arr = np.asarray(coords, dtype=np.float32)
     if coords_arr.ndim != 2 or coords_arr.shape[1] != 2:
         return []
@@ -261,7 +302,9 @@ def _subregion_boundary_polygons(coords: np.ndarray, *, concave_ratio: float = 0
         from shapely.geometry import MultiPoint
 
         points = MultiPoint(unique)
-        hull = concave_hull(points, ratio=float(np.clip(concave_ratio, 0.0, 1.0)), allow_holes=False)
+        hull = concave_hull(
+            points, ratio=float(np.clip(concave_ratio, 0.0, 1.0)), allow_holes=False
+        )
         polygons = _polygon_exteriors_from_geometry(hull)
         if polygons:
             return polygons
@@ -299,7 +342,9 @@ def _nonoverlapping_polygons_by_cluster(
     except Exception:
         by_cluster: dict[int, list[np.ndarray]] = {}
         for cid, polygon in polygon_records:
-            by_cluster.setdefault(int(cid), []).append(np.asarray(polygon, dtype=np.float32))
+            by_cluster.setdefault(int(cid), []).append(
+                np.asarray(polygon, dtype=np.float32)
+            )
         return by_cluster, 0
 
     covered = None
@@ -327,7 +372,9 @@ def _nonoverlapping_polygons_by_cluster(
             clipped_count += 1
         polygons = _polygon_exteriors_from_geometry(geom)
         for clipped_polygon in polygons:
-            by_cluster.setdefault(int(cid), []).append(np.asarray(clipped_polygon, dtype=np.float32))
+            by_cluster.setdefault(int(cid), []).append(
+                np.asarray(clipped_polygon, dtype=np.float32)
+            )
         covered = geom if covered is None else unary_union([covered, geom])
     return by_cluster, clipped_count
 
@@ -373,17 +420,25 @@ def _latent_to_rgb(latent: np.ndarray, *, limits: dict[str, list[float]]) -> np.
     return rgb
 
 
-def _latent_color_limits_by_cluster(latent: np.ndarray, cluster_ids: np.ndarray) -> dict[str, dict[str, list[float]]]:
+def _latent_color_limits_by_cluster(
+    latent: np.ndarray, cluster_ids: np.ndarray
+) -> dict[str, dict[str, list[float]]]:
     latent_arr = np.asarray(latent, dtype=np.float32)
     cluster_arr = np.asarray(cluster_ids, dtype=np.int32)
-    if latent_arr.ndim != 2 or latent_arr.shape[1] != 2 or cluster_arr.shape[0] != latent_arr.shape[0]:
+    if (
+        latent_arr.ndim != 2
+        or latent_arr.shape[1] != 2
+        or cluster_arr.shape[0] != latent_arr.shape[0]
+    ):
         return {}
     finite = np.all(np.isfinite(latent_arr), axis=1)
     limits_by_cluster: dict[str, dict[str, list[float]]] = {}
     for cluster_id in np.unique(cluster_arr[(cluster_arr >= 0) & finite]).tolist():
         mask = (cluster_arr == int(cluster_id)) & finite
         if np.any(mask):
-            limits_by_cluster[str(int(cluster_id))] = _latent_color_limits(latent_arr[mask])
+            limits_by_cluster[str(int(cluster_id))] = _latent_color_limits(
+                latent_arr[mask]
+            )
     return limits_by_cluster
 
 
@@ -396,7 +451,11 @@ def _latent_to_within_cluster_rgb(
     latent_arr = np.asarray(latent, dtype=np.float32)
     cluster_arr = np.asarray(cluster_ids, dtype=np.int32)
     rgb = np.full((latent_arr.shape[0], 3), 0.82, dtype=np.float32)
-    if latent_arr.ndim != 2 or latent_arr.shape[1] != 2 or cluster_arr.shape[0] != latent_arr.shape[0]:
+    if (
+        latent_arr.ndim != 2
+        or latent_arr.shape[1] != 2
+        or cluster_arr.shape[0] != latent_arr.shape[0]
+    ):
         return rgb
     finite = np.all(np.isfinite(latent_arr), axis=1)
     for cluster_key, limits in limits_by_cluster.items():
@@ -407,11 +466,17 @@ def _latent_to_within_cluster_rgb(
     return rgb
 
 
-def _cluster_mean_latent_anchors(latent: np.ndarray, cluster_ids: np.ndarray) -> dict[int, list[float]]:
+def _cluster_mean_latent_anchors(
+    latent: np.ndarray, cluster_ids: np.ndarray
+) -> dict[int, list[float]]:
     latent_arr = np.asarray(latent, dtype=np.float32)
     cluster_arr = np.asarray(cluster_ids, dtype=np.int32)
     anchors: dict[int, list[float]] = {}
-    if latent_arr.ndim != 2 or latent_arr.shape[1] != 2 or cluster_arr.shape[0] != latent_arr.shape[0]:
+    if (
+        latent_arr.ndim != 2
+        or latent_arr.shape[1] != 2
+        or cluster_arr.shape[0] != latent_arr.shape[0]
+    ):
         return anchors
     finite = np.all(np.isfinite(latent_arr), axis=1)
     for cluster_id in np.unique(cluster_arr[(cluster_arr >= 0) & finite]).tolist():
@@ -445,7 +510,9 @@ def _coordinate_limits(coords: np.ndarray, *, n_dims: int) -> dict[str, list[flo
     }
 
 
-def _cluster_mean_coordinate_anchors(coords: np.ndarray, cluster_ids: np.ndarray) -> dict[int, list[float]]:
+def _cluster_mean_coordinate_anchors(
+    coords: np.ndarray, cluster_ids: np.ndarray
+) -> dict[int, list[float]]:
     coords_arr = np.asarray(coords, dtype=np.float32)
     cluster_arr = np.asarray(cluster_ids, dtype=np.int32)
     anchors: dict[int, list[float]] = {}
@@ -455,7 +522,9 @@ def _cluster_mean_coordinate_anchors(coords: np.ndarray, cluster_ids: np.ndarray
     for cluster_id in np.unique(cluster_arr[(cluster_arr >= 0) & finite]).tolist():
         idx = np.flatnonzero((cluster_arr == int(cluster_id)) & finite)
         if idx.size:
-            anchors[int(cluster_id)] = [float(value) for value in np.nanmean(coords_arr[idx], axis=0).tolist()]
+            anchors[int(cluster_id)] = [
+                float(value) for value in np.nanmean(coords_arr[idx], axis=0).tolist()
+            ]
     return anchors
 
 
@@ -477,53 +546,91 @@ def _spot_latent_key_coordinates_3d(
 
     latent_arr = np.asarray(latent, dtype=np.float32)
     cluster_arr = np.asarray(cluster_ids, dtype=np.int32)
-    if latent_arr.ndim != 2 or latent_arr.shape[0] != cluster_arr.shape[0] or latent_arr.shape[1] < 2:
+    if (
+        latent_arr.ndim != 2
+        or latent_arr.shape[0] != cluster_arr.shape[0]
+        or latent_arr.shape[1] < 2
+    ):
         empty = np.zeros((cluster_arr.shape[0], 3), dtype=np.float32)
         return empty, {}, _coordinate_limits(empty, n_dims=3), "unavailable"
-    if cluster_anchor_distance is None and cluster_anchors is None and latent_arr.shape[1] >= 3:
+    if (
+        cluster_anchor_distance is None
+        and cluster_anchors is None
+        and latent_arr.shape[1] >= 3
+    ):
         key_coords = latent_arr[:, :3].astype(np.float32)
         key_anchors = _cluster_mean_coordinate_anchors(key_coords, cluster_arr)
-        key_limits = _coordinate_limits(key_coords[(cluster_arr >= 0) & np.all(np.isfinite(key_coords), axis=1)], n_dims=3)
+        key_limits = _coordinate_limits(
+            key_coords[(cluster_arr >= 0) & np.all(np.isfinite(key_coords), axis=1)],
+            n_dims=3,
+        )
         return key_coords, key_anchors, key_limits, "stored_latent_coordinates_3d"
 
-    n_clusters = int(np.max(cluster_arr[cluster_arr >= 0]) + 1) if np.any(cluster_arr >= 0) else 0
+    n_clusters = (
+        int(np.max(cluster_arr[cluster_arr >= 0]) + 1)
+        if np.any(cluster_arr >= 0)
+        else 0
+    )
     anchors_3d: np.ndarray | None = None
     key_mode = "cluster_mean_latent_xy_zero_z"
     if cluster_anchor_distance is not None:
         distance = np.asarray(cluster_anchor_distance, dtype=np.float32)
-        if distance.ndim == 2 and distance.shape[0] == distance.shape[1] and distance.shape[0] >= n_clusters:
-            anchors_3d = _classical_mds_from_sqdist(distance, n_components=3).astype(np.float32)
+        if (
+            distance.ndim == 2
+            and distance.shape[0] == distance.shape[1]
+            and distance.shape[0] >= n_clusters
+        ):
+            anchors_3d = _classical_mds_from_sqdist(distance, n_components=3).astype(
+                np.float32
+            )
             key_mode = "cluster_anchor_distance_mds3d_plus_within_xy"
     if anchors_3d is None and cluster_anchors is not None:
         stored = np.asarray(cluster_anchors, dtype=np.float32)
         if stored.ndim == 2 and stored.shape[0] >= n_clusters and stored.shape[1] >= 2:
             anchors_3d = np.zeros((stored.shape[0], 3), dtype=np.float32)
-            anchors_3d[:, : min(3, stored.shape[1])] = stored[:, : min(3, stored.shape[1])]
+            anchors_3d[:, : min(3, stored.shape[1])] = stored[
+                :, : min(3, stored.shape[1])
+            ]
             key_mode = "stored_cluster_anchor_coordinates_zero_padded_to_3d"
     if anchors_3d is None:
         anchors_2d = _cluster_mean_latent_anchors(latent_arr[:, :2], cluster_arr)
         anchors_3d = np.zeros((max(n_clusters, 1), 3), dtype=np.float32)
         for cluster_id, anchor in anchors_2d.items():
             if 0 <= int(cluster_id) < anchors_3d.shape[0]:
-                anchors_3d[int(cluster_id), :2] = np.asarray(anchor[:2], dtype=np.float32)
+                anchors_3d[int(cluster_id), :2] = np.asarray(
+                    anchor[:2], dtype=np.float32
+                )
 
     if anchors_3d.shape[0] < n_clusters:
-        anchors_3d = np.pad(anchors_3d, ((0, n_clusters - anchors_3d.shape[0]), (0, 0)), constant_values=0.0)
+        anchors_3d = np.pad(
+            anchors_3d,
+            ((0, n_clusters - anchors_3d.shape[0]), (0, 0)),
+            constant_values=0.0,
+        )
     if anchors_3d.shape[1] < 3:
-        anchors_3d = np.pad(anchors_3d, ((0, 0), (0, 3 - anchors_3d.shape[1])), constant_values=0.0)
+        anchors_3d = np.pad(
+            anchors_3d, ((0, 0), (0, 3 - anchors_3d.shape[1])), constant_values=0.0
+        )
     anchors_3d = anchors_3d[:, :3].astype(np.float32)
 
     residual = np.zeros((latent_arr.shape[0], 3), dtype=np.float32)
     if within_coords is not None:
         within = np.asarray(within_coords, dtype=np.float32)
-        if within.ndim == 2 and within.shape[0] == latent_arr.shape[0] and within.shape[1] >= 2:
+        if (
+            within.ndim == 2
+            and within.shape[0] == latent_arr.shape[0]
+            and within.shape[1] >= 2
+        ):
             residual[:, :2] = within[:, :2]
     else:
         display_anchors = _cluster_mean_latent_anchors(latent_arr[:, :2], cluster_arr)
         for cluster_id, anchor in display_anchors.items():
             idx = np.flatnonzero(cluster_arr == int(cluster_id))
             if idx.size:
-                residual[idx, :2] = latent_arr[idx, :2] - np.asarray(anchor[:2], dtype=np.float32)[None, :]
+                residual[idx, :2] = (
+                    latent_arr[idx, :2]
+                    - np.asarray(anchor[:2], dtype=np.float32)[None, :]
+                )
 
     key_coords = np.zeros((latent_arr.shape[0], 3), dtype=np.float32)
     valid = (cluster_arr >= 0) & (cluster_arr < anchors_3d.shape[0])
@@ -555,13 +662,19 @@ def _plot_sample_cluster_maps(
     import matplotlib.pyplot as plt
 
     cells_h5ad = Path(cells_h5ad)
-    output_dir = Path(output_dir) if output_dir is not None else cells_h5ad.parent / "sample_plots"
+    output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else cells_h5ad.parent / "sample_plots"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     adata = ad.read_h5ad(cells_h5ad, backed="r")
     try:
         obs = adata.obs.copy()
-        metadata = dict(adata.uns["multilevel_ot"]) if "multilevel_ot" in adata.uns else {}
+        metadata = (
+            dict(adata.uns["multilevel_ot"]) if "multilevel_ot" in adata.uns else {}
+        )
     finally:
         if getattr(adata, "isbacked", False):
             adata.file.close()
@@ -580,10 +693,16 @@ def _plot_sample_cluster_maps(
         metadata_x_key=str(metadata_x_key) if metadata_x_key is not None else None,
         metadata_y_key=str(metadata_y_key) if metadata_y_key is not None else None,
     )
-    resolved_scale = float(spatial_scale) if spatial_scale is not None else float(metadata.get("spatial_scale", 1.0))
+    resolved_scale = (
+        float(spatial_scale)
+        if spatial_scale is not None
+        else float(metadata.get("spatial_scale", 1.0))
+    )
 
     if sample_obs_key in obs.columns:
-        sample_ids = [str(value) for value in pd.unique(obs[sample_obs_key].astype(str))]
+        sample_ids = [
+            str(value) for value in pd.unique(obs[sample_obs_key].astype(str))
+        ]
         sample_values = obs[sample_obs_key].astype(str).to_numpy()
     else:
         sample_ids = [str(default_sample_id)]
@@ -592,16 +711,26 @@ def _plot_sample_cluster_maps(
     if cluster_label_obs_key in obs.columns:
         cluster_names = obs[cluster_label_obs_key].astype(str).to_numpy()
     elif cluster_obs_key in obs.columns:
-        cluster_names = np.asarray([f"C{int(value)}" for value in np.asarray(obs[cluster_obs_key], dtype=np.int32)], dtype=object)
+        cluster_names = np.asarray(
+            [
+                f"C{int(value)}"
+                for value in np.asarray(obs[cluster_obs_key], dtype=np.int32)
+            ],
+            dtype=object,
+        )
     else:
-        raise KeyError("No cluster label information was available for sample plotting.")
+        raise KeyError(
+            "No cluster label information was available for sample plotting."
+        )
 
     if cluster_obs_key in obs.columns:
         cluster_ids = np.asarray(obs[cluster_obs_key], dtype=np.int32)
     else:
         category = pd.Categorical(cluster_names)
         cluster_ids = category.codes.astype(np.int32)
-        cluster_names = np.asarray([str(category.categories[idx]) for idx in cluster_ids], dtype=object)
+        cluster_names = np.asarray(
+            [str(category.categories[idx]) for idx in cluster_ids], dtype=object
+        )
 
     if cluster_hex_obs_key in obs.columns:
         cluster_hex = obs[cluster_hex_obs_key].astype(str).to_numpy()
@@ -622,7 +751,9 @@ def _plot_sample_cluster_maps(
 
     cluster_display: dict[int, tuple[str, str]] = {}
     for idx, cluster_id in enumerate(cluster_ids.tolist()):
-        cluster_display.setdefault(int(cluster_id), (str(cluster_names[idx]), str(cluster_hex[idx])))
+        cluster_display.setdefault(
+            int(cluster_id), (str(cluster_names[idx]), str(cluster_hex[idx]))
+        )
 
     plots: list[dict[str, object]] = []
     for sample_id in sample_ids:
@@ -651,7 +782,12 @@ def _plot_sample_cluster_maps(
 
         source_name: str | list[str] | None = None
         if source_file_obs_key in obs.columns:
-            sources = [str(value) for value in pd.unique(obs.loc[sample_mask, source_file_obs_key].astype(str))]
+            sources = [
+                str(value)
+                for value in pd.unique(
+                    obs.loc[sample_mask, source_file_obs_key].astype(str)
+                )
+            ]
             if len(sources) == 1:
                 source_name = sources[0]
             elif sources:
@@ -665,9 +801,14 @@ def _plot_sample_cluster_maps(
         ax.set_ylabel("y (µm)")
         ax.set_aspect("equal")
         ax.invert_yaxis()
-        ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8, frameon=True)
+        ax.legend(
+            loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8, frameon=True
+        )
 
-        output_png = output_dir / f"{_safe_filename_component(sample_id)}{output_filename_suffix}"
+        output_png = (
+            output_dir
+            / f"{_safe_filename_component(sample_id)}{output_filename_suffix}"
+        )
         fig.savefig(output_png, dpi=250, bbox_inches="tight")
         plt.close(fig)
 
@@ -723,13 +864,19 @@ def _plot_sample_subregion_cluster_maps(
     from matplotlib.patches import Patch
 
     cells_h5ad = Path(cells_h5ad)
-    output_dir = Path(output_dir) if output_dir is not None else cells_h5ad.parent / "sample_niche_plots"
+    output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else cells_h5ad.parent / "sample_niche_plots"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     adata = ad.read_h5ad(cells_h5ad, backed="r")
     try:
         obs = adata.obs.copy()
-        metadata = dict(adata.uns["multilevel_ot"]) if "multilevel_ot" in adata.uns else {}
+        metadata = (
+            dict(adata.uns["multilevel_ot"]) if "multilevel_ot" in adata.uns else {}
+        )
     finally:
         if getattr(adata, "isbacked", False):
             adata.file.close()
@@ -748,10 +895,16 @@ def _plot_sample_subregion_cluster_maps(
         metadata_x_key=str(metadata_x_key) if metadata_x_key is not None else None,
         metadata_y_key=str(metadata_y_key) if metadata_y_key is not None else None,
     )
-    resolved_scale = float(spatial_scale) if spatial_scale is not None else float(metadata.get("spatial_scale", 1.0))
+    resolved_scale = (
+        float(spatial_scale)
+        if spatial_scale is not None
+        else float(metadata.get("spatial_scale", 1.0))
+    )
 
     if sample_obs_key in obs.columns:
-        sample_ids = [str(value) for value in pd.unique(obs[sample_obs_key].astype(str))]
+        sample_ids = [
+            str(value) for value in pd.unique(obs[sample_obs_key].astype(str))
+        ]
         sample_values = obs[sample_obs_key].astype(str).to_numpy()
     else:
         sample_ids = [str(default_sample_id)]
@@ -760,21 +913,35 @@ def _plot_sample_subregion_cluster_maps(
     if cluster_label_obs_key in obs.columns:
         cluster_names = obs[cluster_label_obs_key].astype(str).to_numpy()
     elif cluster_obs_key in obs.columns:
-        cluster_names = np.asarray([f"C{int(value)}" for value in np.asarray(obs[cluster_obs_key], dtype=np.int32)], dtype=object)
+        cluster_names = np.asarray(
+            [
+                f"C{int(value)}"
+                for value in np.asarray(obs[cluster_obs_key], dtype=np.int32)
+            ],
+            dtype=object,
+        )
     else:
-        raise KeyError("No cluster label information was available for sample plotting.")
+        raise KeyError(
+            "No cluster label information was available for sample plotting."
+        )
 
     if cluster_obs_key in obs.columns:
         cluster_ids = np.asarray(obs[cluster_obs_key], dtype=np.int32)
     else:
         category = pd.Categorical(cluster_names)
         cluster_ids = category.codes.astype(np.int32)
-        cluster_names = np.asarray([str(category.categories[idx]) for idx in cluster_ids], dtype=object)
+        cluster_names = np.asarray(
+            [str(category.categories[idx]) for idx in cluster_ids], dtype=object
+        )
 
     if cluster_hex_obs_key in obs.columns:
         cluster_hex = obs[cluster_hex_obs_key].astype(str).to_numpy()
     else:
-        n_palette = int(np.max(cluster_ids[cluster_ids >= 0])) + 1 if np.any(cluster_ids >= 0) else 1
+        n_palette = (
+            int(np.max(cluster_ids[cluster_ids >= 0])) + 1
+            if np.any(cluster_ids >= 0)
+            else 1
+        )
         palette = cluster_palette(n_palette)
         cluster_hex = np.asarray(
             [
@@ -798,7 +965,9 @@ def _plot_sample_subregion_cluster_maps(
 
     cluster_display: dict[int, tuple[str, str]] = {}
     for idx, cluster_id in enumerate(cluster_ids.tolist()):
-        cluster_display.setdefault(int(cluster_id), (str(cluster_names[idx]), str(cluster_hex[idx])))
+        cluster_display.setdefault(
+            int(cluster_id), (str(cluster_names[idx]), str(cluster_hex[idx]))
+        )
 
     subregion_groups, membership_source, resolved_npz = _load_subregion_memberships(
         obs=obs,
@@ -880,9 +1049,13 @@ def _plot_sample_subregion_cluster_maps(
                 n_filled_subregions += 1
             else:
                 n_degenerate_subregions += 1
-                degenerate_centers_by_cluster.setdefault(cid, []).append(coords_um[member_arr].mean(axis=0))
+                degenerate_centers_by_cluster.setdefault(cid, []).append(
+                    coords_um[member_arr].mean(axis=0)
+                )
 
-        polygons_by_cluster, n_overlap_clipped_polygons = _nonoverlapping_polygons_by_cluster(polygon_records)
+        polygons_by_cluster, n_overlap_clipped_polygons = (
+            _nonoverlapping_polygons_by_cluster(polygon_records)
+        )
         for cid in sorted(polygons_by_cluster):
             _, color_hex = cluster_display.get(int(cid), (f"C{int(cid)}", "#4d4d4d"))
             collection = PolyCollection(
@@ -912,7 +1085,12 @@ def _plot_sample_subregion_cluster_maps(
 
         source_name: str | list[str] | None = None
         if source_file_obs_key in obs.columns:
-            sources = [str(value) for value in pd.unique(obs.loc[sample_mask, source_file_obs_key].astype(str))]
+            sources = [
+                str(value)
+                for value in pd.unique(
+                    obs.loc[sample_mask, source_file_obs_key].astype(str)
+                )
+            ]
             if len(sources) == 1:
                 source_name = sources[0]
             elif sources:
@@ -922,7 +1100,9 @@ def _plot_sample_subregion_cluster_maps(
         if isinstance(source_name, str):
             title = f"{title}\n{source_name}"
         fig.suptitle(title)
-        subregion_ax.set_title(f"Subregion-wise\n{n_filled_subregions}/{n_sample_subregions} filled subregions")
+        subregion_ax.set_title(
+            f"Subregion-wise\n{n_filled_subregions}/{n_sample_subregions} filled subregions"
+        )
         subregion_ax.set_xlabel("x (µm)")
         subregion_ax.set_ylabel("y (µm)")
         subregion_ax.set_aspect("equal")
@@ -934,7 +1114,9 @@ def _plot_sample_subregion_cluster_maps(
         sample_cluster_ids = cluster_ids[sample_indices]
         for cid in np.unique(sample_cluster_ids):
             cell_cluster_mask = sample_cluster_ids == int(cid)
-            label_name, color_hex = cluster_display.get(int(cid), (f"C{int(cid)}", "#4d4d4d"))
+            label_name, color_hex = cluster_display.get(
+                int(cid), (f"C{int(cid)}", "#4d4d4d")
+            )
             cell_ax.scatter(
                 sample_coords[cell_cluster_mask, 0],
                 sample_coords[cell_cluster_mask, 1],
@@ -955,7 +1137,9 @@ def _plot_sample_subregion_cluster_maps(
 
         legend_handles = []
         for cid in sorted(cid for cid in subregions_by_cluster if cid >= 0):
-            label_name, color_hex = cluster_display.get(int(cid), (f"C{int(cid)}", "#4d4d4d"))
+            label_name, color_hex = cluster_display.get(
+                int(cid), (f"C{int(cid)}", "#4d4d4d")
+            )
             legend_handles.append(
                 Patch(
                     facecolor=color_hex,
@@ -965,9 +1149,18 @@ def _plot_sample_subregion_cluster_maps(
                 )
             )
         if legend_handles:
-            cell_ax.legend(handles=legend_handles, loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8, frameon=True, title="Clusters")
+            cell_ax.legend(
+                handles=legend_handles,
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
+                fontsize=8,
+                frameon=True,
+                title="Clusters",
+            )
 
-        output_png = output_dir / f"{_safe_filename_component(sample_id)}_spatial_niche_map.png"
+        output_png = (
+            output_dir / f"{_safe_filename_component(sample_id)}_spatial_niche_map.png"
+        )
         fig.savefig(output_png, dpi=250, bbox_inches="tight")
         plt.close(fig)
 
@@ -999,9 +1192,14 @@ def _plot_sample_subregion_cluster_maps(
         "title_prefix": "Spatial niche map",
         "output_filename_suffix": "_spatial_niche_map.png",
         "rendering": "subregion_polygons_and_cell_scatter",
-        "views": ["subregion_wise_filled_polygons", "cell_wise_inherited_label_scatter"],
+        "views": [
+            "subregion_wise_filled_polygons",
+            "cell_wise_inherited_label_scatter",
+        ],
         "subregion_membership_source": membership_source,
-        "subregion_membership_npz": str(resolved_npz) if resolved_npz is not None else None,
+        "subregion_membership_npz": str(resolved_npz)
+        if resolved_npz is not None
+        else None,
         "polygon_boundary": "concave_hull_of_subregion_member_cells_with_convex_hull_fallback",
         "polygon_overlap_handling": "filled subregion polygons are clipped by previously drawn polygons so the subregion-wise panel is visually mutually exclusive",
         "plots": plots,
@@ -1027,7 +1225,11 @@ def plot_sample_niche_maps(
     spatial_scale: float | None = None,
     spot_latent_npz: str | Path | None = None,
 ) -> dict[str, object]:
-    resolved_output_dir = Path(output_dir) if output_dir is not None else Path(cells_h5ad).parent / "sample_niche_plots"
+    resolved_output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else Path(cells_h5ad).parent / "sample_niche_plots"
+    )
     return _plot_sample_subregion_cluster_maps(
         cells_h5ad=cells_h5ad,
         output_dir=resolved_output_dir,
@@ -1058,7 +1260,11 @@ def plot_sample_spatial_maps(
     default_sample_id: str = "all_cells",
     spatial_scale: float | None = None,
 ) -> dict[str, object]:
-    resolved_output_dir = Path(output_dir) if output_dir is not None else Path(cells_h5ad).parent / "sample_spatial_maps"
+    resolved_output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else Path(cells_h5ad).parent / "sample_spatial_maps"
+    )
     return _plot_sample_cluster_maps(
         cells_h5ad=cells_h5ad,
         output_dir=resolved_output_dir,
@@ -1098,13 +1304,19 @@ def plot_sample_spot_latent_maps(
     from matplotlib.collections import PolyCollection
 
     cells_h5ad = Path(cells_h5ad)
-    output_dir = Path(output_dir) if output_dir is not None else cells_h5ad.parent / "sample_spot_latent_plots"
+    output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else cells_h5ad.parent / "sample_spot_latent_plots"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     adata = ad.read_h5ad(cells_h5ad, backed="r")
     try:
         obs = adata.obs.copy()
-        metadata = dict(adata.uns["multilevel_ot"]) if "multilevel_ot" in adata.uns else {}
+        metadata = (
+            dict(adata.uns["multilevel_ot"]) if "multilevel_ot" in adata.uns else {}
+        )
         fallback_latent = None
         if latent_obsm_key in adata.obsm:
             fallback_latent = np.asarray(adata.obsm[latent_obsm_key], dtype=np.float32)
@@ -1112,10 +1324,14 @@ def plot_sample_spot_latent_maps(
         if getattr(adata, "isbacked", False):
             adata.file.close()
 
-    resolved_spot_latent_npz: Path | None = Path(spot_latent_npz) if spot_latent_npz is not None else None
+    resolved_spot_latent_npz: Path | None = (
+        Path(spot_latent_npz) if spot_latent_npz is not None else None
+    )
     if resolved_spot_latent_npz is None and metadata.get("spot_level_latent_npz"):
         candidate = Path(str(metadata["spot_level_latent_npz"]))
-        resolved_spot_latent_npz = candidate if candidate.is_absolute() else cells_h5ad.parent / candidate
+        resolved_spot_latent_npz = (
+            candidate if candidate.is_absolute() else cells_h5ad.parent / candidate
+        )
 
     latent_source = "occurrence_npz"
     occurrence_weights: np.ndarray
@@ -1124,17 +1340,30 @@ def plot_sample_spot_latent_maps(
     cluster_anchor_distance_matrix: np.ndarray | None = None
     cluster_anchor_coords: np.ndarray | None = None
     subregion_id_source = "unavailable"
-    spot_latent_mode = str(metadata.get("spot_level_latent_mode", "atom_barycentric_mds"))
+    spot_latent_mode = str(
+        metadata.get("spot_level_latent_mode", "atom_barycentric_mds")
+    )
     latent_projection_mode = str(
-        metadata.get("spot_level_latent_projection_mode", metadata.get("spot_level_latent_mode", ""))
+        metadata.get(
+            "spot_level_latent_projection_mode",
+            metadata.get("spot_level_latent_mode", ""),
+        )
     )
     chart_learning_mode = str(metadata.get("spot_level_latent_chart_learning_mode", ""))
     validation_role = str(
-        metadata.get("spot_level_latent_validation_role", "diagnostic_visualization_not_independent_evidence")
+        metadata.get(
+            "spot_level_latent_validation_role",
+            "diagnostic_visualization_not_independent_evidence",
+        )
     )
-    cluster_anchor_distance_method = str(metadata.get("spot_level_latent_cluster_anchor_distance_method", "unknown"))
+    cluster_anchor_distance_method = str(
+        metadata.get("spot_level_latent_cluster_anchor_distance_method", "unknown")
+    )
     cluster_anchor_distance_effective_method = str(
-        metadata.get("spot_level_latent_cluster_anchor_distance_effective_method", cluster_anchor_distance_method)
+        metadata.get(
+            "spot_level_latent_cluster_anchor_distance_effective_method",
+            cluster_anchor_distance_method,
+        )
     )
     cluster_anchor_ot_fallback_fraction = None
     try:
@@ -1165,39 +1394,67 @@ def plot_sample_spot_latent_maps(
 
     if resolved_spot_latent_npz is not None and resolved_spot_latent_npz.exists():
         with np.load(resolved_spot_latent_npz) as payload:
-            occurrence_cell_indices = np.asarray(payload["cell_indices"], dtype=np.int64)
+            occurrence_cell_indices = np.asarray(
+                payload["cell_indices"], dtype=np.int64
+            )
             latent = np.asarray(payload["latent_coords"], dtype=np.float32)
             cluster_ids = np.asarray(payload["cluster_labels"], dtype=np.int32)
-            occurrence_weights = np.asarray(payload["weights"], dtype=np.float32) if "weights" in payload.files else np.ones(latent.shape[0], dtype=np.float32)
+            occurrence_weights = (
+                np.asarray(payload["weights"], dtype=np.float32)
+                if "weights" in payload.files
+                else np.ones(latent.shape[0], dtype=np.float32)
+            )
             if "within_coords" in payload.files:
-                latent_within_coords = np.asarray(payload["within_coords"], dtype=np.float32)
+                latent_within_coords = np.asarray(
+                    payload["within_coords"], dtype=np.float32
+                )
             if "cluster_anchor_distance" in payload.files:
-                cluster_anchor_distance_matrix = np.asarray(payload["cluster_anchor_distance"], dtype=np.float32)
+                cluster_anchor_distance_matrix = np.asarray(
+                    payload["cluster_anchor_distance"], dtype=np.float32
+                )
             if "cluster_anchors" in payload.files:
-                cluster_anchor_coords = np.asarray(payload["cluster_anchors"], dtype=np.float32)
-            spot_latent_mode = _payload_scalar(payload, "spot_latent_mode", spot_latent_mode)
-            latent_projection_mode = _payload_scalar(payload, "latent_projection_mode", latent_projection_mode)
-            chart_learning_mode = _payload_scalar(payload, "chart_learning_mode", chart_learning_mode)
-            validation_role = _payload_scalar(payload, "validation_role", validation_role)
+                cluster_anchor_coords = np.asarray(
+                    payload["cluster_anchors"], dtype=np.float32
+                )
+            spot_latent_mode = _payload_scalar(
+                payload, "spot_latent_mode", spot_latent_mode
+            )
+            latent_projection_mode = _payload_scalar(
+                payload, "latent_projection_mode", latent_projection_mode
+            )
+            chart_learning_mode = _payload_scalar(
+                payload, "chart_learning_mode", chart_learning_mode
+            )
+            validation_role = _payload_scalar(
+                payload, "validation_role", validation_role
+            )
             cluster_anchor_distance_method = _payload_scalar(
                 payload,
                 "cluster_anchor_distance_method",
                 cluster_anchor_distance_method,
             )
-            cluster_anchor_mds_stress = _payload_float(payload, "cluster_anchor_mds_stress")
+            cluster_anchor_mds_stress = _payload_float(
+                payload, "cluster_anchor_mds_stress"
+            )
             cluster_anchor_distance_effective_method = _payload_scalar(
                 payload,
                 "cluster_anchor_distance_effective_method",
                 cluster_anchor_distance_effective_method,
             )
-            cluster_anchor_ot_fallback_fraction = _payload_float(payload, "cluster_anchor_ot_fallback_fraction")
+            cluster_anchor_ot_fallback_fraction = _payload_float(
+                payload, "cluster_anchor_ot_fallback_fraction"
+            )
             if "subregion_ids" in payload.files:
-                occurrence_subregion_ids = np.asarray(payload["subregion_ids"], dtype=np.int32)
+                occurrence_subregion_ids = np.asarray(
+                    payload["subregion_ids"], dtype=np.int32
+                )
                 subregion_id_source = "occurrence_npz[subregion_ids]"
             else:
                 occurrence_subregion_ids = np.full(latent.shape[0], -1, dtype=np.int32)
         if latent.shape[0] == 0:
-            preview = _subregion_table_latent_preview(run_dir=cells_h5ad.parent, obs=obs)
+            preview = _subregion_table_latent_preview(
+                run_dir=cells_h5ad.parent, obs=obs
+            )
             if preview is not None:
                 (
                     occurrence_cell_indices,
@@ -1208,12 +1465,19 @@ def plot_sample_spot_latent_maps(
                     latent_source,
                 ) = preview
                 subregion_id_source = "subregions_multilevel_ot.parquet"
-        if occurrence_cell_indices.ndim != 1 or occurrence_cell_indices.shape[0] != latent.shape[0]:
-            raise ValueError(f"Spot latent NPZ '{resolved_spot_latent_npz}' has inconsistent cell_indices and latent_coords.")
+        if (
+            occurrence_cell_indices.ndim != 1
+            or occurrence_cell_indices.shape[0] != latent.shape[0]
+        ):
+            raise ValueError(
+                f"Spot latent NPZ '{resolved_spot_latent_npz}' has inconsistent cell_indices and latent_coords."
+            )
     else:
         latent_source = "cell_preview_obsm"
         if fallback_latent is None:
-            preview = _subregion_table_latent_preview(run_dir=cells_h5ad.parent, obs=obs)
+            preview = _subregion_table_latent_preview(
+                run_dir=cells_h5ad.parent, obs=obs
+            )
             if preview is None:
                 raise KeyError(
                     f"Expected either spot latent NPZ '{resolved_spot_latent_npz}', obsm key '{latent_obsm_key}', "
@@ -1239,10 +1503,14 @@ def plot_sample_spot_latent_maps(
             occurrence_cell_indices = np.arange(obs.shape[0], dtype=np.int64)
             occurrence_weights = np.ones(latent.shape[0], dtype=np.float32)
             if "mlot_subregion_id" in obs.columns:
-                occurrence_subregion_ids = np.asarray(obs["mlot_subregion_id"], dtype=np.int32)
+                occurrence_subregion_ids = np.asarray(
+                    obs["mlot_subregion_id"], dtype=np.int32
+                )
                 subregion_id_source = "obs[mlot_subregion_id]"
             elif "mlot_subregion_int" in obs.columns:
-                occurrence_subregion_ids = np.asarray(obs["mlot_subregion_int"], dtype=np.int32)
+                occurrence_subregion_ids = np.asarray(
+                    obs["mlot_subregion_int"], dtype=np.int32
+                )
                 subregion_id_source = "obs[mlot_subregion_int]"
             else:
                 occurrence_subregion_ids = np.full(latent.shape[0], -1, dtype=np.int32)
@@ -1285,18 +1553,29 @@ def plot_sample_spot_latent_maps(
         mds_status = "not_geometrically_interpretable"
 
     if latent.ndim != 2 or latent.shape[1] < 2:
-        raise ValueError("Spot latent coordinates must have shape (n_observations, >=2).")
+        raise ValueError(
+            "Spot latent coordinates must have shape (n_observations, >=2)."
+        )
     if cluster_ids.shape[0] != latent.shape[0]:
-        raise ValueError("Spot latent cluster labels must have one entry per latent coordinate.")
+        raise ValueError(
+            "Spot latent cluster labels must have one entry per latent coordinate."
+        )
     if occurrence_subregion_ids.shape[0] != latent.shape[0]:
-        raise ValueError("Spot latent subregion labels must have one entry per latent coordinate.")
+        raise ValueError(
+            "Spot latent subregion labels must have one entry per latent coordinate."
+        )
     if occurrence_cell_indices.size and (
-        int(occurrence_cell_indices.min()) < 0 or int(occurrence_cell_indices.max()) >= obs.shape[0]
+        int(occurrence_cell_indices.min()) < 0
+        or int(occurrence_cell_indices.max()) >= obs.shape[0]
     ):
-        raise ValueError("Spot latent cell_indices contain rows outside the H5AD obs table.")
+        raise ValueError(
+            "Spot latent cell_indices contain rows outside the H5AD obs table."
+        )
 
     if sample_obs_key in obs.columns:
-        sample_ids = [str(value) for value in pd.unique(obs[sample_obs_key].astype(str))]
+        sample_ids = [
+            str(value) for value in pd.unique(obs[sample_obs_key].astype(str))
+        ]
         sample_values = obs[sample_obs_key].astype(str).to_numpy()
     else:
         sample_ids = [str(default_sample_id)]
@@ -1311,7 +1590,11 @@ def plot_sample_spot_latent_maps(
         metadata_x_key=str(metadata_x_key) if metadata_x_key is not None else None,
         metadata_y_key=str(metadata_y_key) if metadata_y_key is not None else None,
     )
-    resolved_scale = float(spatial_scale) if spatial_scale is not None else float(metadata.get("spatial_scale", 1.0))
+    resolved_scale = (
+        float(spatial_scale)
+        if spatial_scale is not None
+        else float(metadata.get("spatial_scale", 1.0))
+    )
 
     coords_um = np.stack(
         [
@@ -1326,29 +1609,44 @@ def plot_sample_spot_latent_maps(
     finite_latent = np.all(np.isfinite(display_latent), axis=1)
     valid_cluster = cluster_ids >= 0
     if occurrence_weights.shape[0] != latent.shape[0]:
-        raise ValueError("Spot latent weights must have one entry per latent coordinate.")
+        raise ValueError(
+            "Spot latent weights must have one entry per latent coordinate."
+        )
     rng = np.random.default_rng(int(random_state))
     cluster_display_anchors = _cluster_mean_latent_anchors(display_latent, cluster_ids)
-    display_latent_limits = _latent_color_limits(display_latent[finite_latent & valid_cluster])
-    within_niche_color_limits = _latent_color_limits_by_cluster(display_latent, cluster_ids)
-    key_latent_3d, key_cluster_display_anchors, key_latent_limits, global_latent_key_mode = (
-        _spot_latent_key_coordinates_3d(
-            display_latent,
-            cluster_ids,
-            within_coords=latent_within_coords,
-            cluster_anchor_distance=cluster_anchor_distance_matrix,
-            cluster_anchors=cluster_anchor_coords,
-        )
+    display_latent_limits = _latent_color_limits(
+        display_latent[finite_latent & valid_cluster]
     )
-    max_key_points = max(0, int(os.environ.get("SPATIAL_OT_SPOT_LATENT_KEY_MAX_POINTS", "30000")))
-    color_scale_mode = os.environ.get("SPATIAL_OT_SPOT_LATENT_COLOR_SCALE", "global").strip().lower()
+    within_niche_color_limits = _latent_color_limits_by_cluster(
+        display_latent, cluster_ids
+    )
+    (
+        key_latent_3d,
+        key_cluster_display_anchors,
+        key_latent_limits,
+        global_latent_key_mode,
+    ) = _spot_latent_key_coordinates_3d(
+        display_latent,
+        cluster_ids,
+        within_coords=latent_within_coords,
+        cluster_anchor_distance=cluster_anchor_distance_matrix,
+        cluster_anchors=cluster_anchor_coords,
+    )
+    max_key_points = max(
+        0, int(os.environ.get("SPATIAL_OT_SPOT_LATENT_KEY_MAX_POINTS", "30000"))
+    )
+    color_scale_mode = (
+        os.environ.get("SPATIAL_OT_SPOT_LATENT_COLOR_SCALE", "global").strip().lower()
+    )
     if color_scale_mode not in {"global", "within_cluster"}:
         color_scale_mode = "global"
 
     plots: list[dict[str, object]] = []
     for sample_id in sample_ids:
         sample_cell_mask = sample_values == sample_id
-        sample_occurrence_mask = (occurrence_sample_values == sample_id) & finite_latent & valid_cluster
+        sample_occurrence_mask = (
+            (occurrence_sample_values == sample_id) & finite_latent & valid_cluster
+        )
         sample_count = int(np.sum(sample_cell_mask))
         if sample_count == 0 or not np.any(sample_occurrence_mask):
             continue
@@ -1357,9 +1655,13 @@ def plot_sample_spot_latent_maps(
         sample_occurrence_idx = np.flatnonzero(sample_occurrence_mask)
         occurrence_idx = sample_occurrence_idx
         total_occurrences = int(sample_occurrence_idx.size)
-        if max_occurrences_per_cluster > 0 and total_occurrences > int(max_occurrences_per_cluster):
+        if max_occurrences_per_cluster > 0 and total_occurrences > int(
+            max_occurrences_per_cluster
+        ):
             occurrence_idx = np.sort(
-                rng.choice(occurrence_idx, size=int(max_occurrences_per_cluster), replace=False)
+                rng.choice(
+                    occurrence_idx, size=int(max_occurrences_per_cluster), replace=False
+                )
             )
         display_latent_values = display_latent[occurrence_idx]
         local_latent_values = display_latent[occurrence_idx]
@@ -1376,12 +1678,16 @@ def plot_sample_spot_latent_maps(
             colors = _latent_to_rgb(local_latent_values, limits=display_latent_limits)
         boundary_polygons: list[np.ndarray] = []
         boundary_subregion_ids = occurrence_subregion_ids[sample_occurrence_idx]
-        valid_boundary_ids = np.unique(boundary_subregion_ids[boundary_subregion_ids >= 0])
+        valid_boundary_ids = np.unique(
+            boundary_subregion_ids[boundary_subregion_ids >= 0]
+        )
         if valid_boundary_ids.size:
             boundary_coords_um = occurrence_coords[sample_occurrence_idx]
             for subregion_id in valid_boundary_ids.tolist():
                 subregion_mask = boundary_subregion_ids == int(subregion_id)
-                boundary_polygons.extend(_subregion_boundary_polygons(boundary_coords_um[subregion_mask]))
+                boundary_polygons.extend(
+                    _subregion_boundary_polygons(boundary_coords_um[subregion_mask])
+                )
 
         fig = plt.figure(figsize=(12.8, 7.2), constrained_layout=True)
         gridspec = fig.add_gridspec(nrows=1, ncols=2, width_ratios=[4.2, 1.45])
@@ -1419,7 +1725,12 @@ def plot_sample_spot_latent_maps(
 
         source_name: str | list[str] | None = None
         if source_file_obs_key in obs.columns:
-            sources = [str(value) for value in pd.unique(obs.loc[sample_cell_mask, source_file_obs_key].astype(str))]
+            sources = [
+                str(value)
+                for value in pd.unique(
+                    obs.loc[sample_cell_mask, source_file_obs_key].astype(str)
+                )
+            ]
             if len(sources) == 1:
                 source_name = sources[0]
             elif sources:
@@ -1451,7 +1762,9 @@ def plot_sample_spot_latent_maps(
         key_ax = fig.add_subplot(gridspec[0, 1], projection="3d")
         key_plot_idx = np.arange(key_latent_values.shape[0], dtype=np.int64)
         if max_key_points > 0 and key_plot_idx.size > max_key_points:
-            key_plot_idx = np.sort(rng.choice(key_plot_idx, size=max_key_points, replace=False))
+            key_plot_idx = np.sort(
+                rng.choice(key_plot_idx, size=max_key_points, replace=False)
+            )
         key_ax.scatter(
             key_latent_values[key_plot_idx, 0],
             key_latent_values[key_plot_idx, 1],
@@ -1463,14 +1776,22 @@ def plot_sample_spot_latent_maps(
             depthshade=False,
         )
         key_ax.set_title(
-            "pooled latent key (3D)" if latent_source == "subregion_table_embed_preview" else "global latent key (3D)"
+            "pooled latent key (3D)"
+            if latent_source == "subregion_table_embed_preview"
+            else "global latent key (3D)"
         )
         key_ax.set_xlabel("latent 1")
         key_ax.set_ylabel("latent 2")
         key_ax.set_zlabel("latent 3")
-        key_ax.set_xlim(float(key_latent_limits["lower"][0]), float(key_latent_limits["upper"][0]))
-        key_ax.set_ylim(float(key_latent_limits["lower"][1]), float(key_latent_limits["upper"][1]))
-        key_ax.set_zlim(float(key_latent_limits["lower"][2]), float(key_latent_limits["upper"][2]))
+        key_ax.set_xlim(
+            float(key_latent_limits["lower"][0]), float(key_latent_limits["upper"][0])
+        )
+        key_ax.set_ylim(
+            float(key_latent_limits["lower"][1]), float(key_latent_limits["upper"][1])
+        )
+        key_ax.set_zlim(
+            float(key_latent_limits["lower"][2]), float(key_latent_limits["upper"][2])
+        )
         key_ax.view_init(elev=18.0, azim=-58.0)
         try:
             span = np.maximum(
@@ -1482,7 +1803,9 @@ def plot_sample_spot_latent_maps(
         except Exception:
             pass
 
-        present_clusters = np.unique(cluster_ids[occurrence_idx][cluster_ids[occurrence_idx] >= 0])
+        present_clusters = np.unique(
+            cluster_ids[occurrence_idx][cluster_ids[occurrence_idx] >= 0]
+        )
         for cluster_id in present_clusters.tolist():
             anchor = key_cluster_display_anchors.get(int(cluster_id))
             if anchor is None:
@@ -1496,9 +1819,16 @@ def plot_sample_spot_latent_maps(
                 ha="center",
                 va="center",
                 color="black",
-                bbox={"boxstyle": "round,pad=0.12", "facecolor": "white", "edgecolor": "none", "alpha": 0.65},
+                bbox={
+                    "boxstyle": "round,pad=0.12",
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.65,
+                },
             )
-        output_png = output_dir / f"{_safe_filename_component(sample_id)}_spot_latent_field.png"
+        output_png = (
+            output_dir / f"{_safe_filename_component(sample_id)}_spot_latent_field.png"
+        )
         fig.savefig(output_png, dpi=250, bbox_inches="tight")
         plt.close(fig)
         plots.append(
@@ -1546,7 +1876,9 @@ def plot_sample_spot_latent_maps(
         "sample_obs_key": str(sample_obs_key),
         "source_file_obs_key": str(source_file_obs_key),
         "latent_source": latent_source,
-        "spot_latent_npz": str(resolved_spot_latent_npz) if resolved_spot_latent_npz is not None else None,
+        "spot_latent_npz": str(resolved_spot_latent_npz)
+        if resolved_spot_latent_npz is not None
+        else None,
         "subregion_id_source": subregion_id_source,
         "subregion_boundary_overlay": "concave_hull_of_sample_occurrence_subregion_members",
         "latent_obsm_key": str(latent_obsm_key),
@@ -1574,12 +1906,18 @@ def plot_sample_spot_latent_maps(
         "includes_aligned_coordinates_in_chart_features": bool(
             latent_mode_metadata["includes_aligned_coordinates_in_chart_features"]
         ),
-        "uses_forced_cluster_local_radius": bool(latent_mode_metadata["uses_forced_cluster_local_radius"]),
+        "uses_forced_cluster_local_radius": bool(
+            latent_mode_metadata["uses_forced_cluster_local_radius"]
+        ),
         "latent_color_limits": within_niche_color_limits,
         "within_niche_latent_color_limits": within_niche_color_limits,
         "display_latent_limits": display_latent_limits,
-        "cluster_display_anchors": {str(key): value for key, value in cluster_display_anchors.items()},
-        "cluster_display_anchors_3d": {str(key): value for key, value in key_cluster_display_anchors.items()},
+        "cluster_display_anchors": {
+            str(key): value for key, value in cluster_display_anchors.items()
+        },
+        "cluster_display_anchors_3d": {
+            str(key): value for key, value in key_cluster_display_anchors.items()
+        },
         "max_occurrences_per_sample": int(max_occurrences_per_cluster),
         "max_occurrences_per_cluster": int(max_occurrences_per_cluster),
         "plots": plots,
@@ -1608,8 +1946,12 @@ def plot_sample_niche_maps_from_run_dir(
     run_dir = Path(run_dir)
     cells_h5ad = run_dir / "cells_multilevel_ot.h5ad"
     if not cells_h5ad.exists():
-        raise FileNotFoundError(f"Expected multilevel OT cell output under {cells_h5ad}.")
-    resolved_output_dir = Path(output_dir) if output_dir is not None else run_dir / "sample_niche_plots"
+        raise FileNotFoundError(
+            f"Expected multilevel OT cell output under {cells_h5ad}."
+        )
+    resolved_output_dir = (
+        Path(output_dir) if output_dir is not None else run_dir / "sample_niche_plots"
+    )
     return plot_sample_niche_maps(
         cells_h5ad=cells_h5ad,
         output_dir=resolved_output_dir,
@@ -1622,7 +1964,9 @@ def plot_sample_niche_maps_from_run_dir(
         plot_spatial_y_key=plot_spatial_y_key,
         default_sample_id=default_sample_id,
         spatial_scale=spatial_scale,
-        spot_latent_npz=spot_latent_npz if spot_latent_npz is not None else run_dir / "spot_level_latent_multilevel_ot.npz",
+        spot_latent_npz=spot_latent_npz
+        if spot_latent_npz is not None
+        else run_dir / "spot_level_latent_multilevel_ot.npz",
     )
 
 
@@ -1645,9 +1989,19 @@ def plot_sample_spot_latent_maps_from_run_dir(
     run_dir = Path(run_dir)
     cells_h5ad = run_dir / "cells_multilevel_ot.h5ad"
     if not cells_h5ad.exists():
-        raise FileNotFoundError(f"Expected multilevel OT cell output under {cells_h5ad}.")
-    resolved_output_dir = Path(output_dir) if output_dir is not None else run_dir / "sample_spot_latent_plots"
-    resolved_spot_latent_npz = Path(spot_latent_npz) if spot_latent_npz is not None else run_dir / "spot_level_latent_multilevel_ot.npz"
+        raise FileNotFoundError(
+            f"Expected multilevel OT cell output under {cells_h5ad}."
+        )
+    resolved_output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else run_dir / "sample_spot_latent_plots"
+    )
+    resolved_spot_latent_npz = (
+        Path(spot_latent_npz)
+        if spot_latent_npz is not None
+        else run_dir / "spot_level_latent_multilevel_ot.npz"
+    )
     return plot_sample_spot_latent_maps(
         cells_h5ad=cells_h5ad,
         output_dir=resolved_output_dir,
@@ -1682,8 +2036,12 @@ def plot_sample_spatial_maps_from_run_dir(
     run_dir = Path(run_dir)
     cells_h5ad = run_dir / "cells_multilevel_ot.h5ad"
     if not cells_h5ad.exists():
-        raise FileNotFoundError(f"Expected multilevel OT cell output under {cells_h5ad}.")
-    resolved_output_dir = Path(output_dir) if output_dir is not None else run_dir / "sample_spatial_maps"
+        raise FileNotFoundError(
+            f"Expected multilevel OT cell output under {cells_h5ad}."
+        )
+    resolved_output_dir = (
+        Path(output_dir) if output_dir is not None else run_dir / "sample_spatial_maps"
+    )
     return plot_sample_spatial_maps(
         cells_h5ad=cells_h5ad,
         output_dir=resolved_output_dir,

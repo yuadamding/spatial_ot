@@ -73,5 +73,7 @@ def edge_contrastive_loss(
     z_norm = F.normalize(z, dim=-1)
     pos = torch.sum(z_norm[src] * z_norm[dst], dim=-1) / max(float(temperature), 1e-6)
     neg_dst = torch.randint(0, z.shape[0], size=(src.numel(),), device=z.device)
-    neg = torch.sum(z_norm[src] * z_norm[neg_dst], dim=-1) / max(float(temperature), 1e-6)
+    neg = torch.sum(z_norm[src] * z_norm[neg_dst], dim=-1) / max(
+        float(temperature), 1e-6
+    )
     return F.softplus(neg - pos).mean()

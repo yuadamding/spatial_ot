@@ -83,24 +83,38 @@ def _x_feature_request() -> dict[str, int | float]:
     }
 
 
-def default_precomputed_x_feature_key(*, requested_components: int | None = None) -> str:
-    components = int(requested_components) if requested_components is not None else int(_x_feature_request()["svd_components_requested"])
+def default_precomputed_x_feature_key(
+    *, requested_components: int | None = None
+) -> str:
+    components = (
+        int(requested_components)
+        if requested_components is not None
+        else int(_x_feature_request()["svd_components_requested"])
+    )
     return f"{PREPARED_X_FEATURE_KEY_PREFIX}_{components}"
 
 
-def _feature_space_kind(*, feature_key: str, input_mode: str, preprocessing: str, warning: str | None) -> str:
+def _feature_space_kind(
+    *, feature_key: str, input_mode: str, preprocessing: str, warning: str | None
+) -> str:
     if warning == "umap_exploratory":
         return "umap_embedding"
     if warning == "visualization_embedding_like":
         return "visualization_like_embedding"
     if input_mode == "X":
-        return "full_gene_runtime_svd" if "truncated_svd" in preprocessing else "full_gene_dense"
+        return (
+            "full_gene_runtime_svd"
+            if "truncated_svd" in preprocessing
+            else "full_gene_dense"
+        )
     return "obsm"
 
 
 def _resolve_x_features(adata: ad.AnnData) -> tuple[np.ndarray, dict]:
     if adata.X is None or int(adata.n_vars) <= 0:
-        raise ValueError("Feature key 'X' was requested, but the input H5AD does not contain a usable gene matrix.")
+        raise ValueError(
+            "Feature key 'X' was requested, but the input H5AD does not contain a usable gene matrix."
+        )
 
     request = _x_feature_request()
     target_sum = float(request["target_sum"])
@@ -123,7 +137,9 @@ def _resolve_x_features(adata: ad.AnnData) -> tuple[np.ndarray, dict]:
             random_state=randomized_svd_seed,
         )
         features = svd.fit_transform(normalized).astype(np.float32, copy=False)
-        explained = float(np.sum(np.asarray(svd.explained_variance_ratio_, dtype=np.float64)))
+        explained = float(
+            np.sum(np.asarray(svd.explained_variance_ratio_, dtype=np.float64))
+        )
         preprocessing = "library_size_normalize_log1p_truncated_svd"
     else:
         features = _dense_float32(normalized)
@@ -137,7 +153,9 @@ def _resolve_x_features(adata: ad.AnnData) -> tuple[np.ndarray, dict]:
         "feature_dim": int(features.shape[1]),
         "target_sum": float(target_sum),
         "svd_components_requested": int(requested_components),
-        "svd_components_used": int(svd_components_used) if svd_components_used is not None else None,
+        "svd_components_used": int(svd_components_used)
+        if svd_components_used is not None
+        else None,
         "svd_random_state": int(randomized_svd_seed),
         "svd_n_iter": int(randomized_svd_iters),
         "svd_explained_variance_ratio_sum": explained,
@@ -160,25 +178,37 @@ def prepare_h5ad_feature_cache(
     overwrite: bool = False,
 ) -> dict:
     if feature_obsm_key != FULL_GENE_FEATURE_KEY:
-        raise NotImplementedError("prepare_h5ad_feature_cache currently supports only feature_obsm_key='X'.")
+        raise NotImplementedError(
+            "prepare_h5ad_feature_cache currently supports only feature_obsm_key='X'."
+        )
 
     input_path = Path(input_h5ad)
     output_path = Path(output_h5ad) if output_h5ad is not None else input_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     request = _x_feature_request()
-    prepared_key = str(output_obsm_key or default_precomputed_x_feature_key(requested_components=int(request["svd_components_requested"])))
+    prepared_key = str(
+        output_obsm_key
+        or default_precomputed_x_feature_key(
+            requested_components=int(request["svd_components_requested"])
+        )
+    )
 
     adata = ad.read_h5ad(input_path)
     prepared_uns = dict(adata.uns.get(PREPARED_FEATURES_UNS_KEY, {}))
-    existing_metadata = dict(prepared_uns.get(prepared_key, {})) if prepared_key in prepared_uns else {}
+    existing_metadata = (
+        dict(prepared_uns.get(prepared_key, {})) if prepared_key in prepared_uns else {}
+    )
     reusable = (
         not bool(overwrite)
         and prepared_key in adata.obsm
-        and int(existing_metadata.get("svd_components_requested", -1)) == int(request["svd_components_requested"])
-        and int(existing_metadata.get("svd_random_state", -1)) == int(request["svd_random_state"])
+        and int(existing_metadata.get("svd_components_requested", -1))
+        == int(request["svd_components_requested"])
+        and int(existing_metadata.get("svd_random_state", -1))
+        == int(request["svd_random_state"])
         and int(existing_metadata.get("svd_n_iter", -1)) == int(request["svd_n_iter"])
-        and float(existing_metadata.get("target_sum", float("nan"))) == float(request["target_sum"])
+        and float(existing_metadata.get("target_sum", float("nan")))
+        == float(request["target_sum"])
         and str(existing_metadata.get("input_feature_key", "")) == FULL_GENE_FEATURE_KEY
     )
 
@@ -188,15 +218,33 @@ def prepare_h5ad_feature_cache(
             "feature_key": prepared_key,
             "requested_feature_key": FULL_GENE_FEATURE_KEY,
             "input_mode": "obsm",
-            "preprocessing": str(existing_metadata.get("preprocessing", "library_size_normalize_log1p_truncated_svd")),
+            "preprocessing": str(
+                existing_metadata.get(
+                    "preprocessing", "library_size_normalize_log1p_truncated_svd"
+                )
+            ),
             "source_feature_dim": int(adata.n_vars),
             "feature_dim": int(features.shape[1]),
-            "target_sum": float(existing_metadata.get("target_sum", request["target_sum"])),
-            "svd_components_requested": int(existing_metadata.get("svd_components_requested", request["svd_components_requested"])),
-            "svd_components_used": int(existing_metadata.get("svd_components_used", features.shape[1])),
-            "svd_random_state": int(existing_metadata.get("svd_random_state", request["svd_random_state"])),
-            "svd_n_iter": int(existing_metadata.get("svd_n_iter", request["svd_n_iter"])),
-            "svd_explained_variance_ratio_sum": existing_metadata.get("svd_explained_variance_ratio_sum"),
+            "target_sum": float(
+                existing_metadata.get("target_sum", request["target_sum"])
+            ),
+            "svd_components_requested": int(
+                existing_metadata.get(
+                    "svd_components_requested", request["svd_components_requested"]
+                )
+            ),
+            "svd_components_used": int(
+                existing_metadata.get("svd_components_used", features.shape[1])
+            ),
+            "svd_random_state": int(
+                existing_metadata.get("svd_random_state", request["svd_random_state"])
+            ),
+            "svd_n_iter": int(
+                existing_metadata.get("svd_n_iter", request["svd_n_iter"])
+            ),
+            "svd_explained_variance_ratio_sum": existing_metadata.get(
+                "svd_explained_variance_ratio_sum"
+            ),
             "feature_embedding_warning": None,
             "feature_space_kind": "prepared_full_gene_svd",
         }
@@ -222,10 +270,14 @@ def prepare_h5ad_feature_cache(
         "feature_dim": int(feature_source["feature_dim"]),
         "target_sum": float(feature_source["target_sum"]),
         "svd_components_requested": int(feature_source["svd_components_requested"]),
-        "svd_components_used": int(feature_source["svd_components_used"]) if feature_source["svd_components_used"] is not None else None,
+        "svd_components_used": int(feature_source["svd_components_used"])
+        if feature_source["svd_components_used"] is not None
+        else None,
         "svd_random_state": int(feature_source["svd_random_state"]),
         "svd_n_iter": int(feature_source["svd_n_iter"]),
-        "svd_explained_variance_ratio_sum": feature_source["svd_explained_variance_ratio_sum"],
+        "svd_explained_variance_ratio_sum": feature_source[
+            "svd_explained_variance_ratio_sum"
+        ],
     }
     adata.uns[PREPARED_FEATURES_UNS_KEY] = prepared_uns
     if output_path == input_path:
@@ -289,9 +341,9 @@ def resolve_h5ad_features(
         feature_embedding_warning = "umap_exploratory"
 
     features = np.asarray(adata.obsm[feature_obsm_key], dtype=np.float32)
-    if (
-        feature_embedding_warning is None
-        and any(token in feature_obsm_key.lower() for token in _VISUALIZATION_LIKE_FEATURE_TOKENS)
+    if feature_embedding_warning is None and any(
+        token in feature_obsm_key.lower()
+        for token in _VISUALIZATION_LIKE_FEATURE_TOKENS
     ):
         warnings.warn(
             "Using a visualization-like embedding as the OT feature space. "
