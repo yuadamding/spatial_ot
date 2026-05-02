@@ -156,6 +156,7 @@ class DeepFeatureConfig:
     variance_weight: float = 0.1
     decorrelation_weight: float = 0.01
     independence_weight: float = 0.1
+    gradient_clip_norm: float | None = None
     output_embedding: str | None = None
     allow_joint_ot_embedding: bool = False
     early_stopping_patience: int = 10
@@ -163,6 +164,10 @@ class DeepFeatureConfig:
     restore_best: bool = True
     save_model: bool = True
     pretrained_model: str | None = None
+    checkpoint_dir: str | None = None
+    checkpoint_every_epochs: int = 5
+    resume_checkpoint: str | None = None
+    resume_reset_optimizer_lr: bool = False
     output_obsm_key: str = "X_spatial_ot_deep"
 
 
@@ -672,6 +677,11 @@ def _validate_multilevel_experiment(
     ]:
         if getattr(config.deep, name) < 0:
             raise ValueError(f"deep.{name} must be >= 0")
+    if (
+        config.deep.gradient_clip_norm is not None
+        and config.deep.gradient_clip_norm < 0
+    ):
+        raise ValueError("deep.gradient_clip_norm must be >= 0 when set")
     valid_outputs = {"intrinsic", "context", "joint"}
     if config.deep.method != "none" and config.deep.output_embedding is None:
         raise ValueError(
@@ -688,6 +698,8 @@ def _validate_multilevel_experiment(
         raise ValueError("deep.early_stopping_patience must be at least 1")
     if config.deep.min_delta < 0:
         raise ValueError("deep.min_delta must be >= 0")
+    if config.deep.checkpoint_every_epochs < 0:
+        raise ValueError("deep.checkpoint_every_epochs must be >= 0")
     if config.deep.pretrained_model and config.deep.method == "none":
         raise ValueError(
             "deep.pretrained_model requires deep.method to be an active encoder method"

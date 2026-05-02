@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import sys
@@ -65,6 +66,14 @@ _SHELL_DEFAULT_CHECKS: tuple[tuple[str, str, str], ...] = (
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _relative_display_path(path: Path, *, base: Path) -> str:
+    try:
+        relative = path.resolve().relative_to(base.resolve())
+        return "." if str(relative) == "." else str(relative)
+    except ValueError:
+        return os.path.relpath(path.resolve(), start=base.resolve())
 
 
 def _read(path: Path) -> str:
@@ -193,15 +202,21 @@ def run_doctor(*, verbose: bool = True) -> dict[str, object]:
         "python_version": sys.version.split()[0],
         "platform": platform.platform(),
         "torch": _torch_info(),
-        "repo_root": str(repo_root),
+        "repo_root": _relative_display_path(repo_root, base=repo_root),
         "spatial_ot_input_dir": {
-            "path": str(input_dir),
+            "path": _relative_display_path(input_dir, base=repo_root),
             "exists": input_dir.exists(),
             "h5ad_count": len(input_files),
             "h5ad_files": input_files[:20],
         },
-        "outputs_dir": {"path": str(outputs_dir), "exists": outputs_dir.exists()},
-        "venv_dir": {"path": str(venv_dir), "exists": venv_dir.exists()},
+        "outputs_dir": {
+            "path": _relative_display_path(outputs_dir, base=repo_root),
+            "exists": outputs_dir.exists(),
+        },
+        "venv_dir": {
+            "path": _relative_display_path(venv_dir, base=repo_root),
+            "exists": venv_dir.exists(),
+        },
         "shell_defaults_vs_config": {
             "checked": [env for env, *_ in _SHELL_DEFAULT_CHECKS],
             "mismatches": mismatches,

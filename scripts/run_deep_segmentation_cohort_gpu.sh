@@ -7,7 +7,7 @@ cd "$REPO_DIR"
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 
-export OUTPUT_DIR="${OUTPUT_DIR:-../outputs/spatial_ot/cohort_multilevel_ot_joint_refinement_vram9_${RUN_STAMP}}"
+export OUTPUT_DIR="${OUTPUT_DIR:-../outputs/spatial_ot/visium_hd_cohort_multilevel_ot_joint_refinement_vram70_${RUN_STAMP}}"
 export COMPUTE_DEVICE="${COMPUTE_DEVICE:-cuda}"
 export AUTO_N_CLUSTERS="${AUTO_N_CLUSTERS:-1}"
 export CANDIDATE_N_CLUSTERS="${CANDIDATE_N_CLUSTERS:-15-25}"
@@ -35,20 +35,15 @@ export JOINT_REFINEMENT_ACCEPTANCE_MARGIN="${JOINT_REFINEMENT_ACCEPTANCE_MARGIN:
 export DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"
 export DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-context}"
 export DEEP_OUTPUT_OBSM_KEY="${DEEP_OUTPUT_OBSM_KEY:-X_spatial_ot_deep_context_autoencoder}"
-export DEEP_DEVICE="${DEEP_DEVICE:-cuda}"
-export DEEP_LATENT_DIM="${DEEP_LATENT_DIM:-64}"
-export DEEP_HIDDEN_DIM="${DEEP_HIDDEN_DIM:-1024}"
-export DEEP_LAYERS="${DEEP_LAYERS:-3}"
 export DEEP_NEIGHBOR_K="${DEEP_NEIGHBOR_K:-8}"
-export DEEP_EPOCHS="${DEEP_EPOCHS:-8}"
-export DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-81920}"
-export DEEP_VALIDATION="${DEEP_VALIDATION:-none}"
 export DEEP_VALIDATION_CONTEXT_MODE="${DEEP_VALIDATION_CONTEXT_MODE:-inductive}"
-export DEEP_SAVE_MODEL="${DEEP_SAVE_MODEL:-1}"
-export CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-9}"
-export CUDA_MAX_TARGET_FRACTION="${CUDA_MAX_TARGET_FRACTION:-0.9}"
-export SPATIAL_OT_CUDA_TARGET_VRAM_GB="${SPATIAL_OT_CUDA_TARGET_VRAM_GB:-$CUDA_TARGET_VRAM_GB}"
-export SPATIAL_OT_CUDA_MAX_TARGET_FRACTION="${SPATIAL_OT_CUDA_MAX_TARGET_FRACTION:-$CUDA_MAX_TARGET_FRACTION}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+# shellcheck source=scripts/_high_vram_deep_profile.sh
+source "$SCRIPT_DIR/_high_vram_deep_profile.sh"
+
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  env | sort | grep -E '^(INPUT_H5AD|OUTPUT_DIR|FEATURE_OBSM_KEY|SUBREGION_CONSTRUCTION_METHOD|DEEP_[A-Z0-9_]*|CUDA_[A-Z0-9_]*|SPATIAL_OT_CUDA_[A-Z0-9_]*|CPU_THREADS|TORCH_[A-Z0-9_]*|PYTORCH_[A-Z0-9_]*|OMP_NUM_THREADS|MKL_NUM_THREADS|OPENBLAS_NUM_THREADS)='
+  exit 0
+fi
 
 exec bash "$SCRIPT_DIR/run_prepared_cohort_gpu.sh"

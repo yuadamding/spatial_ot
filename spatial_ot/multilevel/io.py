@@ -1887,6 +1887,12 @@ def run_multilevel_ot_on_h5ad(
         config_path.write_text(json.dumps(asdict(active_deep_config), indent=2))
         deep_outputs["deep_feature_history"] = str(history_path)
         deep_outputs["deep_feature_config"] = str(config_path)
+        if active_deep_config.checkpoint_dir is not None:
+            checkpoint_dir = Path(active_deep_config.checkpoint_dir)
+            deep_outputs["deep_feature_checkpoint_dir"] = str(checkpoint_dir)
+            latest_checkpoint = checkpoint_dir / "latest.pt"
+            if latest_checkpoint.exists():
+                deep_outputs["deep_feature_latest_checkpoint"] = str(latest_checkpoint)
         if model_path is not None:
             deep_outputs["deep_feature_model"] = str(model_path)
             meta_path = Path(model_path).with_suffix(

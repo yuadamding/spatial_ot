@@ -102,15 +102,24 @@ class MLPAutoencoder(nn.Module):
             return context
         return joint
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        reconstruct: bool = True,
+        predict_context: bool = True,
+    ) -> dict[str, torch.Tensor]:
         intrinsic, context, joint = self._encode_all(x)
-        return {
+        outputs = {
             "intrinsic": intrinsic,
             "context": context,
             "joint": joint,
-            "recon": self.decoder(intrinsic),
-            "context_pred": self.context_predictor(context),
         }
+        if reconstruct:
+            outputs["recon"] = self.decoder(intrinsic)
+        if predict_context:
+            outputs["context_pred"] = self.context_predictor(context)
+        return outputs
 
     def decode_counts(
         self,

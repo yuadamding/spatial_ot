@@ -50,7 +50,7 @@ def env_float(name: str, default: float) -> float:
 
 
 def cuda_target_vram_gb() -> float:
-    return env_float("SPATIAL_OT_CUDA_TARGET_VRAM_GB", 50.0)
+    return env_float("SPATIAL_OT_CUDA_TARGET_VRAM_GB", 70.0)
 
 
 def cuda_target_bytes(device: torch.device | None = None) -> int:

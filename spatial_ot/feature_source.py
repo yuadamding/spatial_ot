@@ -44,6 +44,18 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
 def _normalize_counts_log1p(matrix, *, target_sum: float):
     if sparse.issparse(matrix):
         x = matrix.tocsr(copy=True).astype(np.float32)
@@ -70,13 +82,15 @@ def _dense_float32(matrix) -> np.ndarray:
     return np.asarray(matrix, dtype=np.float32)
 
 
-def _x_feature_request() -> dict[str, int | float]:
+def _x_feature_request() -> dict[str, int | float | bool]:
     target_sum = _env_float("SPATIAL_OT_X_TARGET_SUM", 10000.0)
+    use_svd = _env_bool("SPATIAL_OT_X_USE_SVD", True)
     requested_components = max(_env_int("SPATIAL_OT_X_SVD_COMPONENTS", 256), 2)
     randomized_svd_iters = max(_env_int("SPATIAL_OT_X_SVD_N_ITER", 7), 1)
     randomized_svd_seed = _env_int("SPATIAL_OT_X_SVD_RANDOM_STATE", 1337)
     return {
         "target_sum": float(target_sum),
+        "use_svd": bool(use_svd),
         "svd_components_requested": int(requested_components),
         "svd_n_iter": int(randomized_svd_iters),
         "svd_random_state": int(randomized_svd_seed),
@@ -118,6 +132,7 @@ def _resolve_x_features(adata: ad.AnnData) -> tuple[np.ndarray, dict]:
 
     request = _x_feature_request()
     target_sum = float(request["target_sum"])
+    use_svd = bool(request["use_svd"])
     requested_components = int(request["svd_components_requested"])
     randomized_svd_iters = int(request["svd_n_iter"])
     randomized_svd_seed = int(request["svd_random_state"])
@@ -128,7 +143,7 @@ def _resolve_x_features(adata: ad.AnnData) -> tuple[np.ndarray, dict]:
     preprocessing = "library_size_normalize_log1p"
     svd_components_used = None
 
-    if max_components >= 2:
+    if use_svd and max_components >= 2:
         svd_components_used = int(min(requested_components, max_components))
         svd = TruncatedSVD(
             n_components=svd_components_used,

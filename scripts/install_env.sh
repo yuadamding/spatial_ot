@@ -10,6 +10,27 @@ VENV_DIR="${VENV_DIR:-../.venv}"
 EXTRAS="${EXTRAS:-dev,viz}"
 MIN_PYTHON_MINOR="${MIN_PYTHON_MINOR:-10}"
 
+default_cpu_threads() {
+  if command -v getconf >/dev/null 2>&1; then
+    getconf _NPROCESSORS_ONLN 2>/dev/null && return
+  fi
+  if command -v nproc >/dev/null 2>&1; then
+    nproc 2>/dev/null && return
+  fi
+  echo 1
+}
+
+CPU_THREADS="${CPU_THREADS:-$(default_cpu_threads)}"
+export CPU_THREADS
+export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$CPU_THREADS}"
+export MAKEFLAGS="${MAKEFLAGS:--j${CPU_THREADS}}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPU_THREADS}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CPU_THREADS}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$CPU_THREADS}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-$CPU_THREADS}"
+export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-$CPU_THREADS}"
+export BLIS_NUM_THREADS="${BLIS_NUM_THREADS:-$CPU_THREADS}"
+
 python_is_compatible() {
   local candidate="$1"
   "$candidate" - "$MIN_PYTHON_MINOR" <<'PY'
@@ -101,4 +122,5 @@ fi
 echo "Installed spatial_ot into virtual environment '$VENV_DIR'."
 echo "Python executable: $VENV_PYTHON"
 echo "Python interpreter: $("$VENV_PYTHON" -c 'import sys; print(sys.version.split()[0])')"
+echo "CPU build/runtime threads: $CPU_THREADS"
 echo "Activate it with: source ${VENV_DIR}/bin/activate"

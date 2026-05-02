@@ -18,6 +18,10 @@ def test_run_doctor_reports_no_shell_default_drift() -> None:
         "shell_defaults_vs_config"
     ]["mismatches"]
     assert report["status"] == "ok"
+    assert report["repo_root"] == "."
+    assert report["spatial_ot_input_dir"]["path"] == "../spatial_ot_input"
+    assert report["outputs_dir"]["path"] == "../outputs"
+    assert report["venv_dir"]["path"] == "../.venv"
     assert "multilevel_ot_config_defaults" in report
     assert "deep_feature_config_defaults" in report
     assert report["multilevel_ot_config_defaults"]["basic_niche_size_um"] == 50.0
@@ -62,6 +66,8 @@ def test_doctor_cli_exits_zero_on_clean_tree(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
     assert payload["status"] == "ok"
+    assert "/storage/" not in completed.stdout
+    assert payload["spatial_ot_input_dir"]["path"] == "../spatial_ot_input"
     assert payload["shell_defaults_vs_config"]["mismatches"] == []
 
 

@@ -57,6 +57,137 @@ def test_deep_feature_encoder_fit_save_load(tmp_path) -> None:
     assert np.allclose(embedding, loaded_embedding, atol=1e-5)
 
 
+def test_deep_feature_encoder_logs_epoch_records(monkeypatch, capsys) -> None:
+    rng = np.random.default_rng(124)
+    features = rng.normal(size=(36, 6)).astype(np.float32)
+    coords = rng.normal(size=(36, 2)).astype(np.float32)
+    monkeypatch.setenv("SPATIAL_OT_PROGRESS", "1")
+
+    fit_deep_features(
+        features=features,
+        coords_um=coords,
+        config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=3,
+            hidden_dim=12,
+            layers=1,
+            neighbor_k=3,
+            epochs=2,
+            batch_size=12,
+            validation="none",
+            output_embedding="intrinsic",
+            save_model=False,
+        ),
+        seed=8,
+    )
+
+    stderr = capsys.readouterr().err
+    epoch_lines = [line for line in stderr.splitlines() if "epoch_record" in line]
+    assert len(epoch_lines) == 2
+    assert '"epoch": 1' in epoch_lines[0]
+    assert '"epoch": 2' in epoch_lines[1]
+    assert '"train_loss":' in epoch_lines[0]
+    first_record = json.loads(epoch_lines[0].split("epoch_record ", 1)[1])
+    assert first_record["input_dim"] == 6
+    assert first_record["latent_dim"] == 3
+    assert first_record["train_batches"] == 3
+    assert first_record["train_batch_size_max"] == 12
+    assert "train_recon_loss" in first_record
+    assert "train_variance_loss" in first_record
+    assert "epoch_duration_sec" in first_record
+    assert "train_samples_per_sec" in first_record
+    assert first_record["model_parameters"] > 0
+
+
+def test_deep_feature_encoder_checkpoint_resume(tmp_path) -> None:
+    rng = np.random.default_rng(125)
+    features = rng.normal(size=(40, 6)).astype(np.float32)
+    coords = rng.normal(size=(40, 2)).astype(np.float32)
+    checkpoint_dir = tmp_path / "deep_checkpoints"
+
+    first = fit_deep_features(
+        features=features,
+        coords_um=coords,
+        config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=3,
+            hidden_dim=12,
+            layers=1,
+            neighbor_k=3,
+            epochs=2,
+            batch_size=10,
+            validation="none",
+            output_embedding="intrinsic",
+            save_model=False,
+            checkpoint_dir=str(checkpoint_dir),
+            checkpoint_every_epochs=1,
+        ),
+        seed=9,
+    )
+
+    latest = checkpoint_dir / "latest.pt"
+    assert latest.exists()
+    assert (checkpoint_dir / "deep_feature_epoch_0002.pt").exists()
+    assert len(first.history) == 2
+
+    resumed = fit_deep_features(
+        features=features,
+        coords_um=coords,
+        config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=3,
+            hidden_dim=12,
+            layers=1,
+            neighbor_k=3,
+            epochs=4,
+            batch_size=10,
+            validation="none",
+            output_embedding="intrinsic",
+            save_model=False,
+            checkpoint_dir=str(checkpoint_dir),
+            checkpoint_every_epochs=1,
+            resume_checkpoint=str(latest),
+        ),
+        seed=9,
+    )
+
+    assert len(resumed.history) == 4
+    assert resumed.history[0]["epoch"] == 1.0
+    assert resumed.history[-1]["epoch"] == 4.0
+    assert (checkpoint_dir / "deep_feature_epoch_0004.pt").exists()
+    assert resumed.embedding.shape == (40, 3)
+
+
+def test_deep_feature_encoder_default_checkpoint_interval_is_five(tmp_path) -> None:
+    rng = np.random.default_rng(126)
+    features = rng.normal(size=(30, 5)).astype(np.float32)
+    coords = rng.normal(size=(30, 2)).astype(np.float32)
+    checkpoint_dir = tmp_path / "deep_checkpoints"
+
+    fit_deep_features(
+        features=features,
+        coords_um=coords,
+        config=DeepFeatureConfig(
+            method="autoencoder",
+            latent_dim=3,
+            hidden_dim=10,
+            layers=1,
+            neighbor_k=3,
+            epochs=5,
+            batch_size=10,
+            validation="none",
+            output_embedding="intrinsic",
+            save_model=False,
+            checkpoint_dir=str(checkpoint_dir),
+        ),
+        seed=10,
+    )
+
+    assert not (checkpoint_dir / "deep_feature_epoch_0001.pt").exists()
+    assert (checkpoint_dir / "deep_feature_epoch_0005.pt").exists()
+    assert (checkpoint_dir / "latest.pt").exists()
+
+
 def test_graph_autoencoder_fit_limit_checks_total_cells_before_training() -> None:
     rng = np.random.default_rng(321)
     features = rng.normal(size=(40, 4)).astype(np.float32)
@@ -2041,6 +2172,64 @@ def test_run_multilevel_ot_on_h5ad_accepts_full_gene_x(tmp_path, monkeypatch) ->
     assert summary["feature_dim"] == 3
     saved_summary = json.loads((output_dir / "summary.json").read_text())
     assert saved_summary["feature_source"]["svd_components_used"] == 3
+
+
+def test_run_multilevel_ot_on_h5ad_can_disable_runtime_x_svd(
+    tmp_path, monkeypatch
+) -> None:
+    rng = np.random.default_rng(2027)
+    coords_a = rng.normal(loc=[0.0, 0.0], scale=0.4, size=(16, 2))
+    coords_b = rng.normal(loc=[7.0, 7.0], scale=0.4, size=(16, 2))
+    coords = np.vstack([coords_a, coords_b]).astype(np.float32)
+    counts_a = rng.poisson(lam=[8, 1, 0, 0, 2, 1], size=(16, 6)).astype(np.float32)
+    counts_b = rng.poisson(lam=[0, 0, 7, 6, 1, 2], size=(16, 6)).astype(np.float32)
+    counts = np.vstack([counts_a, counts_b]).astype(np.float32)
+
+    adata = ad.AnnData(X=counts.copy())
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    input_h5ad = tmp_path / "full_gene_dense_input.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    monkeypatch.setenv("SPATIAL_OT_X_USE_SVD", "0")
+    output_dir = tmp_path / "full_gene_dense_out"
+    summary = run_multilevel_ot_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=output_dir,
+        feature_obsm_key="X",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        spatial_scale=1.0,
+        n_clusters=2,
+        atoms_per_cluster=2,
+        radius_um=2.0,
+        stride_um=4.0,
+        min_cells=8,
+        max_subregions=8,
+        lambda_x=0.5,
+        lambda_y=1.0,
+        geometry_eps=0.03,
+        ot_eps=0.03,
+        rho=0.5,
+        geometry_samples=32,
+        compressed_support_size=8,
+        align_iters=1,
+        n_init=1,
+        allow_convex_hull_fallback=True,
+        max_iter=2,
+        tol=1e-4,
+        basic_niche_size_um=None,
+        seed=5,
+        compute_device="cpu",
+        deep_config=DeepFeatureConfig(method="none"),
+    )
+
+    assert summary["feature_obsm_key_requested"] == "X"
+    assert summary["feature_input_mode"] == "X"
+    assert summary["feature_source"]["preprocessing"] == "library_size_normalize_log1p"
+    assert summary["feature_source"]["svd_components_used"] is None
+    assert summary["feature_source"]["feature_space_kind"] == "full_gene_dense"
+    assert summary["feature_dim"] == 6
 
 
 def test_autoencoder_latent_diagnostics_show_distinct_branches() -> None:

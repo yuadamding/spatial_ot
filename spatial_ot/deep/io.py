@@ -346,6 +346,12 @@ def fit_deep_features_on_h5ad(
             outputs["deep_feature_model_meta"] = str(meta_path)
         if scaler_path.exists():
             outputs["deep_feature_scaler"] = str(scaler_path)
+    if config.checkpoint_dir is not None:
+        checkpoint_dir = Path(config.checkpoint_dir)
+        outputs["deep_feature_checkpoint_dir"] = str(checkpoint_dir)
+        latest_checkpoint = checkpoint_dir / "latest.pt"
+        if latest_checkpoint.exists():
+            outputs["deep_feature_latest_checkpoint"] = str(latest_checkpoint)
 
     deep_summary = _deep_summary(
         config=config,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import os
 
 import numpy as np
 import torch
@@ -38,3 +39,17 @@ def load_encoder_bundle(
     feature_mean = np.asarray(scaler["feature_mean"], dtype=np.float32)
     feature_std = np.asarray(scaler["feature_std"], dtype=np.float32)
     return state_dict, metadata, feature_mean, feature_std
+
+
+def save_training_checkpoint(path: str | Path, state: dict) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = destination.with_suffix(destination.suffix + ".tmp")
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, destination)
+
+
+def load_training_checkpoint(
+    path: str | Path, *, map_location: str | torch.device = "cpu"
+) -> dict:
+    return torch.load(path, map_location=map_location, weights_only=False)

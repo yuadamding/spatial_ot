@@ -27,11 +27,11 @@ Always write outputs outside the package directory to keep it compact.
 
 ## Environment setup
 
-`scripts/install_env.sh` creates or refreshes `../.venv` (next to `spatial_ot/` and `spatial_ot_input/`) and installs the package editable:
+`scripts/install_spatial_ot.sh` is the short install entrypoint; it delegates to `scripts/install_env.sh`, which creates or refreshes `../.venv` (next to `spatial_ot/` and `spatial_ot_input/`) and installs the package editable with parallel build/runtime thread defaults:
 
 ```bash
 cd spatial_ot
-bash scripts/install_env.sh
+bash scripts/install_spatial_ot.sh
 ```
 
 Override interpreter / venv / extras via env vars:
@@ -83,7 +83,7 @@ For CLI explicit-region runs, pass `--region-geometry-json` with a JSON object c
 ```bash
 cd spatial_ot
 ../.venv/bin/python -m spatial_ot multilevel-ot \
-  --input-h5ad ../spatial_ot_input/spatial_ot_input_pooled.h5ad \
+  --input-h5ad ../spatial_ot_input/visium_hd_spatial_ot_input_pooled.h5ad \
   --output-dir ../outputs/spatial_ot/cohort_multilevel_ot \
   --feature-obsm-key X_spatial_ot_x_svd_512 \
   --spatial-x-key pooled_cell_x --spatial-y-key pooled_cell_y \
@@ -114,7 +114,7 @@ cd spatial_ot
 
 ```bash
 ../.venv/bin/python -m spatial_ot multilevel-ot \
-  --input-h5ad ../spatial_ot_input/spatial_ot_input_pooled.h5ad \
+  --input-h5ad ../spatial_ot_input/visium_hd_spatial_ot_input_pooled.h5ad \
   --output-dir ../outputs/spatial_ot/cohort_multilevel_ot_auto_k \
   --feature-obsm-key X_spatial_ot_x_svd_512 \
   --spatial-x-key pooled_cell_x --spatial-y-key pooled_cell_y \
@@ -199,7 +199,7 @@ For graph-based runs, `spatial_scale` matters: graph radii (`radius_um`, `short_
 
 The fastest repeated GPU path is:
 
-1. pool all samples once into `../spatial_ot_input/spatial_ot_input_pooled.h5ad`
+1. pool all samples once into `../spatial_ot_input/visium_hd_spatial_ot_input_pooled.h5ad`
 2. precompute the CPU-heavy `X → log1p-normalized TruncatedSVD` feature cache once into the pooled H5AD
 3. fit the deep `autoencoder` adapter on that cached cohort matrix and feed the learned `context` embedding into OT
 4. point repeated OT runs at the cached/learned matrices instead of recomputing CPU-heavy preprocessing
@@ -207,7 +207,7 @@ The fastest repeated GPU path is:
 Helper scripts:
 
 ```bash
-bash scripts/pool_spatial_ot_input.sh           # pool only → ../spatial_ot_input/spatial_ot_input_pooled.h5ad
+bash scripts/pool_spatial_ot_input.sh           # pool only → ../spatial_ot_input/visium_hd_spatial_ot_input_pooled.h5ad
 bash scripts/prepare_spatial_ot_input.sh        # pool + precompute X → SVD into the pooled H5AD
 bash scripts/prepare_all_spatial_ot_input.sh    # also verify each sample H5AD has the prepared cache
 WRITE_BACK_TO_SOURCE_INPUTS=1 bash scripts/prepare_all_spatial_ot_input.sh
@@ -215,6 +215,7 @@ WRITE_BACK_TO_SOURCE_INPUTS=1 bash scripts/prepare_all_spatial_ot_input.sh
 bash scripts/prepare_xenium_spatial_ot_input.sh
                                         # pool all processed Xenium samples into one cohort H5AD
 bash scripts/run_prepared_cohort_gpu.sh         # verify the prepared pooled H5AD, then launch the remaining GPU OT run
+bash scripts/run_visium_hd_cohort_gpu.sh        # run the all-Visium HD pooled cohort high-VRAM deep-expression profile
 bash scripts/run_deep_segmentation_cohort_gpu.sh
                                         # run the prepared cohort with autoencoder context features and joint refinement
 bash scripts/run_xenium_cohort_gpu.sh           # run the all-Xenium pooled cohort profile
@@ -224,9 +225,11 @@ Pooled coordinates place each sample on its own non-overlapping tile, so samples
 
 `scripts/run_prepared_cohort_gpu.sh` intentionally disables pooling and feature-cache refresh by default. It only accepts a pooled input that already has `X_spatial_ot_x_svd_512`, then delegates to `scripts/run.sh` with `COMPUTE_DEVICE=cuda` and `AUTO_N_CLUSTERS=1`.
 
-`scripts/run_deep_segmentation_cohort_gpu.sh` is the deep-boundary cohort profile: it trains/uses an autoencoder context embedding, sets `SUBREGION_CONSTRUCTION_METHOD=joint_refinement`, and then delegates to the same prepared-cohort runner. Use this profile for the current deep-learning segmentation plus constrained segmentation-clustering feedback path; use the coordinate-only prepared run as the baseline/ablation.
+`scripts/run_visium_hd_cohort_gpu.sh` and `scripts/run_xenium_cohort_gpu.sh` are separate dataset-specific high-VRAM deep-expression profiles. `scripts/run_deep_segmentation_cohort_gpu.sh` is the Visium HD deep-boundary profile: it trains/uses an autoencoder context embedding, sets `SUBREGION_CONSTRUCTION_METHOD=joint_refinement`, and then delegates to the same prepared-cohort runner. Use these profiles for the current deep-learning segmentation plus constrained segmentation-clustering feedback path; use the coordinate-only prepared run as the baseline/ablation.
 
-`scripts/prepare_xenium_spatial_ot_input.sh` mirrors the Visium HD cohort staging for the processed Xenium files under `../data_review/results`: it matches `xenium_*_processed.h5ad`, strips the `xenium_` prefix and `_processed` suffix, lowercases sample IDs to `p1_crc`/`p2_crc`/`p5_crc`, uses `x_centroid`/`y_centroid`, and writes `../spatial_ot_input/xenium_spatial_ot_input_pooled.h5ad`. `scripts/run_xenium_cohort_gpu.sh` uses that pooled input with `SPATIAL_SCALE=1.0`, reads `FEATURE_OBSM_KEY=X`, keeps up to `X_FEATURE_COMPONENTS=421` expression components from the 422-gene panel, trains an intrinsic autoencoder latent, then feeds `X_spatial_ot_deep_expression_autoencoder` into the multilevel OT fit.
+`../spatial_ot_input/` is the default input address for both source H5ADs and direct pooled H5ADs. The processed Visium HD and Xenium source files are staged there, and the direct-use pooled inputs are `visium_hd_spatial_ot_input_pooled.h5ad` and `xenium_spatial_ot_input_pooled.h5ad`.
+
+`scripts/prepare_xenium_spatial_ot_input.sh` mirrors the Visium HD cohort staging for the processed Xenium files under `../spatial_ot_input`: it matches `xenium_*_processed.h5ad`, strips the `xenium_` prefix and `_processed` suffix, lowercases sample IDs to `p1_crc`/`p2_crc`/`p5_crc`, uses `x_centroid`/`y_centroid`, and writes `../spatial_ot_input/xenium_spatial_ot_input_pooled.h5ad`. `scripts/run_xenium_cohort_gpu.sh` uses that pooled input with `SPATIAL_SCALE=1.0`, reads the prepared full-panel expression cache `X_spatial_ot_x_svd_421`, trains an intrinsic autoencoder latent, then feeds `X_spatial_ot_deep_expression_autoencoder` into the multilevel OT fit.
 
 `obs` columns written by pooling:
 
@@ -249,7 +252,7 @@ REFRESH_POOLED_INPUT=1 bash scripts/run.sh                                      
 REFRESH_PREPARED_FEATURES=1 bash scripts/run.sh                                  # rebuild prepared cache
 ```
 
-`scripts/run.sh` reuses `../spatial_ot_input/spatial_ot_input_pooled.h5ad` and the prepared full-gene cache when present; only recomputes when missing or explicitly refreshed. After OT it writes one spatial niche PNG per sample under `../outputs/spatial_ot/cohort_multilevel_ot/sample_niche_plots/` using each sample's native within-sample coordinates. These niche maps show both fitted mutually exclusive subregion polygons and cell-wise inherited labels with the same cluster colors.
+`scripts/run.sh` reuses `../spatial_ot_input/visium_hd_spatial_ot_input_pooled.h5ad` and the prepared full-gene cache when present; only recomputes when missing or explicitly refreshed. After OT it writes one spatial niche PNG per sample under `../outputs/spatial_ot/cohort_multilevel_ot/sample_niche_plots/` using each sample's native within-sample coordinates. These niche maps show both fitted mutually exclusive subregion polygons and cell-wise inherited labels with the same cluster colors.
 
 Defaults relevant to safety / cost (override with the matching env var):
 
@@ -284,9 +287,9 @@ For multi-GPU restart parallelism in the outer `n_init` loop:
 
 - `SPATIAL_OT_CUDA_DEVICE_LIST=all` (eligible devices)
 - `SPATIAL_OT_PARALLEL_RESTARTS=auto` (spread independent restarts across GPUs when `n_init > 1`)
-- `SPATIAL_OT_CUDA_TARGET_VRAM_GB=50` (per-device working set, capped to `SPATIAL_OT_CUDA_MAX_TARGET_FRACTION`, default `0.9`, of visible memory)
+- `SPATIAL_OT_CUDA_TARGET_VRAM_GB=70` (per-device working set, capped to `SPATIAL_OT_CUDA_MAX_TARGET_FRACTION`, default `0.92` in high-VRAM profiles, of visible memory)
 
-`scripts/run_deep_segmentation_cohort_gpu.sh` is the high-VRAM pooled cohort profile. On the local 10 GB RTX 3080 it defaults to `CUDA_TARGET_VRAM_GB=9`, `DEEP_HIDDEN_DIM=1024`, `DEEP_LAYERS=3`, `DEEP_LATENT_DIM=64`, and `DEEP_BATCH_SIZE=81920`, which reached the 9 GB live-VRAM band on the pooled cohort while leaving enough headroom for backward-pass transients. Each CUDA run writes `runtime_memory_qc` into `summary.json` with the requested target and observed peak reserved memory.
+The high-VRAM profiles source `scripts/_high_vram_deep_profile.sh`, which defaults to `DEEP_TARGET_VRAM_GB=70`, `DEEP_HIDDEN_DIM=8192`, `DEEP_LAYERS=6`, `DEEP_LATENT_DIM=256`, and `DEEP_BATCH_SIZE=131072`. The guard checks visible CUDA memory before launch and fails early on undersized GPUs; set `CHECK_HIGH_VRAM_GPU=0` only for dry-run configuration checks, or lower the deep-model env vars for a smaller GPU. Each CUDA run writes `runtime_memory_qc` into `summary.json` with the requested target and observed peak reserved memory.
 
 When restart workers run in parallel, the Torch/BLAS thread budget is divided across them automatically. The multilevel OT and deep-feature implementations are still single-GPU within any one restart.
 

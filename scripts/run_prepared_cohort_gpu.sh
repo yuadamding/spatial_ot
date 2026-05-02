@@ -18,7 +18,7 @@ default_cpu_threads() {
 VENV_DIR="${VENV_DIR:-../.venv}"
 PYTHON_BIN="${PYTHON_BIN:-${VENV_DIR}/bin/python}"
 INPUT_DIR="${INPUT_DIR:-../spatial_ot_input}"
-POOLED_INPUT_NAME="${POOLED_INPUT_NAME:-spatial_ot_input_pooled.h5ad}"
+POOLED_INPUT_NAME="${POOLED_INPUT_NAME:-visium_hd_spatial_ot_input_pooled.h5ad}"
 X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-512}"
 PREPARED_FEATURE_OBSM_KEY="${PREPARED_FEATURE_OBSM_KEY:-X_spatial_ot_x_svd_${X_FEATURE_COMPONENTS}}"
 INPUT_H5AD="${INPUT_H5AD:-${INPUT_DIR}/${POOLED_INPUT_NAME}}"

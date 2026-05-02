@@ -234,6 +234,12 @@ def _add_deep_args(parser: argparse.ArgumentParser) -> None:
         help="Cross-embedding independence regularization weight for the deep feature adapter.",
     )
     parser.add_argument(
+        "--deep-gradient-clip-norm",
+        type=float,
+        default=None,
+        help="Clip deep-training gradient norm to this value; 0 disables clipping.",
+    )
+    parser.add_argument(
         "--deep-output-embedding",
         default=None,
         choices=["intrinsic", "context", "joint"],
@@ -273,6 +279,28 @@ def _add_deep_args(parser: argparse.ArgumentParser) -> None:
         "--pretrained-deep-model",
         default=None,
         help="Path to a previously saved deep feature model for transform-only runs.",
+    )
+    parser.add_argument(
+        "--deep-checkpoint-dir",
+        default=None,
+        help="Directory for resumable deep-training epoch checkpoints.",
+    )
+    parser.add_argument(
+        "--deep-checkpoint-every-epochs",
+        type=int,
+        default=None,
+        help="Save a deep-training checkpoint every N epochs; 0 disables checkpointing.",
+    )
+    parser.add_argument(
+        "--deep-resume-checkpoint",
+        default=None,
+        help="Resume deep training from a checkpoint file, or use 'auto' for checkpoint_dir/latest.pt.",
+    )
+    parser.add_argument(
+        "--deep-resume-reset-optimizer-lr",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="When resuming deep training, reset optimizer learning rates to --deep-lr.",
     )
     parser.add_argument(
         "--deep-output-obsm-key",
@@ -2194,6 +2222,7 @@ def _resolve_multilevel_config_from_args(
         "deep_variance_weight": "variance_weight",
         "deep_decorrelation_weight": "decorrelation_weight",
         "deep_independence_weight": "independence_weight",
+        "deep_gradient_clip_norm": "gradient_clip_norm",
         "deep_output_embedding": "output_embedding",
         "deep_allow_joint_ot_embedding": "allow_joint_ot_embedding",
         "deep_early_stopping_patience": "early_stopping_patience",
@@ -2201,6 +2230,10 @@ def _resolve_multilevel_config_from_args(
         "deep_restore_best": "restore_best",
         "deep_save_model": "save_model",
         "pretrained_deep_model": "pretrained_model",
+        "deep_checkpoint_dir": "checkpoint_dir",
+        "deep_checkpoint_every_epochs": "checkpoint_every_epochs",
+        "deep_resume_checkpoint": "resume_checkpoint",
+        "deep_resume_reset_optimizer_lr": "resume_reset_optimizer_lr",
         "deep_output_obsm_key": "output_obsm_key",
     }
     for arg_name, cfg_name in deep_mapping.items():
@@ -2254,6 +2287,7 @@ def _resolve_deep_fit_config_from_args(
         "deep_variance_weight": "variance_weight",
         "deep_decorrelation_weight": "decorrelation_weight",
         "deep_independence_weight": "independence_weight",
+        "deep_gradient_clip_norm": "gradient_clip_norm",
         "deep_output_embedding": "output_embedding",
         "deep_allow_joint_ot_embedding": "allow_joint_ot_embedding",
         "deep_early_stopping_patience": "early_stopping_patience",
@@ -2261,6 +2295,10 @@ def _resolve_deep_fit_config_from_args(
         "deep_restore_best": "restore_best",
         "deep_save_model": "save_model",
         "pretrained_deep_model": "pretrained_model",
+        "deep_checkpoint_dir": "checkpoint_dir",
+        "deep_checkpoint_every_epochs": "checkpoint_every_epochs",
+        "deep_resume_checkpoint": "resume_checkpoint",
+        "deep_resume_reset_optimizer_lr": "resume_reset_optimizer_lr",
         "deep_output_obsm_key": "output_obsm_key",
     }
     for arg_name, cfg_name in deep_mapping.items():

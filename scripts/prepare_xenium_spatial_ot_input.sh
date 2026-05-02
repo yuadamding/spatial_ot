@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_DIR"
 
-export INPUT_DIR="${XENIUM_INPUT_DIR:-../data_review/results}"
+export INPUT_DIR="${XENIUM_INPUT_DIR:-../spatial_ot_input}"
 export OUTPUT_H5AD="${XENIUM_OUTPUT_H5AD:-../spatial_ot_input/xenium_spatial_ot_input_pooled.h5ad}"
 export SAMPLE_GLOB="${SAMPLE_GLOB:-xenium_*_processed.h5ad}"
 export SAMPLE_ID_PREFIX="${SAMPLE_ID_PREFIX:-xenium_}"

@@ -62,6 +62,40 @@ def test_package_version_matches_0_2_5_state() -> None:
     assert '__version__ = "0.2.7"' in package_init
 
 
+def test_default_entrypoints_do_not_hardcode_workspace_absolute_paths() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    roots = [
+        repo_root / "scripts",
+        repo_root / "spatial_ot",
+        repo_root / "configs",
+    ]
+    files = [
+        repo_root / "README.md",
+        repo_root / "pyproject.toml",
+    ]
+    for root in roots:
+        files.extend(path for path in root.rglob("*") if path.is_file())
+
+    forbidden_prefixes = (
+        "/storage/",
+        "/home/",
+        "/mnt/",
+        "/scratch/",
+        "/Users/",
+        "file://",
+    )
+    offenders: list[str] = []
+    for path in files:
+        if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+            continue
+        text = path.read_text(errors="ignore")
+        for prefix in forbidden_prefixes:
+            if prefix in text:
+                rel = path.relative_to(repo_root)
+                offenders.append(f"{rel}: contains {prefix}")
+    assert not offenders
+
+
 def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     script_dir = repo_root / "scripts"
@@ -70,6 +104,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
 
     run_sh = (script_dir / "run.sh").read_text()
     install_sh = (script_dir / "install_env.sh").read_text()
+    install_spatial_ot_sh = (script_dir / "install_spatial_ot.sh").read_text()
     pyproject_toml = (repo_root / "pyproject.toml").read_text()
     pool_helper_sh = (script_dir / "pool_spatial_ot_input.sh").read_text()
     prepare_helper_sh = (script_dir / "prepare_spatial_ot_input.sh").read_text()
@@ -80,6 +115,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     ).read_text()
     prepare_xenium_sh = (script_dir / "prepare_xenium_spatial_ot_input.sh").read_text()
     run_xenium_sh = (script_dir / "run_xenium_cohort_gpu.sh").read_text()
+    run_visium_hd_sh = (script_dir / "run_visium_hd_cohort_gpu.sh").read_text()
+    high_vram_profile_sh = (script_dir / "_high_vram_deep_profile.sh").read_text()
     config_toml = (repo_root / "configs" / "multilevel_deep_example.toml").read_text()
 
     assert "../spatial_ot_input" in run_sh
@@ -87,7 +124,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "../.venv" in run_sh
     assert 'REFRESH_POOLED_INPUT="${REFRESH_POOLED_INPUT:-0}"' in run_sh
     assert (
-        'POOLED_INPUT_NAME="${POOLED_INPUT_NAME:-spatial_ot_input_pooled.h5ad}"'
+        'POOLED_INPUT_NAME="${POOLED_INPUT_NAME:-visium_hd_spatial_ot_input_pooled.h5ad}"'
         in run_sh
     )
     assert 'PREPARE_INPUTS_AHEAD="${PREPARE_INPUTS_AHEAD:-1}"' in run_sh
@@ -121,7 +158,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'CPU_THREADS="${CPU_THREADS:-$(default_cpu_threads)}"' in run_sh
     assert 'CUDA_DEVICE_LIST="${CUDA_DEVICE_LIST:-all}"' in run_sh
     assert 'PARALLEL_RESTARTS="${PARALLEL_RESTARTS:-auto}"' in run_sh
-    assert 'CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-50}"' in run_sh
+    assert 'CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-70}"' in run_sh
     assert 'CUDA_MAX_TARGET_FRACTION="${CUDA_MAX_TARGET_FRACTION:-0.9}"' in run_sh
     assert 'X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-512}"' in run_sh
     assert 'X_TARGET_SUM="${X_TARGET_SUM:-10000}"' in run_sh
@@ -130,6 +167,12 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'DEEP_DEVICE="${DEEP_DEVICE:-cuda}"' in run_sh
     assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-32768}"' in run_sh
     assert 'DEEP_PRETRAINED_MODEL="${DEEP_PRETRAINED_MODEL:-}"' in run_sh
+    assert 'CPU_THREADS="${CPU_THREADS:-$(default_cpu_threads)}"' in install_sh
+    assert 'CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$CPU_THREADS}"' in install_sh
+    assert 'MAKEFLAGS="${MAKEFLAGS:--j${CPU_THREADS}}"' in install_sh
+    assert 'exec bash "$SCRIPT_DIR/install_env.sh"' in install_spatial_ot_sh
+    assert "/storage/" not in install_sh
+    assert "/storage/" not in install_spatial_ot_sh
     assert (
         'DEEP_SEGMENTATION_REFINEMENT_ITERS="${DEEP_SEGMENTATION_REFINEMENT_ITERS:-6}"'
         in run_sh
@@ -199,7 +242,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         in run_sh
     )
     assert (
-        'export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"'
+        'export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"'
         in run_sh
     )
     assert (
@@ -288,7 +331,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert "../spatial_ot_input" in pool_helper_sh
     assert "../.venv" in pool_helper_sh
     assert (
-        'OUTPUT_H5AD="${OUTPUT_H5AD:-${INPUT_DIR}/spatial_ot_input_pooled.h5ad}"'
+        'OUTPUT_H5AD="${OUTPUT_H5AD:-${INPUT_DIR}/visium_hd_spatial_ot_input_pooled.h5ad}"'
         in pool_helper_sh
     )
     assert "pool-inputs" in pool_helper_sh
@@ -353,7 +396,7 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     )
     assert 'exec bash "$SCRIPT_DIR/run.sh"' in prepared_gpu_sh
     assert "/storage/" not in prepared_gpu_sh
-    assert "cohort_multilevel_ot_joint_refinement_vram9_" in deep_segmentation_sh
+    assert "visium_hd_cohort_multilevel_ot_joint_refinement_vram70_" in deep_segmentation_sh
     assert (
         'SUBREGION_CONSTRUCTION_METHOD="${SUBREGION_CONSTRUCTION_METHOD:-joint_refinement}"'
         in deep_segmentation_sh
@@ -369,14 +412,15 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
         'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"'
         in deep_segmentation_sh
     )
-    assert 'DEEP_LATENT_DIM="${DEEP_LATENT_DIM:-64}"' in deep_segmentation_sh
-    assert 'DEEP_HIDDEN_DIM="${DEEP_HIDDEN_DIM:-1024}"' in deep_segmentation_sh
-    assert 'DEEP_LAYERS="${DEEP_LAYERS:-3}"' in deep_segmentation_sh
-    assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-81920}"' in deep_segmentation_sh
-    assert 'CUDA_TARGET_VRAM_GB="${CUDA_TARGET_VRAM_GB:-9}"' in deep_segmentation_sh
+    assert 'source "$SCRIPT_DIR/_high_vram_deep_profile.sh"' in deep_segmentation_sh
+    assert 'DEEP_TARGET_VRAM_GB="${DEEP_TARGET_VRAM_GB:-70}"' in high_vram_profile_sh
+    assert 'DEEP_LATENT_DIM="${DEEP_LATENT_DIM:-256}"' in high_vram_profile_sh
+    assert 'DEEP_HIDDEN_DIM="${DEEP_HIDDEN_DIM:-8192}"' in high_vram_profile_sh
+    assert 'DEEP_LAYERS="${DEEP_LAYERS:-6}"' in high_vram_profile_sh
+    assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-131072}"' in high_vram_profile_sh
     assert (
         'SPATIAL_OT_CUDA_MAX_TARGET_FRACTION="${SPATIAL_OT_CUDA_MAX_TARGET_FRACTION:-$CUDA_MAX_TARGET_FRACTION}"'
-        in deep_segmentation_sh
+        in high_vram_profile_sh
     )
     assert (
         'DEEP_SEGMENTATION_REFINEMENT_ITERS="${DEEP_SEGMENTATION_REFINEMENT_ITERS:-6}"'
@@ -384,7 +428,8 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     )
     assert "run_prepared_cohort_gpu.sh" in deep_segmentation_sh
     assert "/storage/" not in deep_segmentation_sh
-    assert "../data_review/results" in prepare_xenium_sh
+    assert "/storage/" not in high_vram_profile_sh
+    assert 'XENIUM_INPUT_DIR:-../spatial_ot_input' in prepare_xenium_sh
     assert "xenium_spatial_ot_input_pooled.h5ad" in prepare_xenium_sh
     assert 'SAMPLE_GLOB="${SAMPLE_GLOB:-xenium_*_processed.h5ad}"' in prepare_xenium_sh
     assert 'SAMPLE_ID_PREFIX="${SAMPLE_ID_PREFIX:-xenium_}"' in prepare_xenium_sh
@@ -394,22 +439,39 @@ def test_packaged_helpers_use_relative_spatial_ot_inputs() -> None:
     assert 'ORIGINAL_SPATIAL_Y_KEY="${ORIGINAL_SPATIAL_Y_KEY:-y_centroid}"' in prepare_xenium_sh
     assert "prepare_spatial_ot_input.sh" in prepare_xenium_sh
     assert "/storage/" not in prepare_xenium_sh
-    assert "../data_review/results" in run_xenium_sh
+    assert 'XENIUM_INPUT_DIR:-../spatial_ot_input' in run_xenium_sh
     assert "../outputs/spatial_ot/xenium_cohort_multilevel_ot_deep_expression_" in run_xenium_sh
     assert "xenium_spatial_ot_input_pooled.h5ad" in run_xenium_sh
     assert 'SPATIAL_SCALE="${SPATIAL_SCALE:-1.0}"' in run_xenium_sh
-    assert 'FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X}"' in run_xenium_sh
+    assert 'FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-$PREPARED_FEATURE_OBSM_KEY}"' in run_xenium_sh
     assert 'PREPARE_INPUTS_AHEAD="${PREPARE_INPUTS_AHEAD:-0}"' in run_xenium_sh
     assert 'X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-421}"' in run_xenium_sh
     assert 'DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"' in run_xenium_sh
+    assert 'DEEP_HIDDEN_DIM="${DEEP_HIDDEN_DIM:-4096}"' in run_xenium_sh
+    assert 'DEEP_LAYERS="${DEEP_LAYERS:-3}"' in run_xenium_sh
+    assert 'DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-32768}"' in run_xenium_sh
+    assert 'DEEP_LR="${DEEP_LR:-0.0005}"' in run_xenium_sh
+    assert 'DEEP_VARIANCE_WEIGHT="${DEEP_VARIANCE_WEIGHT:-0.0}"' in run_xenium_sh
+    assert 'DEEP_DECORRELATION_WEIGHT="${DEEP_DECORRELATION_WEIGHT:-0.0}"' in run_xenium_sh
+    assert 'DEEP_GRADIENT_CLIP_NORM="${DEEP_GRADIENT_CLIP_NORM:-1.0}"' in run_xenium_sh
+    assert 'DEEP_CHECKPOINT_EVERY_EPOCHS="${DEEP_CHECKPOINT_EVERY_EPOCHS:-5}"' in run_xenium_sh
     assert 'DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-intrinsic}"' in run_xenium_sh
     assert 'DEEP_OUTPUT_OBSM_KEY="${DEEP_OUTPUT_OBSM_KEY:-X_spatial_ot_deep_expression_autoencoder}"' in run_xenium_sh
     assert 'DEEP_CONTEXT_WEIGHT="${DEEP_CONTEXT_WEIGHT:-0.0}"' in run_xenium_sh
+    assert 'source "$SCRIPT_DIR/_high_vram_deep_profile.sh"' in run_xenium_sh
     assert 'CANDIDATE_N_CLUSTERS="${CANDIDATE_N_CLUSTERS:-8-16}"' in run_xenium_sh
     assert "run.sh" in run_xenium_sh
     assert "/storage/" not in run_xenium_sh
+    assert 'VISIUM_HD_INPUT_DIR:-../spatial_ot_input' in run_visium_hd_sh
+    assert "visium_hd_spatial_ot_input_pooled.h5ad" in run_visium_hd_sh
+    assert 'FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X}"' in run_visium_hd_sh
+    assert 'SPATIAL_OT_X_USE_SVD="${SPATIAL_OT_X_USE_SVD:-0}"' in run_visium_hd_sh
+    assert 'DEEP_CHECKPOINT_EVERY_EPOCHS="${DEEP_CHECKPOINT_EVERY_EPOCHS:-5}"' in run_visium_hd_sh
+    assert 'SPATIAL_SCALE="${SPATIAL_SCALE:-0.2737012522439323}"' in run_visium_hd_sh
+    assert 'source "$SCRIPT_DIR/_high_vram_deep_profile.sh"' in run_visium_hd_sh
+    assert "/storage/" not in run_visium_hd_sh
     optimal_search_sh = (script_dir / "run_optimal_setting_search.sh").read_text()
-    assert "../spatial_ot_input/spatial_ot_input_pooled.h5ad" in optimal_search_sh
+    assert "../spatial_ot_input/visium_hd_spatial_ot_input_pooled.h5ad" in optimal_search_sh
     assert "../work/spatial_ot_runs/cohort_optimal_search" in optimal_search_sh
     assert "optimal-search" in optimal_search_sh
     assert 'BASIC_NICHE_SIZE_UM="${BASIC_NICHE_SIZE_UM:-50}"' in optimal_search_sh

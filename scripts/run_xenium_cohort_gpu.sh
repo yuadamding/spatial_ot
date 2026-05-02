@@ -7,7 +7,7 @@ cd "$REPO_DIR"
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 
-export INPUT_DIR="${XENIUM_INPUT_DIR:-../data_review/results}"
+export INPUT_DIR="${XENIUM_INPUT_DIR:-../spatial_ot_input}"
 export INPUT_H5AD="${XENIUM_OUTPUT_H5AD:-../spatial_ot_input/xenium_spatial_ot_input_pooled.h5ad}"
 export POOLED_INPUT_NAME="${POOLED_INPUT_NAME:-xenium_spatial_ot_input_pooled.h5ad}"
 export OUTPUT_DIR="${OUTPUT_DIR:-../outputs/spatial_ot/xenium_cohort_multilevel_ot_deep_expression_${RUN_STAMP}}"
@@ -20,7 +20,7 @@ export ORIGINAL_SPATIAL_Y_KEY="${ORIGINAL_SPATIAL_Y_KEY:-y_centroid}"
 export SPATIAL_SCALE="${SPATIAL_SCALE:-1.0}"
 export X_FEATURE_COMPONENTS="${X_FEATURE_COMPONENTS:-421}"
 export PREPARED_FEATURE_OBSM_KEY="${PREPARED_FEATURE_OBSM_KEY:-X_spatial_ot_x_svd_${X_FEATURE_COMPONENTS}}"
-export FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X}"
+export FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-$PREPARED_FEATURE_OBSM_KEY}"
 export POOL_ALL_INPUTS="${POOL_ALL_INPUTS:-1}"
 export PREPARE_INPUTS_AHEAD="${PREPARE_INPUTS_AHEAD:-0}"
 export COMPUTE_DEVICE="${COMPUTE_DEVICE:-cuda}"
@@ -37,14 +37,25 @@ export DEFAULT_PLOT_SAMPLE_ID="${DEFAULT_PLOT_SAMPLE_ID:-xenium_cohort}"
 export DEEP_FEATURE_METHOD="${DEEP_FEATURE_METHOD:-autoencoder}"
 export DEEP_OUTPUT_EMBEDDING="${DEEP_OUTPUT_EMBEDDING:-intrinsic}"
 export DEEP_OUTPUT_OBSM_KEY="${DEEP_OUTPUT_OBSM_KEY:-X_spatial_ot_deep_expression_autoencoder}"
-export DEEP_DEVICE="${DEEP_DEVICE:-cuda}"
-export DEEP_LATENT_DIM="${DEEP_LATENT_DIM:-64}"
-export DEEP_HIDDEN_DIM="${DEEP_HIDDEN_DIM:-1024}"
-export DEEP_LAYERS="${DEEP_LAYERS:-3}"
-export DEEP_EPOCHS="${DEEP_EPOCHS:-8}"
-export DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-81920}"
-export DEEP_VALIDATION="${DEEP_VALIDATION:-none}"
 export DEEP_CONTEXT_WEIGHT="${DEEP_CONTEXT_WEIGHT:-0.0}"
 export DEEP_CONTRASTIVE_WEIGHT="${DEEP_CONTRASTIVE_WEIGHT:-0.0}"
+export DEEP_INDEPENDENCE_WEIGHT="${DEEP_INDEPENDENCE_WEIGHT:-0.0}"
+export DEEP_HIDDEN_DIM="${DEEP_HIDDEN_DIM:-4096}"
+export DEEP_LAYERS="${DEEP_LAYERS:-3}"
+export DEEP_BATCH_SIZE="${DEEP_BATCH_SIZE:-32768}"
+export DEEP_LR="${DEEP_LR:-0.0005}"
+export DEEP_EPOCHS="${DEEP_EPOCHS:-40}"
+export DEEP_VARIANCE_WEIGHT="${DEEP_VARIANCE_WEIGHT:-0.0}"
+export DEEP_DECORRELATION_WEIGHT="${DEEP_DECORRELATION_WEIGHT:-0.0}"
+export DEEP_GRADIENT_CLIP_NORM="${DEEP_GRADIENT_CLIP_NORM:-1.0}"
+export DEEP_CHECKPOINT_EVERY_EPOCHS="${DEEP_CHECKPOINT_EVERY_EPOCHS:-5}"
+
+# shellcheck source=scripts/_high_vram_deep_profile.sh
+source "$SCRIPT_DIR/_high_vram_deep_profile.sh"
+
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  env | sort | grep -E '^(INPUT_H5AD|OUTPUT_DIR|FEATURE_OBSM_KEY|DEEP_[A-Z0-9_]*|CUDA_[A-Z0-9_]*|SPATIAL_OT_CUDA_[A-Z0-9_]*|CPU_THREADS|TORCH_[A-Z0-9_]*|PYTORCH_[A-Z0-9_]*|OMP_NUM_THREADS|MKL_NUM_THREADS|OPENBLAS_NUM_THREADS)='
+  exit 0
+fi
 
 exec bash "$SCRIPT_DIR/run.sh"

@@ -7,7 +7,7 @@ cd "$REPO_DIR"
 
 VENV_DIR="${VENV_DIR:-../.venv}"
 PYTHON_BIN="${PYTHON_BIN:-${VENV_DIR}/bin/python}"
-INPUT_H5AD="${INPUT_H5AD:-../spatial_ot_input/spatial_ot_input_pooled.h5ad}"
+INPUT_H5AD="${INPUT_H5AD:-../spatial_ot_input/visium_hd_spatial_ot_input_pooled.h5ad}"
 OUTPUT_DIR="${OUTPUT_DIR:-../work/spatial_ot_runs/cohort_optimal_search}"
 FEATURE_OBSM_KEY="${FEATURE_OBSM_KEY:-X_spatial_ot_x_svd_512}"
 SPATIAL_X_KEY="${SPATIAL_X_KEY:-pooled_cell_x}"
