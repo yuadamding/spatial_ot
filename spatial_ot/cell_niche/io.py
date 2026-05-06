@@ -602,6 +602,21 @@ def run_cell_niche_on_h5ad(
         adata.obs[f"local_density_retained_per_um2_{suffix}"] = retained_density
         # Backward-compatible alias; this is area-normalized full density, not count.
         adata.obs[f"local_density_{suffix}"] = full_density
+        if graph.mode == "knn":
+            full_knn_radius = (
+                full_radius
+                if full_radius is not None
+                else _row_max_distances(graph).astype(np.float32)
+            )
+            retained_knn_radius = (
+                retained_radius
+                if retained_radius is not None
+                else _row_max_distances(graph).astype(np.float32)
+            )
+            adata.obs[f"knn_enclosing_radius_um_{suffix}"] = full_knn_radius
+            adata.obs[f"knn_retained_enclosing_radius_um_{suffix}"] = retained_knn_radius
+            adata.obs[f"local_knn_enclosing_density_full_{suffix}"] = full_density
+            adata.obs[f"local_knn_enclosing_density_retained_{suffix}"] = retained_density
         adata.obs[f"is_isolated_{suffix}"] = full_degree == 0
 
     h5ad_path = out_dir / "cells_cell_niche.h5ad"

@@ -25,7 +25,7 @@ from .descriptors import (
 from .graph import NeighborhoodGraph, build_knn_graphs, build_radius_graphs
 from .io import run_cell_niche_on_h5ad
 from .model import MultiScaleDeepSetEncoder, OTDeepSHEModel, OTPrototypeHead
-from .ot import sinkhorn_balanced_distance
+from .ot import sinkhorn_balanced_distance, sinkhorn_divergence
 from .train import DeepSHEResult, fit_deepshe_embedding
 
 __all__ = [
@@ -55,5 +55,6 @@ __all__ = [
     "reduce_descriptor_embedding",
     "run_cell_niche_on_h5ad",
     "sinkhorn_balanced_distance",
+    "sinkhorn_divergence",
     "standardize_features",
 ]

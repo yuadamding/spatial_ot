@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.5
+
+- Align package metadata, changelog, and release target with the local `3.0.5` state.
+- Add codebook usage diagnostics for soft cell-state codebooks, including hard/soft usage, dead-codeword counts, effective codeword count, and posterior-entropy quantiles.
+- Add a debiased Sinkhorn divergence helper for OT diagnostics and future biological OT distillation targets while keeping the current prototype training loss unchanged.
+- Add explicit kNN enclosing-radius and enclosing-density aliases so kNN density metadata is not confused with fixed-radius physical-density fields.
+- Keep transform/predict bundles, OT distance distillation, neighbor-neighbor pair texture, covariance shrinkage/effective-n flags, and null/ablation/leakage reports planned rather than stable.
+
 ## 0.3.3
 
 - Align package metadata with the local `0.3.3` state while keeping commit labels and release tags separate from semantic package versions.

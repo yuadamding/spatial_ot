@@ -54,4 +54,58 @@ def sinkhorn_balanced_distance(
     return torch.sum(plan * cost, dim=(1, 2))
 
 
-__all__ = ["sinkhorn_balanced_distance", "weighted_pairwise_sqdist"]
+def sinkhorn_divergence(
+    cost_xy: torch.Tensor,
+    source_weights: torch.Tensor,
+    target_weights: torch.Tensor,
+    *,
+    cost_xx: torch.Tensor,
+    cost_yy: torch.Tensor,
+    epsilon: float = 0.05,
+    n_iters: int = 30,
+) -> torch.Tensor:
+    """Debiased Sinkhorn divergence for weighted point clouds.
+
+    The transport cost from :func:`sinkhorn_balanced_distance` is entropically
+    biased and can be nonzero for identical multi-support measures. This helper
+    subtracts the self-costs and is intended for diagnostics/distillation
+    targets, not as a replacement for the current prototype training loss.
+    """
+
+    if cost_xx.ndim != 3 or cost_yy.ndim != 3:
+        raise ValueError("cost_xx and cost_yy must have shape (batch, n_support, n_support).")
+    if cost_xx.shape[0] != cost_xy.shape[0] or cost_yy.shape[0] != cost_xy.shape[0]:
+        raise ValueError("self-cost batches must match cost_xy.")
+    if cost_xx.shape[1:] != (cost_xy.shape[1], cost_xy.shape[1]):
+        raise ValueError("cost_xx must match the source support size.")
+    if cost_yy.shape[1:] != (cost_xy.shape[2], cost_xy.shape[2]):
+        raise ValueError("cost_yy must match the target support size.")
+    ot_xy = sinkhorn_balanced_distance(
+        cost_xy,
+        source_weights,
+        target_weights,
+        epsilon=epsilon,
+        n_iters=n_iters,
+    )
+    ot_xx = sinkhorn_balanced_distance(
+        cost_xx,
+        source_weights,
+        source_weights,
+        epsilon=epsilon,
+        n_iters=n_iters,
+    )
+    ot_yy = sinkhorn_balanced_distance(
+        cost_yy,
+        target_weights,
+        target_weights,
+        epsilon=epsilon,
+        n_iters=n_iters,
+    )
+    return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
+
+
+__all__ = [
+    "sinkhorn_balanced_distance",
+    "sinkhorn_divergence",
+    "weighted_pairwise_sqdist",
+]

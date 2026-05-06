@@ -17,6 +17,7 @@ from spatial_ot.cell_niche import (
     fit_state_codebook,
     run_cell_niche_on_h5ad,
     sinkhorn_balanced_distance,
+    sinkhorn_divergence,
 )
 from spatial_ot.cell_niche.cluster import cluster_embeddings
 from spatial_ot.cell_niche.losses import deepshe_loss
@@ -165,6 +166,13 @@ def test_soft_codebook_rows_sum_to_one() -> None:
     assert codebook.posteriors.shape == (24, 4)
     np.testing.assert_allclose(codebook.posteriors.sum(axis=1), 1.0, atol=1e-5)
     assert np.all(codebook.entropy >= 0.0)
+    assert codebook.metadata["hard_usage_per_codeword"]
+    assert codebook.metadata["soft_usage_per_codeword"]
+    assert len(codebook.metadata["hard_usage_per_codeword"]) == 4
+    assert len(codebook.metadata["soft_usage_per_codeword"]) == 4
+    assert sum(codebook.metadata["hard_usage_per_codeword"]) == 24
+    assert codebook.metadata["effective_codeword_count"] > 0.0
+    assert "median" in codebook.metadata["posterior_entropy_quantiles"]
 
 
 def test_cell_niche_dataset_batch_shapes() -> None:
@@ -293,6 +301,49 @@ def test_sinkhorn_identical_measure_cost_is_finite_and_small() -> None:
 
     assert torch.isfinite(distance).all()
     assert float(distance[0]) < 1e-3
+
+
+def test_sinkhorn_divergence_identical_measure_is_small() -> None:
+    torch.manual_seed(18)
+    points = torch.randn(1, 5, 2)
+    cost = torch.cdist(points, points, p=2.0).pow(2)
+    weights = torch.full((1, 5), 0.2)
+
+    divergence = sinkhorn_divergence(
+        cost,
+        weights,
+        weights,
+        cost_xx=cost,
+        cost_yy=cost,
+        epsilon=0.03,
+        n_iters=60,
+    )
+
+    assert torch.isfinite(divergence).all()
+    torch.testing.assert_close(divergence, torch.zeros_like(divergence), atol=1e-5, rtol=1e-5)
+
+
+def test_sinkhorn_divergence_validates_self_cost_shapes() -> None:
+    cost_xy = torch.zeros((1, 3, 4), dtype=torch.float32)
+    cost_xx = torch.zeros((1, 3, 3), dtype=torch.float32)
+    bad_cost_yy = torch.zeros((1, 3, 3), dtype=torch.float32)
+    source_weights = torch.full((1, 3), 1.0 / 3.0)
+    target_weights = torch.full((1, 4), 0.25)
+
+    try:
+        sinkhorn_divergence(
+            cost_xy,
+            source_weights,
+            target_weights,
+            cost_xx=cost_xx,
+            cost_yy=bad_cost_yy,
+            epsilon=0.05,
+            n_iters=5,
+        )
+    except ValueError as exc:
+        assert "cost_yy must match the target support size" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("invalid target self-cost shape should fail")
 
 
 def test_sinkhorn_gradients_are_finite() -> None:
@@ -610,6 +661,63 @@ def test_cell_niche_density_uses_full_pre_cap_neighbor_count(tmp_path: Path) -> 
     np.testing.assert_allclose(
         float(fitted.obs["local_density_retained_per_um2_r10"].iloc[0]),
         3.0 / (np.pi * 10.0 * 10.0),
+        rtol=1e-5,
+    )
+
+
+def test_cell_niche_knn_density_aliases_are_explicit(tmp_path: Path) -> None:
+    coords = np.asarray([[float(idx), 0.0] for idx in range(6)], dtype=np.float32)
+    adata = ad.AnnData(
+        X=np.ones((coords.shape[0], 2), dtype=np.float32),
+        obs=pd.DataFrame(index=[f"cell_{idx}" for idx in range(coords.shape[0])]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    )
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    adata.obs["sample_id"] = "s"
+    adata.obsm["X_test_features"] = np.column_stack(
+        [coords[:, 0], coords[:, 1], np.cos(coords[:, 0])]
+    ).astype(np.float32)
+    input_h5ad = tmp_path / "knn_density_input.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    summary = run_cell_niche_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=tmp_path / "knn_density_out",
+        feature_obsm_key="X_test_features",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        sample_obs_key="sample_id",
+        radii_um=(),
+        knn_values=(4,),
+        state_codebook_size=2,
+        state_codebook_sample_size=6,
+        feature_pca_dim=3,
+        embedding_dim=2,
+        cluster_method="kmeans",
+        n_clusters=2,
+        max_neighbors=2,
+        pair_top_states=2,
+        seed=23,
+    )
+
+    fitted = ad.read_h5ad(summary["outputs"]["h5ad"])
+    assert "knn_enclosing_radius_um_k4" in fitted.obs
+    assert "knn_retained_enclosing_radius_um_k4" in fitted.obs
+    assert "local_knn_enclosing_density_full_k4" in fitted.obs
+    assert "local_knn_enclosing_density_retained_k4" in fitted.obs
+    assert float(fitted.obs["n_neighbors_full_k4"].iloc[2]) == 4.0
+    assert float(fitted.obs["n_neighbors_retained_k4"].iloc[2]) == 2.0
+    assert float(fitted.obs["knn_enclosing_radius_um_k4"].iloc[2]) == 2.0
+    assert float(fitted.obs["knn_retained_enclosing_radius_um_k4"].iloc[2]) == 1.0
+    np.testing.assert_allclose(
+        float(fitted.obs["local_knn_enclosing_density_full_k4"].iloc[2]),
+        4.0 / (np.pi * 2.0 * 2.0),
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        float(fitted.obs["local_knn_enclosing_density_retained_k4"].iloc[2]),
+        2.0 / np.pi,
         rtol=1e-5,
     )
 

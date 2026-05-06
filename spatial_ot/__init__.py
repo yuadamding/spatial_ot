@@ -58,7 +58,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     ),
 }
 
-__version__ = "0.3.3"
+__version__ = "3.0.5"
 __all__ = list(_LAZY_EXPORTS)
 
 

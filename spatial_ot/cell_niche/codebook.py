@@ -118,6 +118,45 @@ def _soft_assign(
     return out
 
 
+def _codebook_usage_metadata(
+    *,
+    posteriors: np.ndarray,
+    labels: np.ndarray,
+    entropy: np.ndarray,
+) -> dict[str, object]:
+    q = np.asarray(posteriors, dtype=np.float64)
+    y = np.asarray(labels, dtype=np.int32)
+    n_cells, n_codes = int(q.shape[0]), int(q.shape[1])
+    hard_usage = np.bincount(y, minlength=n_codes).astype(np.int64)
+    soft_usage = np.sum(q, axis=0)
+    usage_prob = soft_usage / max(float(np.sum(soft_usage)), 1.0e-12)
+    positive = usage_prob[usage_prob > 0.0]
+    effective = float(np.exp(-np.sum(positive * np.log(positive)))) if positive.size else 0.0
+    entropy_values = np.asarray(entropy, dtype=np.float64)
+    quantiles = (
+        np.quantile(entropy_values, [0.0, 0.25, 0.5, 0.75, 1.0]).astype(float).tolist()
+        if entropy_values.size
+        else [0.0] * 5
+    )
+    return {
+        "hard_usage_per_codeword": hard_usage.astype(int).tolist(),
+        "soft_usage_per_codeword": soft_usage.astype(float).tolist(),
+        "hard_dead_codeword_count": int(np.sum(hard_usage == 0)),
+        "soft_dead_codeword_count": int(np.sum(soft_usage < 1.0e-6)),
+        "effective_codeword_count": effective,
+        "posterior_entropy_quantiles": {
+            "min": float(quantiles[0]),
+            "q25": float(quantiles[1]),
+            "median": float(quantiles[2]),
+            "q75": float(quantiles[3]),
+            "max": float(quantiles[4]),
+        },
+        "mean_hard_usage": float(n_cells / max(n_codes, 1)),
+        "min_hard_usage": int(np.min(hard_usage)) if hard_usage.size else 0,
+        "max_hard_usage": int(np.max(hard_usage)) if hard_usage.size else 0,
+    }
+
+
 def fit_state_codebook(
     values: np.ndarray,
     *,
@@ -178,6 +217,13 @@ def fit_state_codebook(
         else "median_nearest_center_sqdist",
         "mean_state_entropy": float(np.mean(entropy)) if entropy.size else 0.0,
     }
+    metadata.update(
+        _codebook_usage_metadata(
+            posteriors=posteriors,
+            labels=labels,
+            entropy=entropy,
+        )
+    )
     return StateCodebook(
         posteriors=posteriors.astype(np.float32),
         centers=centers.astype(np.float32),

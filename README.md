@@ -142,6 +142,7 @@ The H5AD stores:
 - per-graph `adata.obs["n_neighbors_<scale>"]` / `adata.obs["n_neighbors_full_<scale>"]` for full pre-cap neighbor counts
 - per-graph `adata.obs["n_neighbors_retained_<scale>"]` and `adata.obs["neighbor_retention_fraction_<scale>"]` for the retained graph used by descriptors/DeepSHE
 - per-graph `adata.obs["local_density_full_per_um2_<scale>"]`, `adata.obs["local_density_retained_per_um2_<scale>"]`, `adata.obs["local_density_per_um2_<scale>"]`, `adata.obs["local_density_<scale>"]`, and `adata.obs["is_isolated_<scale>"]`
+- kNN-only aliases `adata.obs["knn_enclosing_radius_um_<scale>"]`, `adata.obs["knn_retained_enclosing_radius_um_<scale>"]`, `adata.obs["local_knn_enclosing_density_full_<scale>"]`, and `adata.obs["local_knn_enclosing_density_retained_<scale>"]`
 - one `adata.obsp["spatial_connectivities_<scale>"]` and `adata.obsp["spatial_distances_<scale>"]` per radius/kNN graph
 - `adata.uns["spatial_heterogeneity_config"]`
 - `adata.uns["spatial_niche_summary"]`
@@ -153,7 +154,9 @@ Current `cell-niche` status:
 | radius/kNN same-sample graphs | implemented |
 | radial-shell-preserving radius neighbor cap | implemented |
 | full/retained neighbor counts and density fields | implemented |
+| kNN enclosing-density aliases | implemented |
 | soft state codebook | implemented |
+| codebook usage diagnostics | implemented |
 | composition/diversity/moments/radial/pair/covariance/gradient descriptors | implemented |
 | descriptor PCA/SVD embedding | implemented |
 | KMeans clustering | implemented with explicit `--n-clusters` |
@@ -161,6 +164,7 @@ Current `cell-niche` status:
 | connected niche instances | implemented |
 | mini-batch weighted/attention DeepSets encoder | implemented, experimental |
 | balanced Sinkhorn OT prototype head | implemented, experimental |
+| debiased Sinkhorn diagnostic helper | implemented |
 | null and ablation reports | planned |
 | OT distance distillation | planned |
 | transform/predict for new samples | planned |
