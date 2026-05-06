@@ -494,7 +494,7 @@ def compute_cell_heterogeneity_descriptors(
         "covariance_dims": int(covariance_dims),
         "graph_diagnostics": graph_diagnostics,
         "primary_unit": "cell",
-        "uses_subregion_boundaries": False,
+        "uses_fitted_region_boundaries": False,
         "uses_raw_absolute_coordinates_for_clustering": False,
     }
     return DescriptorResult(raw=raw, standardized=standardized, metadata=metadata)

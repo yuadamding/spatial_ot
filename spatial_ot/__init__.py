@@ -3,63 +3,48 @@ from __future__ import annotations
 from importlib import import_module
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
-    "DeepFeatureConfig": ("config", "DeepFeatureConfig"),
-    "DeepFeatureResult": ("deep", "DeepFeatureResult"),
-    "MultilevelExperimentConfig": ("config", "MultilevelExperimentConfig"),
-    "MultilevelOTConfig": ("config", "MultilevelOTConfig"),
-    "MultilevelPathConfig": ("config", "MultilevelPathConfig"),
-    "RegionGeometry": ("multilevel", "RegionGeometry"),
-    "SpatialOTFeatureEncoder": ("deep", "SpatialOTFeatureEncoder"),
-    "build_concern_resolution_report": (
-        "multilevel",
-        "build_concern_resolution_report",
+    "CellNicheConfig": ("cell_niche", "CellNicheConfig"),
+    "CellNicheDataset": ("cell_niche", "CellNicheDataset"),
+    "ClusterResult": ("pairwise_niche", "ClusterResult"),
+    "ExpressionEmbedding": ("pairwise_niche", "ExpressionEmbedding"),
+    "LocalMeasureSet": ("pairwise_niche", "LocalMeasureSet"),
+    "OTDeepSHEModel": ("cell_niche", "OTDeepSHEModel"),
+    "OTPrototypeHead": ("cell_niche", "OTPrototypeHead"),
+    "PairwiseNicheConfig": ("pairwise_niche", "PairwiseNicheConfig"),
+    "build_knn_graphs": ("cell_niche", "build_knn_graphs"),
+    "build_local_measures": ("pairwise_niche", "build_local_measures"),
+    "build_radius_graphs": ("cell_niche", "build_radius_graphs"),
+    "cluster_embeddings": ("cell_niche", "cluster_embeddings"),
+    "cluster_from_distance": ("pairwise_niche", "cluster_from_distance"),
+    "compute_cell_heterogeneity_descriptors": (
+        "cell_niche",
+        "compute_cell_heterogeneity_descriptors",
+    ),
+    "compute_pairwise_ot_distance_matrix": (
+        "pairwise_niche",
+        "compute_pairwise_ot_distance_matrix",
     ),
     "distribute_pooled_feature_cache_to_inputs": (
         "pooling",
         "distribute_pooled_feature_cache_to_inputs",
     ),
-    "fit_deep_features": ("deep", "fit_deep_features"),
-    "fit_deep_features_on_h5ad": ("deep", "fit_deep_features_on_h5ad"),
-    "fit_multilevel_ot": ("multilevel", "fit_multilevel_ot"),
-    "fit_ot_shape_normalizer": ("multilevel", "fit_ot_shape_normalizer"),
-    "load_multilevel_config": ("config", "load_multilevel_config"),
-    "make_reference_points_unit_disk": (
-        "multilevel",
-        "make_reference_points_unit_disk",
-    ),
-    "plot_sample_niche_maps": ("multilevel", "plot_sample_niche_maps"),
-    "plot_sample_niche_maps_from_run_dir": (
-        "multilevel",
-        "plot_sample_niche_maps_from_run_dir",
-    ),
-    "plot_sample_spatial_maps": ("multilevel", "plot_sample_spatial_maps"),
-    "plot_sample_spatial_maps_from_run_dir": (
-        "multilevel",
-        "plot_sample_spatial_maps_from_run_dir",
-    ),
+    "fit_deepshe_embedding": ("cell_niche", "fit_deepshe_embedding"),
+    "fit_expression_embedding": ("pairwise_niche", "fit_expression_embedding"),
+    "fit_state_codebook": ("cell_niche", "fit_state_codebook"),
     "pool_h5ad_files": ("pooling", "pool_h5ad_files"),
     "pool_h5ads_in_directory": ("pooling", "pool_h5ads_in_directory"),
+    "prepare_feature_space": ("cell_niche", "prepare_feature_space"),
     "prepare_h5ad_feature_cache": ("feature_source", "prepare_h5ad_feature_cache"),
-    "run_multilevel_optimal_search": (
-        "optimal_search",
-        "run_multilevel_optimal_search",
-    ),
+    "reduce_descriptor_embedding": ("cell_niche", "reduce_descriptor_embedding"),
     "run_cell_niche_on_h5ad": ("cell_niche", "run_cell_niche_on_h5ad"),
-    "run_multilevel_ot_on_h5ad": ("multilevel", "run_multilevel_ot_on_h5ad"),
-    "run_multilevel_ot_with_config": ("multilevel", "run_multilevel_ot_with_config"),
-    "spatial_niche_validation_report": (
-        "multilevel",
-        "spatial_niche_validation_report",
-    ),
-    "transform_h5ad_with_deep_model": ("deep", "transform_h5ad_with_deep_model"),
-    "write_concern_resolution_report": (
-        "multilevel",
-        "write_concern_resolution_report",
-    ),
+    "run_pairwise_niche_on_h5ad": ("pairwise_niche", "run_pairwise_niche_on_h5ad"),
+    "sinkhorn_ot_block": ("pairwise_niche", "sinkhorn_ot_block"),
+    "sinkhorn_balanced_distance": ("cell_niche", "sinkhorn_balanced_distance"),
+    "sinkhorn_divergence": ("cell_niche", "sinkhorn_divergence"),
 }
 
-__version__ = "3.0.5"
-__all__ = list(_LAZY_EXPORTS)
+__version__ = "3.0.6"
+__all__ = ["__version__", *_LAZY_EXPORTS]
 
 
 def __dir__() -> list[str]:

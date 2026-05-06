@@ -287,8 +287,8 @@ def pool_h5ad_files(
         "layout": layout_meta,
         "samples_are_physically_connected": False,
         "pooled_coordinate_note": (
-            "Samples share a pooled latent/OT input table, but pooled coordinates are translated onto separate tiles "
-            "so graph neighborhoods and OT subregions do not cross between physical specimens."
+            "Samples share a pooled input table, but pooled coordinates are translated onto separate tiles "
+            "so graph neighborhoods do not cross between physical specimens."
         ),
         "sample_summaries": summaries,
     }

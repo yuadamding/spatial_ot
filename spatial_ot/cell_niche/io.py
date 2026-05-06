@@ -645,7 +645,6 @@ def run_cell_niche_on_h5ad(
         "method_family": "cell_centered_spatial_heterogeneity_embedding",
         "active_path": "cell-niche",
         "primary_unit": "cell",
-        "subregion_first_pipeline_role": "baseline_and_diagnostic_layer_only",
         "input_h5ad": str(input_path),
         "output_dir": str(out_dir),
         "n_cells": int(adata.n_obs),
@@ -727,9 +726,8 @@ def run_cell_niche_on_h5ad(
             ),
         },
         "method_notes": {
-            "old_vs_new": (
-                "Old spatial_ot: cells -> subregions -> subregion clusters -> projected cell labels. "
-                "This path: cells -> local cell-centered context measures -> cell embeddings -> cell niche clusters."
+            "cell_centered_unit": (
+                "Cells are represented by local same-sample context measures and clustered directly into niche labels."
             ),
             "self_weight_ablation": (
                 "Set --self-weight 0 to test whether labels remain context-driven rather than disguised cell-state clusters."

@@ -1,119 +1,12 @@
 # Changelog
 
-## 3.0.5
+## 3.0.6
 
-- Align package metadata, changelog, and release target with the local `3.0.5` state.
-- Add codebook usage diagnostics for soft cell-state codebooks, including hard/soft usage, dead-codeword counts, effective codeword count, and posterior-entropy quantiles.
-- Add a debiased Sinkhorn divergence helper for OT diagnostics and future biological OT distillation targets while keeping the current prototype training loss unchanged.
-- Add explicit kNN enclosing-radius and enclosing-density aliases so kNN density metadata is not confused with fixed-radius physical-density fields.
-- Keep transform/predict bundles, OT distance distillation, neighbor-neighbor pair texture, covariance shrinkage/effective-n flags, and null/ablation/leakage reports planned rather than stable.
-
-## 0.3.3
-
-- Align package metadata with the local `0.3.3` state while keeping commit labels and release tags separate from semantic package versions.
-- Record full pre-cap and retained neighbor counts for cell-centered radius/kNN graphs, plus neighbor-retention fractions and full/retained area-normalized density fields.
-- Use full pre-cap neighbor counts for density correction and density metadata so dense neighborhoods no longer saturate silently at `max_neighbors`.
-- Skip isolated radii in the OT prototype head instead of treating zero-context placeholders as real unit-mass local measures.
-- Require explicit `--n-clusters` for KMeans cell-niche clustering to avoid silent biological interpretation of an arbitrary default K.
-- Keep raw DeepSHE embeddings, normalized DeepSHE embeddings, assignment-score metadata, isolated-cell flags, and SHE-lite/OT-DeepSHE status documented in the cell-niche outputs.
-
-## 0.3.2
-
-- Promote cell-centered SHE-lite as the stable primary path, with the subregion-first multilevel OT path retained as a baseline and diagnostic layer.
-- Add the dedicated `spatial_ot/cell_niche` package for graph construction, soft codebooks, deterministic descriptors, mini-batch DeepSHE, OT prototypes, clustering, and AnnData IO.
-- Add raw DeepSHE embeddings before L2 normalization in `adata.obsm["X_spatial_ot_deepshe_raw"]`.
-- Add `spatial_niche_assignment_score` and `spatial_niche_assignment_score_type` alongside the compatibility `spatial_niche_confidence` field.
-- Add area-normalized local density fields, isolated-cell zero-context handling, shell-preserving radius caps, and targeted cell-niche tests.
-- Mark transform/predict bundles, OT distance distillation, and null/ablation/leakage reports as planned rather than stable.
-
-## 0.2.7
-
-- Require `split_marker_codebook` whenever transport node features use `whitened_features_plus_soft_codebook`, preventing accidental generic Euclidean or Hellinger distances over mixed signed/probability-valued blocks.
-- Change validation-scale balanced FGW defaults to three starts (`outer_product,feature_ot,coordinate_ot`) instead of a single outer-product initialization.
-- Add distance-matrix-level FGW multistart summaries, including pairs with multiple starts, unstable-pair counts/fractions, objective-spread summaries, and best-initialization counts.
-- Add scaled marker/codebook/coordinate cost-contribution summaries to fitted transport cost-scale metadata.
-- Align package metadata with the local `0.2.7` state.
-
-## 0.2.6
-
-- Add an explicit split marker/codebook feature cost for mixed transport node features: signed whitened marker features use squared Euclidean cost while soft codebook posteriors use Hellinger cost, with separate component weights and fitted scales.
-- Add non-entropic balanced-FGW multi-start initialization controls (`outer_product`, `feature_ot`, `coordinate_ot`, `random`) and record objective-by-initialization, best initialization, objective spread, and unstable-pair metadata.
-- Thread mixed-feature weights and FGW initialization controls through config, CLI, scripts, summaries, and optimal-search command generation.
-- Keep generated Python bytecode and `.DS_Store` artifacts removed from the tracked tree.
-- Align package metadata with the local `0.2.6` state.
-
-## 0.2.5
-
-- Fit global transport cost scales across sampled subregion pairs for fused-OT/FGW distance matrices instead of re-normalizing each pair independently.
-- Reject Hellinger/codebook feature costs for signed or mixed whitened transport features; Hellinger is now limited to probability-valued `soft_codebook` features.
-- Expose fused-OT solver controls (`emd` or `sinkhorn`) and Sinkhorn epsilon through config, CLI, scripts, summaries, and optimal-search command generation.
-- Add an explicit `alpha=1` FGW structure-only GW branch, while keeping `alpha=0` as feature-only OT.
-- Add transport clustering diagnostics for average-linkage labels versus nearest-medoid assignments and min-size repair fractions.
-- Record transport cost-scale metadata, pairwise solve counts, FGW distance family, finite-distance status, partial-FGW requested mass, and coupling mass when couplings are audited.
-- Align package metadata with the local `0.2.5` state.
-
-## 0.2.4
-
-- Add true transport-defined heterogeneity clustering modes: `heterogeneity_fused_ot_niche` uses balanced OT on a fused feature-plus-canonical-coordinate ground cost, and `heterogeneity_fgw_niche` uses POT fused Gromov-Wasserstein on measured attributed subregion support objects.
-- Keep `heterogeneity_descriptor_niche` as the scalable descriptor baseline and the legacy `heterogeneity_ot_niche` name as its alias; the new fused-OT/FGW modes set `uses_ot_costs=true` and consume an all-pairs precomputed transport distance matrix.
-- Add transport-mode config, CLI, script, summary, and example-TOML controls, including FGW alpha, solver, epsilon, structure scaling, partial-FGW options, feature-cost selection, and an explicit `heterogeneity_transport_max_subregions` safety cap.
-- Cluster true transport distance matrices with precomputed-distance average linkage plus medoid diagnostics instead of KMeans on descriptor vectors.
-- Add targeted tests for FGW feature-only and structure-only limits, fused-coordinate OT behavior, and transport distance cap handling.
-- Align package metadata with the local `0.2.4` state.
-
-## 0.2.3
-
-- Expose heterogeneity descriptor block weights as reproducible config, CLI, and script parameters instead of hidden environment-only controls.
-- Add local pair-motif graph controls for the heterogeneity descriptor: `all_pairs`, `knn`, or canonical-radius pairs, plus explicit pair-distance bins and per-bin/global normalization.
-- Store codebook assignment entropy and subregion effective-code summaries in heterogeneity descriptor metadata.
-- Add targeted synthetic tests for block-weight behavior and local pair-contact motif detection.
-- Align package metadata with the local `0.2.3` state.
-
-## 0.2.2
-
-- Rename the current heterogeneity target implementation to `subregion_clustering_method="heterogeneity_descriptor_niche"` and keep `heterogeneity_ot_niche` only as a legacy alias until true fused-OT / FGW distances are implemented.
-- Change packaged run defaults from `pooled_subregion_latent` to `heterogeneity_descriptor_niche`; the pooled summary path remains available as a composition/distribution baseline.
-- Block-normalize and explicitly weight the heterogeneity descriptor blocks: soft cell-state composition, diversity/multimodality, canonical spatial-state density fields, and within-subregion state-pair co-occurrence.
-- Change the pairwise co-occurrence descriptor to observed-over-expected enrichment by default, so common cell-state pairs do not dominate solely through marginal composition.
-- Align package metadata with the local `0.2.2` state.
-- Add `subregion_construction_method="joint_refinement"` for constrained segmentation-clustering feedback: deep graph segmentation initializes full-coverage regions, pooled subregion latent clusters provide prototypes, adjacent boundary cells may move only when cluster coherence improves after spatial/cut penalties, and the final partition is reconnected/merged to satisfy `min_cells`.
-- Update the high-VRAM cohort profile to default to `SUBREGION_CONSTRUCTION_METHOD=joint_refinement`, while leaving plain `deep_segmentation` and coordinate-only construction available as ablations.
-- Treat `max_subregion_area_um2` as a soft QC target for generated subregions. It is now reported in summaries and warnings, but it no longer shrinks seed scale, blocks connected-region merging, hard-splits final regions, or takes precedence over `min_cells`.
-- Clarify that the current deep-boundary cohort path should use learned autoencoder context features and joint refinement, while coordinate-only construction remains the baseline/ablation.
-- Change the primary subregion clustering step to `pooled_subregion_latent`: each fitted subregion now gets a raw member-cell feature-distribution latent embedding, all cohort subregion embeddings are pooled, and KMeans/model selection clusters that pooled matrix without using spatial coordinates, subregion centers, overlap edges, compressed OT supports, or OT candidate costs.
-- Upgrade the pooled subregion latent from a fixed mean/std-only summary to configurable distributional modes: `mean_std_shrunk` default reliability shrinkage, `mean_std_skew_count`, `mean_std_quantile`, `codebook_histogram`, and `mean_std_codebook`.
-- Make `mean_std_shrunk` sample-aware by default when `sample_id` is available: low-cell-count subregions now shrink toward a configurable sample/cohort prior instead of only a cohort prior.
-- Expose `subregion_latent_heterogeneity_weight` and `subregion_latent_sample_prior_weight` through config, CLI, scripts, summaries, and diagnostics.
-- Change codebook histogram modes to whiten features before fitting the cell-state codebook and use soft code assignments rather than hard nearest-centroid counts.
-- Add executable validation-suite planning to concern reports, including fixed-K, shrinkage, heterogeneity-weight, codebook-size, spatial-scale/leakage, and spatial-niche validation commands.
-- Add a lightweight `spatial-niche-validation` command that summarizes cluster-level subregion statistics, sample mixing, spatial adjacency homophily with permutation p-values/z-scores, and connected-component fragmentation from a finished run.
-- Keep the historical OT-dictionary assignment available as `subregion_clustering_method="ot_dictionary"` while using fixed-label OT atoms/projections as diagnostics for pooled-latent labels.
-- Save raw-member feature-distribution subregion latent embeddings and clustering-method metadata in summaries, H5AD metadata, subregion tables, and candidate diagnostic NPZ outputs.
-- Make spot-latent cluster-anchor OT fallbacks explicit: occurrence NPZ and `summary.json` now record requested/effective anchor-distance methods, fallback matrices, fallback fractions, and solver status codes.
-- Promote latent MDS quality into visible QC fields, including anchor stress status, atom high-stress cluster counts, and explicit stress/eigenvalue thresholds used by the concern report.
-- Store alternate atom-posterior entropy diagnostics for fixed-temperature and cost-gap-temperature baselines alongside the default entropy-calibrated posterior.
-- Block within-niche latent-heterogeneity claims when anchor OT falls back, MDS geometry is unreliable, posterior entropy is uncalibrated, or temperature calibration suggests inconsistent atom-cost scaling.
-- Render the per-sample spot-latent global key as a 3D plot. The key uses 3D MDS of saved cluster-anchor distances when available, while the slide map keeps global 2D RGB scaling for visual comparability.
-- Calibrate the packaged 10 GB deep-segmentation cohort profile to `DEEP_BATCH_SIZE=81920`, matching the successful pooled run that peaked at roughly 8.9 GiB reserved VRAM without OOM.
-
-## 0.1.12
-
-- Compact the package around the active multilevel OT workflow by removing the old teacher-student scaffold, root-level compatibility facades, legacy TOML/program-prior examples, and redundant shell aliases.
-- Tune the packaged deep-segmentation cohort GPU profile for the local 10 GB RTX 3080 target: larger autoencoder defaults and a 131k batch target roughly 9 GB live VRAM without using the OOM-heavy shapes.
-- Make CPU thread budgeting dynamic and multi-threaded across OpenMP, MKL, OpenBLAS, NumExpr, BLIS, Numba, Torch intraop, and Torch interop; prepared-input validation now gets the same thread env before Python starts.
-- Add CUDA runtime-memory QC to packaged runs so `summary.json` records the requested VRAM target, observed peak reserved memory, and whether the run hit the target band.
-- Replace expected cross-cost cluster anchors in the default spot-latent chart with balanced OT distances between fitted cluster atom measures.
-- Add spot-latent MDS diagnostics for global cluster anchors and per-cluster atom embeddings, including stress and eigenvalue-mass summaries.
-- Calibrate default atom-posterior temperature by target normalized entropy, while retaining fixed and cost-gap modes for diagnostics.
-- Store both unweighted and confidence-weighted cell-level spot-latent previews; confidence weights are for opacity/QC rather than suppressing transitional cells.
-- Make whole-sample spot-latent plots use global latent color scaling by default; within-cluster RGB rescaling is now an explicit diagnostic mode.
-- Split concern reporting between subregion-clustering claims and within-niche latent-heterogeneity claims.
-
-## 0.1.10
-
-- Make coordinate-only data-driven subregion construction the baseline workflow; feature-aware and deep graph segmentation remain explicit sensitivity modes.
-- Add mandatory concern-report generation in packaged runs, with a strict mode that fails when primary-claim blockers remain.
-- Add concern-report gates for coordinate-only baselines, leakage ablations, fixed-K stability after auto-K, and OT candidate-cost comparability.
-- Mark spot-level Fisher/discriminative latent maps as supervised diagnostic visualizations learned from fitted OT labels, not independent validation.
-- Keep whole-sample niche and spot-latent plotting outputs organized by sample, with subregion polygon views and inherited cell-label views.
-- Update package metadata to `0.1.10` and keep generated artifacts out of version control.
+- Make `pairwise-niche` the primary spatial niche workflow.
+- Add cohort expression embeddings, cell-centered local measures, exact blockwise Sinkhorn OT distance matrices, and distance-based clustering.
+- Write `X_gene_cohort`, `cell_ot_dissimilarity`, `cell_ot_affinity`, `ot_niche`, and connected `ot_niche_instance` outputs.
+- Keep `cell-niche` as a descriptor/DeepSHE baseline and QC workflow.
+- Remove the legacy boundary-generation workflow, search helpers, old deep feature adapter, older run scripts, TOML configs, and matching tests.
+- Keep input pooling and feature-cache preparation helpers because they are still needed for preprocessed Visium HD and Xenium cohorts.
+- Preserve direct cell-level baseline outputs: `spatial_niche`, `spatial_niche_assignment_score`, and connected cell-level `spatial_niche_instance`.
+- Confirm package metadata version `3.0.6`.

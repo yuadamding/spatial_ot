@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spatial-ot"
-version = "3.0.5"
-description = "Cell-centered spatial heterogeneity embedding, spatial niche discovery, and OT diagnostics for spatial omics."
+version = "3.0.6"
+description = "Pairwise optimal-transport neighborhood dissimilarity and spatial niche discovery for spatial omics."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "Yu Adam Ding"}]
@@ -31,10 +31,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-geometry = [
-  "geopandas>=0.14",
-  "shapely>=2.0",
-]
 parallel = [
   "joblib>=1.4",
   "tqdm>=4.66",
@@ -65,8 +61,4 @@ where = ["."]
 include = ["spatial_ot*"]
 
 [tool.setuptools.data-files]
-"share/spatial-ot/configs" = ["configs/*.toml"]
-"share/spatial-ot/scripts" = [
-  "scripts/README.md",
-  "scripts/*.sh",
-]
+"share/spatial-ot/scripts" = ["scripts/README.md", "scripts/*.sh"]
