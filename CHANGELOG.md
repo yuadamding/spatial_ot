@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.3
+
+- Align package metadata with the local `0.3.3` state while keeping commit labels and release tags separate from semantic package versions.
+- Record full pre-cap and retained neighbor counts for cell-centered radius/kNN graphs, plus neighbor-retention fractions and full/retained area-normalized density fields.
+- Use full pre-cap neighbor counts for density correction and density metadata so dense neighborhoods no longer saturate silently at `max_neighbors`.
+- Skip isolated radii in the OT prototype head instead of treating zero-context placeholders as real unit-mass local measures.
+- Require explicit `--n-clusters` for KMeans cell-niche clustering to avoid silent biological interpretation of an arbitrary default K.
+- Keep raw DeepSHE embeddings, normalized DeepSHE embeddings, assignment-score metadata, isolated-cell flags, and SHE-lite/OT-DeepSHE status documented in the cell-niche outputs.
+
+## 0.3.2
+
+- Promote cell-centered SHE-lite as the stable primary path, with the subregion-first multilevel OT path retained as a baseline and diagnostic layer.
+- Add the dedicated `spatial_ot/cell_niche` package for graph construction, soft codebooks, deterministic descriptors, mini-batch DeepSHE, OT prototypes, clustering, and AnnData IO.
+- Add raw DeepSHE embeddings before L2 normalization in `adata.obsm["X_spatial_ot_deepshe_raw"]`.
+- Add `spatial_niche_assignment_score` and `spatial_niche_assignment_score_type` alongside the compatibility `spatial_niche_confidence` field.
+- Add area-normalized local density fields, isolated-cell zero-context handling, shell-preserving radius caps, and targeted cell-niche tests.
+- Mark transform/predict bundles, OT distance distillation, and null/ablation/leakage reports as planned rather than stable.
+
 ## 0.2.7
 
 - Require `split_marker_codebook` whenever transport node features use `whitened_features_plus_soft_codebook`, preventing accidental generic Euclidean or Hellinger distances over mixed signed/probability-valued blocks.

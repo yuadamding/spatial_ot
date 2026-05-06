@@ -15,6 +15,10 @@ class NeighborhoodGraph:
     mode: str
     radius_um: float | None = None
     k: int | None = None
+    full_neighbor_counts: np.ndarray | None = None
+    retained_neighbor_counts: np.ndarray | None = None
+    full_neighbor_radii_um: np.ndarray | None = None
+    retained_neighbor_radii_um: np.ndarray | None = None
     metadata: dict[str, object] = field(default_factory=dict)
 
 
@@ -116,13 +120,21 @@ def _stratified_distance_cap(
 
 
 def _apply_density_correction(
-    connectivities: sparse.csr_matrix, *, density_correction: float
+    connectivities: sparse.csr_matrix,
+    *,
+    density_correction: float,
+    degree_reference: np.ndarray | None = None,
 ) -> sparse.csr_matrix:
     alpha = float(np.clip(float(density_correction), 0.0, 1.0))
     if alpha <= 0.0 or connectivities.nnz == 0:
         return connectivities.tocsr()
     coo = connectivities.tocoo(copy=True)
-    degree = np.asarray(connectivities.sum(axis=1)).reshape(-1).astype(np.float64)
+    if degree_reference is None:
+        degree = np.asarray(connectivities.sum(axis=1)).reshape(-1).astype(np.float64)
+    else:
+        degree = np.asarray(degree_reference, dtype=np.float64).reshape(-1)
+        if degree.shape[0] != connectivities.shape[0]:
+            raise ValueError("degree_reference must have one value per graph row.")
     neighbor_degree = np.maximum(degree[coo.col], 1e-8)
     coo.data = (np.asarray(coo.data, dtype=np.float64) / (neighbor_degree**alpha)).astype(
         np.float32
@@ -138,10 +150,26 @@ def _graph_metadata(
     kernel: str,
     max_neighbors: int,
     density_correction: float,
+    full_neighbor_counts: np.ndarray | None = None,
+    retained_neighbor_counts: np.ndarray | None = None,
     radius_um: float | None = None,
     k: int | None = None,
+    shell_coordinate_system: str | None = None,
 ) -> dict[str, object]:
     degree = np.diff(matrix.indptr).astype(np.int32)
+    full_counts = (
+        np.asarray(full_neighbor_counts, dtype=np.int32).reshape(-1)
+        if full_neighbor_counts is not None
+        else degree
+    )
+    retained_counts = (
+        np.asarray(retained_neighbor_counts, dtype=np.int32).reshape(-1)
+        if retained_neighbor_counts is not None
+        else degree
+    )
+    retention_fraction = np.ones(full_counts.shape[0], dtype=np.float32)
+    positive = full_counts > 0
+    retention_fraction[positive] = retained_counts[positive] / full_counts[positive]
     sample_values, sample_counts = np.unique(sample_ids.astype(str), return_counts=True)
     return {
         "mode": str(mode),
@@ -150,11 +178,26 @@ def _graph_metadata(
         "kernel": _canonical_kernel(kernel),
         "max_neighbors": int(max_neighbors),
         "density_correction": float(density_correction),
+        "density_correction_degree_source": "full_neighbor_counts"
+        if full_neighbor_counts is not None
+        else "retained_weighted_degree",
         "n_cells": int(matrix.shape[0]),
         "n_edges": int(matrix.nnz),
-        "mean_degree": float(np.mean(degree)) if degree.size else 0.0,
-        "max_degree": int(np.max(degree)) if degree.size else 0,
-        "isolated_fraction": float(np.mean(degree == 0)) if degree.size else 0.0,
+        "mean_degree": float(np.mean(retained_counts)) if retained_counts.size else 0.0,
+        "max_degree": int(np.max(retained_counts)) if retained_counts.size else 0,
+        "mean_full_degree": float(np.mean(full_counts)) if full_counts.size else 0.0,
+        "max_full_degree": int(np.max(full_counts)) if full_counts.size else 0,
+        "mean_retained_degree": float(np.mean(retained_counts))
+        if retained_counts.size
+        else 0.0,
+        "max_retained_degree": int(np.max(retained_counts))
+        if retained_counts.size
+        else 0,
+        "mean_neighbor_retention_fraction": float(np.mean(retention_fraction))
+        if retention_fraction.size
+        else 1.0,
+        "isolated_fraction": float(np.mean(full_counts == 0)) if full_counts.size else 0.0,
+        "shell_coordinate_system": str(shell_coordinate_system or "unknown"),
         "sample_counts": {
             str(sample): int(count)
             for sample, count in zip(sample_values, sample_counts, strict=False)
@@ -185,6 +228,10 @@ def build_radius_graphs(
     graphs: dict[str, NeighborhoodGraph] = {}
     sample_order = list(dict.fromkeys(samples.tolist()))
     for radius in radii:
+        full_counts = np.zeros(int(xy.shape[0]), dtype=np.int32)
+        retained_counts = np.zeros(int(xy.shape[0]), dtype=np.int32)
+        full_radii = np.full(int(xy.shape[0]), float(radius), dtype=np.float32)
+        retained_radii = np.full(int(xy.shape[0]), float(radius), dtype=np.float32)
         rows: list[np.ndarray] = []
         cols: list[np.ndarray] = []
         weights: list[np.ndarray] = []
@@ -207,6 +254,8 @@ def build_radius_graphs(
                     finite &= ind != int(row_local)
                 dist = dist[finite]
                 ind = ind[finite]
+                row_full_count = int(dist.size)
+                full_counts[int(global_idx[row_local])] = row_full_count
                 if dist.size == 0:
                     continue
                 row_weights = _kernel_weights(
@@ -220,6 +269,7 @@ def build_radius_graphs(
                         max_neighbors=max_neighbors,
                         radius_um=float(radius),
                     )
+                retained_counts[int(global_idx[row_local])] = int(dist.size)
                 rows.append(
                     np.full(ind.shape[0], int(global_idx[row_local]), dtype=np.int64)
                 )
@@ -239,7 +289,9 @@ def build_radius_graphs(
             (weight_arr, (row_arr, col_arr)), shape=(n_cells, n_cells)
         )
         connectivities = _apply_density_correction(
-            connectivities, density_correction=density_correction
+            connectivities,
+            density_correction=density_correction,
+            degree_reference=full_counts,
         )
         distances_matrix = sparse.csr_matrix(
             (dist_arr, (row_arr, col_arr)), shape=(n_cells, n_cells)
@@ -251,6 +303,10 @@ def build_radius_graphs(
             distances=distances_matrix,
             mode="radius",
             radius_um=float(radius),
+            full_neighbor_counts=full_counts,
+            retained_neighbor_counts=retained_counts,
+            full_neighbor_radii_um=full_radii,
+            retained_neighbor_radii_um=retained_radii,
             metadata=_graph_metadata(
                 connectivities,
                 sample_ids=samples,
@@ -258,7 +314,10 @@ def build_radius_graphs(
                 kernel=kernel,
                 max_neighbors=max_neighbors,
                 density_correction=density_correction,
+                full_neighbor_counts=full_counts,
+                retained_neighbor_counts=retained_counts,
                 radius_um=float(radius),
+                shell_coordinate_system="physical_radius_fraction",
             ),
         )
     return graphs
@@ -286,6 +345,10 @@ def build_knn_graphs(
     graphs: dict[str, NeighborhoodGraph] = {}
     sample_order = list(dict.fromkeys(samples.tolist()))
     for k_value in requested_k:
+        full_counts = np.zeros(int(xy.shape[0]), dtype=np.int32)
+        retained_counts = np.zeros(int(xy.shape[0]), dtype=np.int32)
+        full_radii = np.zeros(int(xy.shape[0]), dtype=np.float32)
+        retained_radii = np.zeros(int(xy.shape[0]), dtype=np.float32)
         rows: list[np.ndarray] = []
         cols: list[np.ndarray] = []
         weights: list[np.ndarray] = []
@@ -298,7 +361,6 @@ def build_knn_graphs(
             n_neighbors = min(
                 int(k_value) + (0 if include_self else 1),
                 int(global_idx.size),
-                max_neighbors + (0 if include_self else 1),
             )
             if n_neighbors <= 0:
                 continue
@@ -315,11 +377,20 @@ def build_knn_graphs(
                     finite &= ind != int(row_local)
                 dist = dist[finite]
                 ind = ind[finite]
+                row_full_count = int(min(dist.size, int(k_value)))
+                full_counts[int(global_idx[row_local])] = row_full_count
+                if row_full_count > 0:
+                    full_radii[int(global_idx[row_local])] = float(
+                        np.max(dist[:row_full_count])
+                    )
                 if dist.size == 0:
                     continue
                 keep = min(dist.size, int(k_value), max_neighbors)
                 dist = dist[:keep]
                 ind = ind[:keep]
+                retained_counts[int(global_idx[row_local])] = int(keep)
+                if keep > 0:
+                    retained_radii[int(global_idx[row_local])] = float(np.max(dist))
                 rows.append(
                     np.full(ind.shape[0], int(global_idx[row_local]), dtype=np.int64)
                 )
@@ -339,7 +410,9 @@ def build_knn_graphs(
             (weight_arr, (row_arr, col_arr)), shape=(n_cells, n_cells)
         )
         connectivities = _apply_density_correction(
-            connectivities, density_correction=density_correction
+            connectivities,
+            density_correction=density_correction,
+            degree_reference=full_counts,
         )
         distances_matrix = sparse.csr_matrix(
             (dist_arr, (row_arr, col_arr)), shape=(n_cells, n_cells)
@@ -351,6 +424,10 @@ def build_knn_graphs(
             distances=distances_matrix,
             mode="knn",
             k=int(k_value),
+            full_neighbor_counts=full_counts,
+            retained_neighbor_counts=retained_counts,
+            full_neighbor_radii_um=full_radii,
+            retained_neighbor_radii_um=retained_radii,
             metadata=_graph_metadata(
                 connectivities,
                 sample_ids=samples,
@@ -358,7 +435,10 @@ def build_knn_graphs(
                 kernel=kernel,
                 max_neighbors=max_neighbors,
                 density_correction=density_correction,
+                full_neighbor_counts=full_counts,
+                retained_neighbor_counts=retained_counts,
                 k=int(k_value),
+                shell_coordinate_system="row_max_distance_fraction",
             ),
         )
     return graphs

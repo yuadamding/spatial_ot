@@ -1006,7 +1006,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--n-clusters",
         type=int,
         default=None,
-        help="Number of niches for k-means fixed-K runs.",
+        help="Required number of niches for KMeans fixed-K cell-niche runs.",
     )
     cell_niche.add_argument(
         "--resolution",

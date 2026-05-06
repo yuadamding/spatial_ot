@@ -18,6 +18,7 @@ from spatial_ot.cell_niche import (
     run_cell_niche_on_h5ad,
     sinkhorn_balanced_distance,
 )
+from spatial_ot.cell_niche.cluster import cluster_embeddings
 from spatial_ot.cell_niche.losses import deepshe_loss
 
 
@@ -76,6 +77,14 @@ def test_radius_graph_cap_preserves_outer_shell_neighbors() -> None:
     row0_distances = dist.data[dist.indptr[0] : dist.indptr[1]]
     assert row0_distances.size == 3
     assert np.any(row0_distances > 8.0)
+    np.testing.assert_array_equal(graphs["r10"].full_neighbor_counts[:1], np.asarray([6]))
+    np.testing.assert_array_equal(
+        graphs["r10"].retained_neighbor_counts[:1],
+        np.asarray([3]),
+    )
+    assert graphs["r10"].metadata["max_full_degree"] == 6
+    assert graphs["r10"].metadata["max_retained_degree"] == 3
+    assert graphs["r10"].metadata["shell_coordinate_system"] == "physical_radius_fraction"
 
 
 def test_knn_graphs_never_connect_across_samples() -> None:
@@ -103,6 +112,29 @@ def test_knn_graphs_never_connect_across_samples() -> None:
     assert graph[2, 3] > 0
     assert graph[0, 2] == 0
     assert graph[1, 3] == 0
+
+
+def test_knn_graph_records_full_and_retained_neighbor_counts() -> None:
+    coords = np.asarray([[float(idx), 0.0] for idx in range(6)], dtype=np.float32)
+    samples = np.asarray(["s"] * coords.shape[0], dtype=object)
+
+    graphs = build_knn_graphs(
+        coords,
+        samples,
+        k_values=(4,),
+        max_neighbors=2,
+        include_self=False,
+        kernel="uniform",
+    )
+
+    graph = graphs["k4"]
+    assert int(graph.full_neighbor_counts[2]) == 4
+    assert int(graph.retained_neighbor_counts[2]) == 2
+    assert float(graph.full_neighbor_radii_um[2]) == 2.0
+    assert float(graph.retained_neighbor_radii_um[2]) == 1.0
+    assert graph.metadata["max_full_degree"] == 4
+    assert graph.metadata["max_retained_degree"] == 2
+    assert graph.metadata["shell_coordinate_system"] == "row_max_distance_fraction"
 
 
 def test_graph_kernel_aliases_are_canonicalized() -> None:
@@ -162,6 +194,10 @@ def test_cell_niche_dataset_batch_shapes() -> None:
     assert batch["mask"].dtype == torch.bool
     assert batch["descriptor_targets"].shape == (3, 7)
     assert batch["is_isolated"].shape == (3, 1)
+    assert batch["radius_active"].shape == (3, 1)
+    assert batch["n_neighbors_full"].shape == (3, 1)
+    assert batch["n_neighbors_retained"].shape == (3, 1)
+    assert batch["neighbor_retention_fraction"].shape == (3, 1)
     assert batch["n_neighbors"].shape == (3, 1)
     assert batch["local_density_per_um2"].shape == (3, 1)
     assert batch["local_density"].shape == (3, 1)
@@ -189,6 +225,9 @@ def test_cell_niche_dataset_isolated_cell_uses_zero_context_token() -> None:
     batch = dataset.collate_fn([0])
 
     assert bool(batch["is_isolated"][0, 0])
+    assert bool(~batch["radius_active"][0, 0]) is True
+    assert float(batch["n_neighbors_full"][0, 0]) == 0.0
+    assert float(batch["n_neighbors_retained"][0, 0]) == 0.0
     assert float(batch["n_neighbors"][0, 0]) == 0.0
     assert float(batch["local_density_per_um2"][0, 0]) == 0.0
     assert float(batch["local_density"][0, 0]) == 0.0
@@ -296,6 +335,58 @@ def test_ot_prototype_head_output_shape() -> None:
     assert distances.shape == (5, 3)
     assert posterior.shape == (5, 3)
     torch.testing.assert_close(posterior.sum(dim=1), torch.ones(5), atol=1e-5, rtol=1e-5)
+
+
+def test_ot_prototype_head_skips_isolated_radii() -> None:
+    torch.manual_seed(6)
+    head = OTPrototypeHead(
+        n_radii=2,
+        token_dim=4,
+        n_prototypes=2,
+        support_size=2,
+        epsilon=0.1,
+        sinkhorn_iters=3,
+    )
+    token_embeddings = torch.randn(1, 2, 3, 4)
+    weights = torch.full((1, 2, 3), 1.0 / 3.0)
+    mask = torch.ones((1, 2, 3), dtype=torch.bool)
+
+    active_distances, _ = head(
+        token_embeddings=token_embeddings,
+        weights=weights,
+        mask=mask,
+        radius_active=torch.tensor([[True, False]]),
+    )
+    one_radius_head = OTPrototypeHead(
+        n_radii=1,
+        token_dim=4,
+        n_prototypes=2,
+        support_size=2,
+        epsilon=0.1,
+        sinkhorn_iters=3,
+    )
+    with torch.no_grad():
+        one_radius_head.prototype_embeddings.copy_(head.prototype_embeddings[:1])
+        one_radius_head.prototype_mass_logits.copy_(head.prototype_mass_logits[:1])
+    one_radius_distances, _ = one_radius_head(
+        token_embeddings=token_embeddings[:, :1],
+        weights=weights[:, :1],
+        mask=mask[:, :1],
+        radius_active=torch.tensor([[True]]),
+    )
+
+    torch.testing.assert_close(active_distances, one_radius_distances)
+
+
+def test_kmeans_clustering_requires_explicit_n_clusters() -> None:
+    embedding = np.asarray([[0.0], [1.0], [2.0]], dtype=np.float32)
+
+    try:
+        cluster_embeddings(embedding, method="kmeans", n_clusters=None)
+    except ValueError as exc:
+        assert "requires an explicit n_clusters" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("KMeans should reject implicit default K")
 
 
 def test_deepshe_forward_backward_runs() -> None:
@@ -448,7 +539,12 @@ def test_cell_niche_descriptor_run_writes_cell_level_outputs(tmp_path: Path) -> 
     assert "spatial_connectivities_r2p5" in fitted.obsp
     assert "spatial_distances_r4" in fitted.obsp
     assert "n_neighbors_r2p5" in fitted.obs
+    assert "n_neighbors_full_r2p5" in fitted.obs
+    assert "n_neighbors_retained_r2p5" in fitted.obs
+    assert "neighbor_retention_fraction_r2p5" in fitted.obs
     assert "local_density_per_um2_r2p5" in fitted.obs
+    assert "local_density_full_per_um2_r2p5" in fitted.obs
+    assert "local_density_retained_per_um2_r2p5" in fitted.obs
     np.testing.assert_allclose(
         fitted.obs["local_density_per_um2_r2p5"].to_numpy(dtype=np.float32),
         fitted.obs["n_neighbors_r2p5"].to_numpy(dtype=np.float32) / (np.pi * 2.5 * 2.5),
@@ -465,6 +561,57 @@ def test_cell_niche_descriptor_run_writes_cell_level_outputs(tmp_path: Path) -> 
     assert fitted.uns["spatial_niche_summary"]["primary_unit"] == "cell"
     assert summary["primary_unit"] == "cell"
     assert summary["n_niches"] == 3
+
+
+def test_cell_niche_density_uses_full_pre_cap_neighbor_count(tmp_path: Path) -> None:
+    coords = np.asarray([[float(idx), 0.0] for idx in range(7)], dtype=np.float32)
+    adata = ad.AnnData(
+        X=np.ones((coords.shape[0], 2), dtype=np.float32),
+        obs=pd.DataFrame(index=[f"cell_{idx}" for idx in range(coords.shape[0])]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    )
+    adata.obs["cell_x"] = coords[:, 0]
+    adata.obs["cell_y"] = coords[:, 1]
+    adata.obs["sample_id"] = "s"
+    adata.obsm["X_test_features"] = np.column_stack(
+        [coords[:, 0], coords[:, 1], np.sin(coords[:, 0])]
+    ).astype(np.float32)
+    input_h5ad = tmp_path / "density_input.h5ad"
+    adata.write_h5ad(input_h5ad)
+
+    summary = run_cell_niche_on_h5ad(
+        input_h5ad=input_h5ad,
+        output_dir=tmp_path / "density_out",
+        feature_obsm_key="X_test_features",
+        spatial_x_key="cell_x",
+        spatial_y_key="cell_y",
+        sample_obs_key="sample_id",
+        radii_um=(10.0,),
+        state_codebook_size=2,
+        state_codebook_sample_size=7,
+        feature_pca_dim=3,
+        embedding_dim=2,
+        cluster_method="kmeans",
+        n_clusters=2,
+        max_neighbors=3,
+        pair_top_states=2,
+        seed=17,
+    )
+
+    fitted = ad.read_h5ad(summary["outputs"]["h5ad"])
+    assert float(fitted.obs["n_neighbors_full_r10"].iloc[0]) == 6.0
+    assert float(fitted.obs["n_neighbors_retained_r10"].iloc[0]) == 3.0
+    assert float(fitted.obs["neighbor_retention_fraction_r10"].iloc[0]) == 0.5
+    np.testing.assert_allclose(
+        float(fitted.obs["local_density_full_per_um2_r10"].iloc[0]),
+        6.0 / (np.pi * 10.0 * 10.0),
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        float(fitted.obs["local_density_retained_per_um2_r10"].iloc[0]),
+        3.0 / (np.pi * 10.0 * 10.0),
+        rtol=1e-5,
+    )
 
 
 def test_descriptor_mode_rejects_ot_prototype_flag(tmp_path: Path) -> None:

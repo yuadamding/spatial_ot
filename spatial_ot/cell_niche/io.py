@@ -210,9 +210,31 @@ def _row_max_distances(graph: NeighborhoodGraph) -> np.ndarray:
     return out
 
 
-def _local_density_per_um2(graph: NeighborhoodGraph) -> np.ndarray:
-    degree = np.diff(graph.connectivities.indptr).astype(np.float32)
-    if graph.radius_um is not None and float(graph.radius_um) > 0.0:
+def _graph_counts(graph: NeighborhoodGraph) -> tuple[np.ndarray, np.ndarray]:
+    retained = (
+        np.asarray(graph.retained_neighbor_counts, dtype=np.float32).reshape(-1)
+        if graph.retained_neighbor_counts is not None
+        else np.diff(graph.connectivities.indptr).astype(np.float32)
+    )
+    full = (
+        np.asarray(graph.full_neighbor_counts, dtype=np.float32).reshape(-1)
+        if graph.full_neighbor_counts is not None
+        else retained
+    )
+    return full, retained
+
+
+def _local_density_per_um2(
+    graph: NeighborhoodGraph,
+    counts: np.ndarray | None = None,
+    radius_values: np.ndarray | None = None,
+) -> np.ndarray:
+    if counts is None:
+        counts, _ = _graph_counts(graph)
+    degree = np.asarray(counts, dtype=np.float32).reshape(-1)
+    if radius_values is not None:
+        radius = np.asarray(radius_values, dtype=np.float32).reshape(-1)
+    elif graph.radius_um is not None and float(graph.radius_um) > 0.0:
         radius = np.full(degree.shape, float(graph.radius_um), dtype=np.float32)
     else:
         radius = _row_max_distances(graph)
@@ -555,13 +577,32 @@ def run_cell_niche_on_h5ad(
     adata.obs["spatial_niche_instance_int"] = instance_ids.astype(np.int32)
     for graph_key, graph in graphs.items():
         suffix = str(graph_key).replace("-", "_")
-        degree = np.diff(graph.connectivities.indptr).astype(np.float32)
-        density = _local_density_per_um2(graph)
-        adata.obs[f"n_neighbors_{suffix}"] = degree
-        adata.obs[f"local_density_per_um2_{suffix}"] = density
-        # Backward-compatible alias; this is area-normalized density, not count.
-        adata.obs[f"local_density_{suffix}"] = density
-        adata.obs[f"is_isolated_{suffix}"] = degree == 0
+        full_degree, retained_degree = _graph_counts(graph)
+        full_radius = (
+            np.asarray(graph.full_neighbor_radii_um, dtype=np.float32).reshape(-1)
+            if graph.full_neighbor_radii_um is not None
+            else None
+        )
+        retained_radius = (
+            np.asarray(graph.retained_neighbor_radii_um, dtype=np.float32).reshape(-1)
+            if graph.retained_neighbor_radii_um is not None
+            else None
+        )
+        retention = np.ones(full_degree.shape, dtype=np.float32)
+        positive = full_degree > 0
+        retention[positive] = retained_degree[positive] / full_degree[positive]
+        full_density = _local_density_per_um2(graph, full_degree, full_radius)
+        retained_density = _local_density_per_um2(graph, retained_degree, retained_radius)
+        adata.obs[f"n_neighbors_{suffix}"] = full_degree
+        adata.obs[f"n_neighbors_full_{suffix}"] = full_degree
+        adata.obs[f"n_neighbors_retained_{suffix}"] = retained_degree
+        adata.obs[f"neighbor_retention_fraction_{suffix}"] = retention
+        adata.obs[f"local_density_per_um2_{suffix}"] = full_density
+        adata.obs[f"local_density_full_per_um2_{suffix}"] = full_density
+        adata.obs[f"local_density_retained_per_um2_{suffix}"] = retained_density
+        # Backward-compatible alias; this is area-normalized full density, not count.
+        adata.obs[f"local_density_{suffix}"] = full_density
+        adata.obs[f"is_isolated_{suffix}"] = full_degree == 0
 
     h5ad_path = out_dir / "cells_cell_niche.h5ad"
     descriptor_npz_path = out_dir / "cell_niche_descriptor_arrays.npz"

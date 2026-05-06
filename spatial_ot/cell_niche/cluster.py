@@ -145,9 +145,14 @@ def cluster_embeddings(
         raise ValueError("embedding must be a 2D matrix.")
     requested = str(method or "kmeans").strip().lower()
     if requested in {"kmeans", "mini_batch_kmeans", "minibatch_kmeans"}:
+        if n_clusters is None:
+            raise ValueError(
+                "KMeans cell-niche clustering requires an explicit n_clusters value. "
+                "Pass --n-clusters for fixed-K runs."
+            )
         return _kmeans_cluster(
             x,
-            n_clusters=15 if n_clusters is None else int(n_clusters),
+            n_clusters=int(n_clusters),
             random_state=int(random_state),
             n_init=int(n_init),
         )

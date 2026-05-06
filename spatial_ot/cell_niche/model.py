@@ -149,12 +149,18 @@ class OTPrototypeHead(nn.Module):
         token_embeddings: torch.Tensor,
         weights: torch.Tensor,
         mask: torch.Tensor,
+        radius_active: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size = int(token_embeddings.shape[0])
         source_weights = weights * mask.to(dtype=weights.dtype)
         source_weights = source_weights / source_weights.sum(dim=2, keepdim=True).clamp_min(
             1.0e-12
         )
+        if radius_active is None:
+            active = torch.any(mask, dim=2).to(dtype=token_embeddings.dtype)
+        else:
+            active = radius_active.to(device=token_embeddings.device, dtype=token_embeddings.dtype)
+        active_count = active.sum(dim=1).clamp_min(1.0)
         distances = []
         for proto_idx in range(self.n_prototypes):
             total = torch.zeros(
@@ -169,14 +175,15 @@ class OTPrototypeHead(nn.Module):
                     self.prototype_mass_logits[radius_idx, proto_idx], dim=0
                 )
                 cost = weighted_pairwise_sqdist(source, proto.unsqueeze(0).expand(batch_size, -1, -1))
-                total = total + sinkhorn_balanced_distance(
+                radius_distance = sinkhorn_balanced_distance(
                     cost,
                     source_weights[:, radius_idx],
                     target.unsqueeze(0).expand(batch_size, -1),
                     epsilon=self.epsilon,
                     n_iters=self.sinkhorn_iters,
                 )
-            distances.append(total / max(self.n_radii, 1))
+                total = total + active[:, radius_idx] * radius_distance
+            distances.append(total / active_count)
         dist = torch.stack(distances, dim=1)
         posterior = torch.softmax(-dist / max(float(self.temperature), 1.0e-6), dim=1)
         return dist, posterior
@@ -243,6 +250,7 @@ class OTDeepSHEModel(nn.Module):
                 token_embeddings=token_embeddings,
                 weights=batch["weights"],
                 mask=batch["mask"],
+                radius_active=batch.get("radius_active"),
             )
         else:
             distances, posterior = None, None
