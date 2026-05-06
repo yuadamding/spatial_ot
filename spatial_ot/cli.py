@@ -4,14 +4,28 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
+
 from .feature_source import prepare_h5ad_feature_cache
 from .cell_niche import run_cell_niche_on_h5ad
 from .pairwise_niche import run_pairwise_niche_on_h5ad
 from .pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_directory
 
 
+def _json_default(value):
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _print_json(payload: dict[str, object]) -> None:
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    print(json.dumps(payload, indent=2, sort_keys=True, default=_json_default))
 
 
 def _add_cell_niche_args(parser: argparse.ArgumentParser) -> None:
@@ -203,13 +217,30 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Recorded for provenance; batch-corrected embeddings should be precomputed.",
     )
+    parser.add_argument(
+        "--standardize-precomputed",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Standardize precomputed expression embeddings before OT.",
+    )
     parser.add_argument("--radius-um", type=float, default=50.0)
-    parser.add_argument("--max-neighbors", type=int, default=32)
+    parser.add_argument(
+        "--max-neighbors",
+        type=int,
+        default=32,
+        help="Maximum number of neighbors retained inside --radius-um for each cell graph.",
+    )
     parser.add_argument(
         "--include-anchor",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Include the anchor cell as a node in its local measure.",
+    )
+    parser.add_argument(
+        "--isolated-policy",
+        default="zero_dummy",
+        choices=["zero_dummy", "anchor_fallback"],
+        help="How to represent no-neighbor cells when the anchor is not included.",
     )
     parser.add_argument(
         "--graph-kernel",
@@ -227,13 +258,37 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--expression-weight", type=float, default=1.0)
     parser.add_argument("--spatial-weight", type=float, default=0.25)
     parser.add_argument("--distance-weight", type=float, default=0.10)
+    parser.add_argument(
+        "--ground-cost-normalization",
+        default="sampled_median",
+        choices=["none", "dimension", "sampled_median"],
+        help="Normalize expression/spatial/radial cost contributions before weighting.",
+    )
+    parser.add_argument("--ground-cost-sample-pairs", type=int, default=10000)
     parser.add_argument("--anchor-weight", type=float, default=0.25)
     parser.add_argument("--sinkhorn-epsilon", type=float, default=0.05)
     parser.add_argument("--sinkhorn-iters", type=int, default=50)
     parser.add_argument(
         "--distance-mode",
-        default="sinkhorn_divergence",
-        choices=["sinkhorn", "sinkhorn_divergence"],
+        default="debiased_entropic_transport",
+        choices=[
+            "sinkhorn",
+            "debiased_entropic_transport",
+            "sinkhorn_divergence",
+            "fused_gromov_wasserstein",
+        ],
+    )
+    parser.add_argument(
+        "--fgw-alpha",
+        type=float,
+        default=0.5,
+        help="Structure/topology weight for fused Gromov-Wasserstein graph distance.",
+    )
+    parser.add_argument(
+        "--fgw-iters",
+        type=int,
+        default=5,
+        help="Outer FGW coupling-refinement iterations.",
     )
     parser.add_argument(
         "--pairwise-mode",
@@ -247,6 +302,18 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=5000,
         help="Safety guard for exact all-pairs OT.",
+    )
+    parser.add_argument(
+        "--max-ot-work-units",
+        type=float,
+        default=5e11,
+        help="Safety guard for exact all-pairs Sinkhorn work.",
+    )
+    parser.add_argument(
+        "--force-large-exact-ot",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Override exact all-pairs size and work guards.",
     )
     parser.add_argument(
         "--distance-store",
@@ -266,7 +333,14 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         help="Required for agglomerative and k-medoids clustering.",
     )
     parser.add_argument("--ot-knn", type=int, default=30)
+    parser.add_argument(
+        "--ot-affinity-scaling",
+        default="local",
+        choices=["local", "global"],
+    )
     parser.add_argument("--leiden-resolution", type=float, default=1.0)
+    parser.add_argument("--instance-radius-um", type=float, default=None)
+    parser.add_argument("--instance-max-neighbors", type=int, default=512)
     parser.add_argument("--seed", type=int, default=1337)
 
 
@@ -359,9 +433,11 @@ def main() -> None:
             embedding_method=args.embedding_method,
             embedding_dim=args.embedding_dim,
             expression_batch_key=args.expression_batch_key,
+            standardize_precomputed=args.standardize_precomputed,
             radius_um=args.radius_um,
             max_neighbors=args.max_neighbors,
             include_anchor=args.include_anchor,
+            isolated_policy=args.isolated_policy,
             graph_kernel=args.graph_kernel,
             cap_mode=args.cap_mode,
             cap_state_clusters=args.cap_state_clusters,
@@ -369,19 +445,28 @@ def main() -> None:
             expression_weight=args.expression_weight,
             spatial_weight=args.spatial_weight,
             distance_weight=args.distance_weight,
+            ground_cost_normalization=args.ground_cost_normalization,
+            ground_cost_sample_pairs=args.ground_cost_sample_pairs,
             anchor_weight=args.anchor_weight,
             sinkhorn_epsilon=args.sinkhorn_epsilon,
             sinkhorn_iters=args.sinkhorn_iters,
             distance_mode=args.distance_mode,
+            fgw_alpha=args.fgw_alpha,
+            fgw_iters=args.fgw_iters,
             pairwise_mode=args.pairwise_mode,
             block_size=args.block_size,
             device=args.device,
             max_exact_cells=args.max_exact_cells,
+            max_ot_work_units=args.max_ot_work_units,
+            force_large_exact_ot=args.force_large_exact_ot,
             distance_store=args.distance_store,
             cluster_method=args.cluster_method,
             n_clusters=args.n_clusters,
             ot_knn=args.ot_knn,
+            ot_affinity_scaling=args.ot_affinity_scaling,
             leiden_resolution=args.leiden_resolution,
+            instance_radius_um=args.instance_radius_um,
+            instance_max_neighbors=args.instance_max_neighbors,
             seed=args.seed,
         )
     elif args.command == "cell-niche":

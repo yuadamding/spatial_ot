@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from .local_measure import LocalMeasureSet
+from .fgw import fused_gromov_wasserstein_block
 from .sinkhorn import sinkhorn_ot_block
 
 
@@ -18,6 +19,23 @@ def _resolve_device(device: str) -> torch.device:
 
 def _estimate_dense_bytes(n_cells: int) -> int:
     return int(n_cells) * int(n_cells) * np.dtype("float32").itemsize
+
+
+def estimate_pairwise_ot_work(
+    *,
+    n_cells: int,
+    support_size: int,
+    sinkhorn_iters: int,
+) -> dict[str, float]:
+    n_pairs = int(n_cells) * (int(n_cells) + 1) // 2
+    work_units = float(n_pairs) * float(support_size) ** 2 * float(sinkhorn_iters)
+    return {
+        "n_pairs": float(n_pairs),
+        "support_size": float(support_size),
+        "sinkhorn_iters": float(sinkhorn_iters),
+        "work_units": float(work_units),
+        "matrix_gib": float(_estimate_dense_bytes(int(n_cells)) / 1024**3),
+    }
 
 
 def _self_sinkhorn_costs(
@@ -58,9 +76,13 @@ def compute_pairwise_ot_distance_matrix(
     device: str = "auto",
     epsilon: float = 0.05,
     n_iters: int = 50,
-    distance_mode: str = "sinkhorn_divergence",
+    distance_mode: str = "debiased_entropic_transport",
     anchor_weight: float = 0.25,
+    fgw_alpha: float = 0.5,
+    fgw_iters: int = 5,
     max_exact_cells: int = 5000,
+    max_ot_work_units: float = 5e11,
+    force_large_exact_ot: bool = False,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Compute a dense exact pairwise OT matrix, optionally backed by a .npy memmap."""
 
@@ -70,12 +92,25 @@ def compute_pairwise_ot_distance_matrix(
     n = int(tokens.shape[0])
     if anchors.shape[0] != n:
         raise ValueError("anchor_embedding must have one row per local measure.")
-    if n > int(max_exact_cells):
+    work_estimate = estimate_pairwise_ot_work(
+        n_cells=n,
+        support_size=int(tokens.shape[1]),
+        sinkhorn_iters=int(n_iters),
+    )
+    if n > int(max_exact_cells) and not bool(force_large_exact_ot):
         estimate_gb = _estimate_dense_bytes(n) / 1024**3
         raise ValueError(
             f"Exact all-pairs OT requested for {n} cells; the float32 distance matrix alone "
             f"would require about {estimate_gb:.1f} GiB. Increase --max-exact-cells only "
             "if you really want this exact dense computation, or run a smaller/landmark cohort."
+        )
+    if work_estimate["work_units"] > float(max_ot_work_units) and not bool(force_large_exact_ot):
+        raise ValueError(
+            "Exact all-pairs OT work estimate is too large: "
+            f"{work_estimate['work_units']:.3g} work units for {n} cells, "
+            f"support size {tokens.shape[1]}, and {int(n_iters)} Sinkhorn iterations. "
+            "Increase --max-ot-work-units or use --force-large-exact-ot only if this "
+            "exact dense computation is intentional."
         )
 
     out: np.ndarray
@@ -87,11 +122,29 @@ def compute_pairwise_ot_distance_matrix(
         out = np.zeros((n, n), dtype=np.float32)
 
     resolved_device = _resolve_device(device)
-    requested_mode = str(distance_mode or "sinkhorn_divergence").strip().lower()
-    valid_modes = {"sinkhorn", "sinkhorn_divergence", "debiased", "debiased_sinkhorn"}
+    requested_mode = str(distance_mode or "debiased_entropic_transport").strip().lower()
+    valid_modes = {
+        "sinkhorn",
+        "sinkhorn_divergence",
+        "debiased",
+        "debiased_sinkhorn",
+        "debiased_entropic_transport",
+        "fgw",
+        "fused_gromov_wasserstein",
+    }
     if requested_mode not in valid_modes:
-        raise ValueError("distance_mode must be sinkhorn or sinkhorn_divergence.")
-    debiased = requested_mode in {"sinkhorn_divergence", "debiased", "debiased_sinkhorn"}
+        raise ValueError(
+            "distance_mode must be sinkhorn or debiased_entropic_transport."
+        )
+    debiased = requested_mode in {
+        "sinkhorn_divergence",
+        "debiased",
+        "debiased_sinkhorn",
+        "debiased_entropic_transport",
+    }
+    use_fgw = requested_mode in {"fgw", "fused_gromov_wasserstein"}
+    if use_fgw and measures.structure_matrices is None:
+        raise ValueError("fused_gromov_wasserstein requires local graph structure matrices.")
     self_costs = (
         _self_sinkhorn_costs(
             measures,
@@ -100,8 +153,13 @@ def compute_pairwise_ot_distance_matrix(
             epsilon=float(epsilon),
             n_iters=int(n_iters),
         )
-        if debiased
+        if debiased and not use_fgw
         else np.zeros(n, dtype=np.float32)
+    )
+    structures = (
+        np.asarray(measures.structure_matrices, dtype=np.float32)
+        if use_fgw
+        else None
     )
 
     bs = max(int(block_size), 1)
@@ -114,14 +172,45 @@ def compute_pairwise_ot_distance_matrix(
             b_stop = min(b_start + bs, n)
             tok_b = torch.as_tensor(tokens[b_start:b_stop], dtype=torch.float32, device=resolved_device)
             w_b = torch.as_tensor(weights[b_start:b_stop], dtype=torch.float32, device=resolved_device)
-            block = sinkhorn_ot_block(
-                tok_a,
-                w_a,
-                tok_b,
-                w_b,
-                epsilon=float(epsilon),
-                n_iters=int(n_iters),
-            ).detach().cpu().numpy().astype(np.float32)
+            if use_fgw:
+                assert structures is not None
+                struct_a = torch.as_tensor(
+                    structures[a_start:a_stop],
+                    dtype=torch.float32,
+                    device=resolved_device,
+                )
+                struct_b = torch.as_tensor(
+                    structures[b_start:b_stop],
+                    dtype=torch.float32,
+                    device=resolved_device,
+                )
+                block = (
+                    fused_gromov_wasserstein_block(
+                        tok_a,
+                        struct_a,
+                        w_a,
+                        tok_b,
+                        struct_b,
+                        w_b,
+                        alpha=float(fgw_alpha),
+                        epsilon=float(epsilon),
+                        sinkhorn_iters=int(n_iters),
+                        fgw_iters=int(fgw_iters),
+                    )
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
+            else:
+                block = sinkhorn_ot_block(
+                    tok_a,
+                    w_a,
+                    tok_b,
+                    w_b,
+                    epsilon=float(epsilon),
+                    n_iters=int(n_iters),
+                ).detach().cpu().numpy().astype(np.float32)
             if debiased:
                 block = block - 0.5 * self_costs[a_start:a_stop, None]
                 block = block - 0.5 * self_costs[None, b_start:b_stop]
@@ -145,14 +234,38 @@ def compute_pairwise_ot_distance_matrix(
     if hasattr(out, "flush"):
         out.flush()
     metadata = {
-        "distance_mode": "sinkhorn_divergence" if debiased else "sinkhorn",
+        "distance_mode": (
+            "fused_gromov_wasserstein"
+            if use_fgw
+            else "debiased_entropic_transport"
+            if debiased
+            else "sinkhorn"
+        ),
+        "requested_distance_mode": str(requested_mode),
+        "sinkhorn_divergence_alias_used": bool(
+            requested_mode in {"sinkhorn_divergence", "debiased", "debiased_sinkhorn"}
+        ),
+        "returns_plan_transport_cost_only": True,
+        "includes_entropy_objective_term": False,
         "epsilon": float(epsilon),
         "sinkhorn_iters": int(n_iters),
         "anchor_weight": float(anchor_weight),
+        "fgw_alpha": float(fgw_alpha) if use_fgw else None,
+        "fgw_iters": int(fgw_iters) if use_fgw else None,
+        "uses_graph_topology": bool(use_fgw),
         "block_size": int(bs),
         "device": str(resolved_device),
         "n_cells": int(n),
         "matrix_bytes": int(_estimate_dense_bytes(n)),
+        "work_estimate": work_estimate,
+        "max_ot_work_units": float(max_ot_work_units),
+        "force_large_exact_ot": bool(force_large_exact_ot),
         "output_path": None if output_path is None else str(output_path),
     }
     return out, metadata
+
+
+__all__ = [
+    "compute_pairwise_ot_distance_matrix",
+    "estimate_pairwise_ot_work",
+]

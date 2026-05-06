@@ -15,10 +15,12 @@ class PairwiseNicheConfig:
     embedding_method: Literal["pca", "svd", "precomputed"] = "pca"
     embedding_dim: int = 32
     expression_batch_key: str | None = None
+    standardize_precomputed: bool = True
 
     radius_um: float = 50.0
     max_neighbors: int = 32
     include_anchor: bool = True
+    isolated_policy: Literal["zero_dummy", "anchor_fallback"] = "zero_dummy"
     graph_kernel: Literal["gaussian", "uniform", "inverse_distance"] = "gaussian"
     cap_mode: Literal["radial_shell", "radial_shell_state"] = "radial_shell_state"
     cap_state_clusters: int = 16
@@ -27,21 +29,37 @@ class PairwiseNicheConfig:
     expression_weight: float = 1.0
     spatial_weight: float = 0.25
     distance_weight: float = 0.10
+    ground_cost_normalization: Literal["none", "dimension", "sampled_median"] = (
+        "sampled_median"
+    )
+    ground_cost_sample_pairs: int = 10000
     anchor_weight: float = 0.25
 
     sinkhorn_epsilon: float = 0.05
     sinkhorn_iters: int = 50
-    distance_mode: Literal["sinkhorn", "sinkhorn_divergence"] = "sinkhorn_divergence"
+    distance_mode: Literal[
+        "sinkhorn",
+        "debiased_entropic_transport",
+        "sinkhorn_divergence",
+        "fused_gromov_wasserstein",
+    ] = "debiased_entropic_transport"
+    fgw_alpha: float = 0.5
+    fgw_iters: int = 5
     pairwise_mode: Literal["exact", "exact_blockwise"] = "exact_blockwise"
     block_size: int = 64
     device: str = "auto"
     max_exact_cells: int = 5000
+    max_ot_work_units: float = 5e11
+    force_large_exact_ot: bool = False
     distance_store: Literal["auto", "h5ad", "npy_memmap"] = "auto"
 
     cluster_method: Literal["agglomerative", "kmedoids", "leiden_ot_knn"] = "agglomerative"
     n_clusters: int | None = None
     ot_knn: int = 30
+    ot_affinity_scaling: Literal["local", "global"] = "local"
     leiden_resolution: float = 1.0
+    instance_radius_um: float | None = None
+    instance_max_neighbors: int = 512
     seed: int = 1337
 
     def to_dict(self) -> dict[str, object]:

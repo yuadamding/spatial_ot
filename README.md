@@ -6,12 +6,12 @@ The primary method is:
 
 ```text
 cohort gene-expression embedding
-  -> same-sample cell-centered local measures
-  -> pairwise OT neighborhood dissimilarity matrix
+  -> same-sample cell-centered local measures or graphs
+  -> pairwise OT/FGW neighborhood dissimilarity matrix
   -> distance-based niche clustering
 ```
 
-The central output is the OT distance matrix:
+The central output is the neighborhood dissimilarity matrix:
 
 ```text
 adata.obsp["cell_ot_dissimilarity"]
@@ -53,6 +53,8 @@ Spatial coordinates are not used to generate `X_gene_cohort`. They enter only la
 
 For count-model embeddings such as scVI, fit the model externally across the cohort and pass the latent representation with `--embedding-method precomputed`.
 
+Precomputed embeddings are standardized by default. Use `--no-standardize-precomputed` when the supplied latent geometry should be preserved exactly.
+
 ## Run Pairwise Niche
 
 Example for preprocessed Visium HD input:
@@ -75,17 +77,21 @@ spatial-ot pairwise-niche fit \
   --expression-weight 1.0 \
   --spatial-weight 0.25 \
   --distance-weight 0.10 \
+  --ground-cost-normalization sampled_median \
   --sinkhorn-epsilon 0.05 \
   --sinkhorn-iters 50 \
-  --distance-mode sinkhorn_divergence \
+  --distance-mode debiased_entropic_transport \
   --pairwise-mode exact_blockwise \
   --block-size 64 \
-  --max-exact-cells 5000 \
+  --max-exact-cells 4000 \
+  --max-ot-work-units 5e11 \
   --cluster-method agglomerative \
   --n-clusters 15
 ```
 
-Exact all-pairs OT is quadratic in the number of cells. The command intentionally refuses oversized dense exact jobs unless `--max-exact-cells` is raised. For full Visium HD cohorts with hundreds of thousands of cells, use sampled/landmark subsets until the approximate sparse mode is added.
+Use `--distance-mode fused_gromov_wasserstein` to compare full local graph topology. In that mode, each cell graph is bounded by both `--radius-um` and `--max-neighbors`; the graph structure matrix stores pairwise spatial distances among the retained support nodes.
+
+Exact all-pairs OT/FGW is quadratic in the number of cells. The command intentionally refuses oversized dense exact jobs unless `--max-exact-cells` is raised, and it also guards against excessive Sinkhorn work with `--max-ot-work-units`. For full Visium HD cohorts with hundreds of thousands of cells, use sampled/landmark subsets until the approximate sparse mode is added.
 
 Main outputs:
 
@@ -115,6 +121,21 @@ M_i = sum_j a_ij delta([z_j, relative_x/r, relative_y/r, distance/r])
 ```
 
 The ground cost compares expression location and relative spatial organization. Clustering is performed from the precomputed OT dissimilarity matrix using agglomerative clustering, k-medoids, or Leiden on an OT-kNN affinity graph. KMeans is intentionally not used because it does not accept a precomputed dissimilarity matrix.
+
+For graph-topology runs, `--distance-mode fused_gromov_wasserstein` compares:
+
+```text
+node feature cost: ||z_a - z_b||^2
+graph structure cost: (C_i[a,a'] - C_k[b,b'])^2
+```
+
+where `C_i` is the pairwise spatial-distance matrix inside anchor cell `i`'s retained local graph. `--fgw-alpha` controls the topology weight.
+
+By default, expression, relative-xy, and radial-distance cost contributions are normalized by sampled median component costs before user weights are applied. This keeps a 32-dimensional expression embedding from automatically overwhelming the lower-dimensional spatial terms.
+
+The default debiased distance is recorded as `debiased_entropic_transport`. It subtracts self transport costs from the entropic-plan transport cost. Metadata records that this is the plan transport cost only and does not include the entropy objective term.
+
+If `--include-anchor` and `--anchor-weight > 0` are both used, anchor expression contributes inside the local measure and as a direct anchor penalty. Set `--anchor-weight 0` for a more context-only niche run.
 
 ## Baseline And QC Path
 
@@ -172,6 +193,7 @@ Implemented:
 - shell/state-aware neighbor caps
 - exact blockwise balanced Sinkhorn OT
 - debiased Sinkhorn divergence option
+- graph-topology fused Gromov-Wasserstein distance mode
 - dense or memmap OT distance output
 - distance-based clustering from the precomputed OT matrix
 - connected cell-level niche instances
@@ -179,7 +201,6 @@ Implemented:
 Still planned:
 
 - sparse approximate OT-kNN / landmark mode for very large cohorts
-- Fused Gromov-Wasserstein graph-aware distance mode
 - transform/predict bundles for new samples
 - full null and ablation reports
 - density and sample leakage reports

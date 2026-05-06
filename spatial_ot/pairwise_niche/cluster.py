@@ -88,7 +88,12 @@ def _kmedoids(
     return labels.astype(np.int32), medoids.astype(np.int64)
 
 
-def ot_knn_affinity(distance: np.ndarray, *, k: int = 30) -> sparse.csr_matrix:
+def ot_knn_affinity(
+    distance: np.ndarray,
+    *,
+    k: int = 30,
+    scaling: str = "local",
+) -> sparse.csr_matrix:
     d = np.asarray(distance, dtype=np.float32)
     n = int(d.shape[0])
     neighbors = min(max(int(k), 1), max(n - 1, 1))
@@ -96,14 +101,35 @@ def ot_knn_affinity(distance: np.ndarray, *, k: int = 30) -> sparse.csr_matrix:
     cols: list[int] = []
     data: list[float] = []
     finite = d[np.isfinite(d) & (d > 0)]
-    sigma = float(np.median(finite)) if finite.size else 1.0
-    sigma = max(sigma, 1e-8)
+    global_sigma = max(float(np.median(finite)) if finite.size else 1.0, 1e-8)
+    requested_scaling = str(scaling or "local").strip().lower()
+    if requested_scaling not in {"local", "global"}:
+        raise ValueError("ot_affinity_scaling must be local or global.")
+    local_sigma = np.full(n, global_sigma, dtype=np.float32)
+    if requested_scaling == "local" and n > 1:
+        for row in range(n):
+            order = np.argsort(d[row], kind="stable")
+            order = order[order != row]
+            positive = d[row, order][d[row, order] > 0]
+            if positive.size:
+                local_sigma[row] = float(positive[min(neighbors - 1, positive.size - 1)])
     for row in range(n):
         order = np.argsort(d[row], kind="stable")
         order = order[order != row][:neighbors]
         rows.extend([row] * int(order.size))
         cols.extend(int(col) for col in order)
-        data.extend(float(np.exp(-float(d[row, col]) / sigma)) for col in order)
+        if requested_scaling == "global":
+            data.extend(float(np.exp(-float(d[row, col]) / global_sigma)) for col in order)
+        else:
+            data.extend(
+                float(
+                    np.exp(
+                        -(float(d[row, col]) ** 2)
+                        / max(float(local_sigma[row]) * float(local_sigma[col]), 1e-8)
+                    )
+                )
+                for col in order
+            )
     graph = sparse.coo_matrix((data, (rows, cols)), shape=(n, n), dtype=np.float32).tocsr()
     return graph.maximum(graph.T).tocsr()
 
@@ -112,6 +138,7 @@ def _leiden_ot_knn(
     distance: np.ndarray,
     *,
     k: int,
+    affinity_scaling: str,
     resolution: float,
     random_state: int,
 ) -> np.ndarray:
@@ -120,7 +147,7 @@ def _leiden_ot_knn(
         import scanpy as sc
     except Exception as exc:  # pragma: no cover - optional runtime
         raise ImportError("leiden_ot_knn requires scanpy and leiden/igraph extras.") from exc
-    graph = ot_knn_affinity(distance, k=int(k))
+    graph = ot_knn_affinity(distance, k=int(k), scaling=str(affinity_scaling))
     tmp = ad.AnnData(X=np.zeros((distance.shape[0], 1), dtype=np.float32))
     tmp.obsp["connectivities"] = graph
     tmp.obsp["distances"] = sparse.csr_matrix(distance)
@@ -145,6 +172,7 @@ def cluster_from_distance(
     method: str = "agglomerative",
     n_clusters: int | None = None,
     ot_knn: int = 30,
+    ot_affinity_scaling: str = "local",
     leiden_resolution: float = 1.0,
     random_state: int = 1337,
 ) -> ClusterResult:
@@ -165,6 +193,7 @@ def cluster_from_distance(
         labels = _leiden_ot_knn(
             d,
             k=int(ot_knn),
+            affinity_scaling=str(ot_affinity_scaling),
             resolution=float(leiden_resolution),
             random_state=int(random_state),
         )
@@ -181,6 +210,7 @@ def cluster_from_distance(
         metadata["medoid_indices"] = medoids.astype(int).tolist()
     if requested == "leiden_ot_knn":
         metadata["ot_knn"] = int(ot_knn)
+        metadata["ot_affinity_scaling"] = str(ot_affinity_scaling)
         metadata["leiden_resolution"] = float(leiden_resolution)
     return ClusterResult(
         labels=labels.astype(np.int32),

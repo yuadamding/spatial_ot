@@ -6,13 +6,16 @@ import anndata as ad
 import pytest
 
 from spatial_ot.pairwise_niche import (
+    build_instance_neighbor_indices,
     build_local_measures,
     cluster_from_distance,
     compute_pairwise_ot_distance_matrix,
+    estimate_pairwise_ot_work,
     fit_expression_embedding,
     run_pairwise_niche_on_h5ad,
 )
 from spatial_ot.pairwise_niche.cluster import ot_knn_affinity
+from spatial_ot.pairwise_niche.fgw import fused_gromov_wasserstein_block
 
 
 def _toy_cohort(n_per_sample: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -41,6 +44,25 @@ def test_expression_embedding_does_not_use_spatial_coordinates() -> None:
     assert first.values.shape == (12, 3)
     assert not bool(first.metadata["uses_spatial_coordinates"])
     np.testing.assert_allclose(first.values, second.values)
+    np.testing.assert_allclose(first.state.transform(features), first.values, atol=1e-5)
+
+
+def test_precomputed_embedding_standardization_can_be_disabled() -> None:
+    features, _, _ = _toy_cohort()
+    unchanged = fit_expression_embedding(
+        features,
+        method="precomputed",
+        standardize_precomputed=False,
+    )
+    standardized = fit_expression_embedding(
+        features,
+        method="precomputed",
+        standardize_precomputed=True,
+    )
+    np.testing.assert_allclose(unchanged.values, features)
+    assert unchanged.metadata["standardization"] == "none"
+    assert standardized.metadata["standardization"] == "mean_std"
+    assert not np.allclose(standardized.values, features)
 
 
 def test_local_measures_do_not_cross_samples_and_preserve_rare_state() -> None:
@@ -59,9 +81,30 @@ def test_local_measures_do_not_cross_samples_and_preserve_rare_state() -> None:
     )
     assert measures.tokens.shape[0] == features.shape[0]
     assert np.all(measures.full_neighbor_counts >= measures.retained_neighbor_counts)
+    assert measures.metadata["ground_cost_normalization"] == "sampled_median"
+    scales = measures.metadata["ground_cost_component_scales"]
+    assert all(float(value) > 0 for value in scales.values())
     for row, ids in enumerate(measures.neighbor_indices):
         valid = ids[ids >= 0]
         assert set(samples[valid]) == {samples[row]}
+
+
+def test_local_measure_rejects_invalid_radius_and_neighbor_cap() -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=2)
+    with pytest.raises(ValueError, match="radius_um"):
+        build_local_measures(
+            expression_embedding=features,
+            coords_um=coords,
+            sample_ids=samples,
+            radius_um=0.0,
+        )
+    with pytest.raises(ValueError, match="max_neighbors"):
+        build_instance_neighbor_indices(
+            coords_um=coords,
+            sample_ids=samples,
+            radius_um=1.0,
+            max_neighbors=0,
+        )
 
 
 def test_isolated_no_anchor_uses_zero_dummy_not_anchor_expression() -> None:
@@ -82,6 +125,19 @@ def test_isolated_no_anchor_uses_zero_dummy_not_anchor_expression() -> None:
     assert np.all(measures.neighbor_indices[:, 0] == -1)
     np.testing.assert_allclose(measures.tokens[:, 0, :], 0.0)
     np.testing.assert_allclose(measures.weights[:, 0], 1.0)
+
+    fallback = build_local_measures(
+        expression_embedding=features,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=1.0,
+        max_neighbors=1,
+        include_anchor=False,
+        isolated_policy="anchor_fallback",
+        seed=19,
+    )
+    assert np.all(fallback.neighbor_indices[:, 0] == np.arange(2))
+    assert not np.allclose(fallback.tokens[:, 0, :], 0.0)
 
 
 def test_pairwise_ot_matrix_is_symmetric_with_zero_diagonal() -> None:
@@ -105,7 +161,84 @@ def test_pairwise_ot_matrix_is_symmetric_with_zero_diagonal() -> None:
         n_iters=5,
         max_exact_cells=20,
     )
-    assert metadata["distance_mode"] == "sinkhorn_divergence"
+    assert metadata["distance_mode"] == "debiased_entropic_transport"
+    assert metadata["returns_plan_transport_cost_only"]
+    assert distance.shape == (8, 8)
+    np.testing.assert_allclose(distance, distance.T, atol=1e-5)
+    np.testing.assert_allclose(np.diag(distance), 0.0)
+    assert np.isfinite(distance).all()
+
+
+def test_local_measure_structure_matrix_and_fgw_distance() -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=4)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+        seed=13,
+    )
+    assert measures.structure_matrices is not None
+    assert measures.structure_matrices.shape == (8, 3, 3)
+    np.testing.assert_allclose(
+        measures.structure_matrices,
+        np.swapaxes(measures.structure_matrices, 1, 2),
+        atol=1e-6,
+    )
+    assert measures.metadata["max_radius_um"] == 3.0
+    assert measures.metadata["max_neighbors_included"] == 2
+
+    import torch
+
+    a = torch.as_tensor(measures.tokens[:2], dtype=torch.float32)
+    c = torch.as_tensor(measures.structure_matrices[:2], dtype=torch.float32)
+    w = torch.as_tensor(measures.weights[:2], dtype=torch.float32)
+    d = fused_gromov_wasserstein_block(
+        a,
+        c,
+        w,
+        a,
+        c,
+        w,
+        alpha=0.5,
+        epsilon=0.05,
+        sinkhorn_iters=3,
+        fgw_iters=2,
+    )
+    assert d.shape == (2, 2)
+    assert torch.isfinite(d).all()
+
+
+def test_pairwise_fgw_matrix_uses_graph_topology() -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=4)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+        seed=13,
+    )
+    distance, metadata = compute_pairwise_ot_distance_matrix(
+        measures=measures,
+        anchor_embedding=embedding.values,
+        block_size=3,
+        device="cpu",
+        epsilon=0.05,
+        n_iters=3,
+        distance_mode="fused_gromov_wasserstein",
+        fgw_alpha=0.6,
+        fgw_iters=2,
+        max_exact_cells=20,
+    )
+    assert metadata["distance_mode"] == "fused_gromov_wasserstein"
+    assert metadata["uses_graph_topology"] is True
+    assert metadata["fgw_alpha"] == 0.6
     assert distance.shape == (8, 8)
     np.testing.assert_allclose(distance, distance.T, atol=1e-5)
     np.testing.assert_allclose(np.diag(distance), 0.0)
@@ -136,6 +269,16 @@ def test_pairwise_ot_rejects_unbounded_or_unknown_distance_modes() -> None:
             anchor_embedding=embedding.values,
             max_exact_cells=2,
         )
+    with pytest.raises(ValueError, match="work estimate"):
+        compute_pairwise_ot_distance_matrix(
+            measures=measures,
+            anchor_embedding=embedding.values,
+            max_exact_cells=20,
+            max_ot_work_units=1.0,
+        )
+    estimate = estimate_pairwise_ot_work(n_cells=6, support_size=3, sinkhorn_iters=5)
+    assert estimate["n_pairs"] == 21.0
+    assert estimate["work_units"] == 21.0 * 3.0 * 3.0 * 5.0
 
 
 def test_clustering_uses_precomputed_distance_not_kmeans() -> None:
@@ -151,8 +294,10 @@ def test_clustering_uses_precomputed_distance_not_kmeans() -> None:
     result = cluster_from_distance(distance, method="agglomerative", n_clusters=2)
     assert set(result.labels[:2]) != set(result.labels[2:])
     assert result.metadata["assignment_score_type"] == "precomputed_distance_margin"
-    affinity = ot_knn_affinity(distance, k=1)
+    affinity = ot_knn_affinity(distance, k=1, scaling="local")
+    global_affinity = ot_knn_affinity(distance, k=1, scaling="global")
     np.testing.assert_allclose(affinity.toarray(), affinity.toarray().T)
+    np.testing.assert_allclose(global_affinity.toarray(), global_affinity.toarray().T)
 
 
 def test_pairwise_niche_h5ad_end_to_end(tmp_path) -> None:
@@ -199,6 +344,9 @@ def test_pairwise_niche_h5ad_end_to_end(tmp_path) -> None:
     assert "ot_niche_instance" in out.obs
     assert "n_neighbors_full_r3" in out.obs
     assert "neighbor_retention_fraction_r3" in out.obs
+    assert (output_dir / "pairwise_niche_model" / "expression_embedding_state.npz").exists()
+    assert summary["batch_embedding"]["batch_correction_applied_by_pairwise_niche"] is False
+    assert summary["method_semantics"]["anchor_expression_enters_twice"] is True
     np.testing.assert_allclose(out.obsp["cell_ot_dissimilarity"], out.obsp["cell_ot_dissimilarity"].T)
 
 

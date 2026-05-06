@@ -16,6 +16,17 @@ class LocalMeasureSet:
     full_neighbor_counts: np.ndarray
     retained_neighbor_counts: np.ndarray
     metadata: dict[str, object]
+    structure_matrices: np.ndarray | None = None
+
+
+def _component_slices(expression_dim: int) -> dict[str, tuple[int, int]]:
+    z_stop = int(expression_dim)
+    xy_stop = z_stop + 2
+    return {
+        "expression": (0, z_stop),
+        "relative_xy": (z_stop, xy_stop),
+        "relative_distance": (xy_stop, xy_stop + 1),
+    }
 
 
 def _kernel_weights(distances: np.ndarray, *, radius_um: float, kernel: str) -> np.ndarray:
@@ -107,6 +118,99 @@ def _cap_neighbors(
     return chosen[np.argsort(distances[chosen], kind="stable")]
 
 
+def _median_component_cost(
+    values: np.ndarray,
+    *,
+    rng: np.random.Generator,
+    n_pairs: int,
+) -> float:
+    if values.shape[0] <= 1 or values.shape[1] == 0:
+        return 1.0
+    count = min(max(int(n_pairs), 1), max(int(values.shape[0]) ** 2, 1))
+    left = rng.integers(0, values.shape[0], size=count)
+    right = rng.integers(0, values.shape[0], size=count)
+    costs = np.sum((values[left] - values[right]) ** 2, axis=1)
+    costs = costs[np.isfinite(costs) & (costs > 0)]
+    if costs.size == 0:
+        return 1.0
+    return float(max(np.median(costs), 1e-8))
+
+
+def _fit_ground_cost_scales(
+    tokens: np.ndarray,
+    mask: np.ndarray,
+    *,
+    expression_dim: int,
+    normalization: str,
+    n_pairs: int,
+    seed: int,
+) -> dict[str, float]:
+    slices = _component_slices(expression_dim)
+    requested = str(normalization or "none").strip().lower()
+    if requested == "none":
+        return {"expression": 1.0, "relative_xy": 1.0, "relative_distance": 1.0}
+    if requested == "dimension":
+        return {
+            "expression": float(max(expression_dim, 1)),
+            "relative_xy": 2.0,
+            "relative_distance": 1.0,
+        }
+    if requested != "sampled_median":
+        raise ValueError("ground_cost_normalization must be none, dimension, or sampled_median.")
+    active = tokens[np.asarray(mask, dtype=bool)]
+    if active.size == 0:
+        return {"expression": 1.0, "relative_xy": 1.0, "relative_distance": 1.0}
+    rng = np.random.default_rng(int(seed))
+    scales = {}
+    for name, (start, stop) in slices.items():
+        scales[name] = _median_component_cost(
+            active[:, start:stop],
+            rng=rng,
+            n_pairs=int(n_pairs),
+        )
+    return scales
+
+
+def build_instance_neighbor_indices(
+    *,
+    coords_um: np.ndarray,
+    sample_ids: np.ndarray,
+    radius_um: float,
+    max_neighbors: int = 512,
+) -> np.ndarray:
+    xy = np.asarray(coords_um, dtype=np.float32)
+    samples = np.asarray(sample_ids, dtype=object).astype(str)
+    if xy.ndim != 2 or xy.shape[1] != 2:
+        raise ValueError("coords_um must have shape (n_cells, 2).")
+    if float(radius_um) <= 0:
+        raise ValueError("radius_um must be positive.")
+    if int(max_neighbors) <= 0:
+        raise ValueError("max_neighbors must be positive.")
+    n = int(xy.shape[0])
+    width = max(int(max_neighbors), 1)
+    out = np.full((n, width), -1, dtype=np.int64)
+    radius = float(radius_um)
+    for sample in list(dict.fromkeys(samples.tolist())):
+        global_idx = np.flatnonzero(samples == sample)
+        if global_idx.size == 0:
+            continue
+        model = NearestNeighbors(radius=radius, algorithm="auto")
+        model.fit(xy[global_idx])
+        dist_list, ind_list = model.radius_neighbors(
+            xy[global_idx],
+            return_distance=True,
+            sort_results=True,
+        )
+        for row_local, (dist, ind) in enumerate(zip(dist_list, ind_list, strict=True)):
+            anchor = int(global_idx[row_local])
+            ind = np.asarray(ind, dtype=np.int64)
+            dist = np.asarray(dist, dtype=np.float32)
+            keep = np.isfinite(dist) & (ind != int(row_local))
+            neighbors = global_idx[ind[keep]][:width]
+            out[anchor, : neighbors.size] = neighbors.astype(np.int64, copy=False)
+    return out
+
+
 def build_local_measures(
     *,
     expression_embedding: np.ndarray,
@@ -119,9 +223,12 @@ def build_local_measures(
     cap_mode: str = "radial_shell_state",
     cap_state_clusters: int = 16,
     radial_shells: int = 3,
+    isolated_policy: str = "zero_dummy",
     expression_weight: float = 1.0,
     spatial_weight: float = 0.25,
     distance_weight: float = 0.10,
+    ground_cost_normalization: str = "sampled_median",
+    ground_cost_sample_pairs: int = 10000,
     seed: int = 1337,
 ) -> LocalMeasureSet:
     """Build padded cell-centered local measures, sample-isolated by construction."""
@@ -131,6 +238,10 @@ def build_local_measures(
     samples = np.asarray(sample_ids, dtype=object).astype(str)
     if z.ndim != 2 or xy.ndim != 2 or xy.shape[1] != 2 or z.shape[0] != xy.shape[0]:
         raise ValueError("expression_embedding and coords_um must align with shape n_cells.")
+    if float(radius_um) <= 0:
+        raise ValueError("radius_um must be positive.")
+    if int(max_neighbors) <= 0:
+        raise ValueError("max_neighbors must be positive.")
     n = int(z.shape[0])
     support = max(int(max_neighbors), 1) + (1 if bool(include_anchor) else 0)
     token_dim = int(z.shape[1]) + 3
@@ -140,6 +251,7 @@ def build_local_measures(
     neighbor_indices = np.full((n, support), -1, dtype=np.int64)
     full_counts = np.zeros(n, dtype=np.int32)
     retained_counts = np.zeros(n, dtype=np.int32)
+    structure = np.zeros((n, support, support), dtype=np.float32)
 
     state_labels = _fit_state_labels(
         z,
@@ -199,9 +311,16 @@ def build_local_measures(
             dists.extend(float(value) for value in dist)
             w_values.extend(float(value) for value in raw_weights)
             if not ids:
-                weights[anchor, 0] = 1.0
-                mask[anchor, 0] = True
-                continue
+                if str(isolated_policy).strip().lower() == "anchor_fallback":
+                    ids = [anchor]
+                    dists = [0.0]
+                    w_values = [1.0]
+                elif str(isolated_policy).strip().lower() == "zero_dummy":
+                    weights[anchor, 0] = 1.0
+                    mask[anchor, 0] = True
+                    continue
+                else:
+                    raise ValueError("isolated_policy must be zero_dummy or anchor_fallback.")
             ids_arr = np.asarray(ids[:support], dtype=np.int64)
             dist_arr = np.asarray(dists[:support], dtype=np.float32)
             w_arr = np.asarray(w_values[:support], dtype=np.float32)
@@ -211,9 +330,9 @@ def build_local_measures(
             radial = dist_arr[:, None] / max(radius, 1e-8)
             token = np.hstack(
                 [
-                    np.sqrt(max(float(expression_weight), 0.0)) * z[ids_arr],
-                    np.sqrt(max(float(spatial_weight), 0.0)) * rel,
-                    np.sqrt(max(float(distance_weight), 0.0)) * radial,
+                    z[ids_arr],
+                    rel,
+                    radial,
                 ]
             ).astype(np.float32)
             count = int(ids_arr.size)
@@ -221,23 +340,60 @@ def build_local_measures(
             weights[anchor, :count] = w_arr
             mask[anchor, :count] = True
             neighbor_indices[anchor, :count] = ids_arr
+            rel_graph = (xy[ids_arr] - xy[anchor]) / max(radius, 1e-8)
+            graph_dist = np.linalg.norm(
+                rel_graph[:, None, :] - rel_graph[None, :, :],
+                axis=2,
+            ).astype(np.float32)
+            structure[anchor, :count, :count] = graph_dist
+
+    slices = _component_slices(z.shape[1])
+    scales = _fit_ground_cost_scales(
+        tokens,
+        mask,
+        expression_dim=int(z.shape[1]),
+        normalization=str(ground_cost_normalization),
+        n_pairs=int(ground_cost_sample_pairs),
+        seed=int(seed),
+    )
+    weights_by_component = {
+        "expression": float(expression_weight),
+        "relative_xy": float(spatial_weight),
+        "relative_distance": float(distance_weight),
+    }
+    for name, (start, stop) in slices.items():
+        factor = np.sqrt(
+            max(weights_by_component[name], 0.0) / max(float(scales[name]), 1e-8)
+        )
+        tokens[:, :, start:stop] *= np.float32(factor)
 
     metadata = {
         "radius_um": float(radius),
         "max_neighbors": int(max_neighbors),
         "support_size": int(support),
+        "max_radius_um": float(radius),
+        "max_neighbors_included": int(max_neighbors),
         "include_anchor": bool(include_anchor),
         "graph_kernel": str(graph_kernel),
         "cap_mode": str(cap_mode),
         "cap_state_clusters": int(cap_state_clusters),
         "radial_shells": int(radial_shells),
+        "isolated_policy": str(isolated_policy),
         "expression_weight": float(expression_weight),
         "spatial_weight": float(spatial_weight),
         "distance_weight": float(distance_weight),
+        "ground_cost_normalization": str(ground_cost_normalization),
+        "ground_cost_sample_pairs": int(ground_cost_sample_pairs),
+        "ground_cost_component_scales": {
+            str(key): float(value) for key, value in scales.items()
+        },
+        "ground_cost_component_slices": {
+            str(key): [int(start), int(stop)] for key, (start, stop) in slices.items()
+        },
         "n_cells": int(n),
         "mean_full_neighbors": float(np.mean(full_counts)) if n else 0.0,
         "mean_retained_neighbors": float(np.mean(retained_counts)) if n else 0.0,
-        "isolated_without_anchor_uses_zero_dummy": True,
+        "isolated_without_anchor_uses_zero_dummy": str(isolated_policy) == "zero_dummy",
         "cross_sample_edges_allowed": False,
         "samples": {
             str(sample): int(np.sum(samples == sample)) for sample in sample_order
@@ -251,4 +407,5 @@ def build_local_measures(
         full_neighbor_counts=full_counts,
         retained_neighbor_counts=retained_counts,
         metadata=metadata,
+        structure_matrices=structure,
     )
