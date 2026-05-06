@@ -60,6 +60,7 @@ def _kmeans_cluster(
             "n_clusters": int(k),
             "inertia": float(model.inertia_),
             "n_init": int(n_init),
+            "assignment_score_type": "kmeans_distance_margin",
         },
     )
 
@@ -106,6 +107,7 @@ def _leiden_once(
             "resolution": float(resolution),
             "n_neighbors": int(neighbors),
             "n_clusters": int(np.unique(labels).size),
+            "assignment_score_type": "leiden_neighbor_label_agreement",
         },
     )
 

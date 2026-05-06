@@ -162,6 +162,8 @@ def test_cell_niche_dataset_batch_shapes() -> None:
     assert batch["mask"].dtype == torch.bool
     assert batch["descriptor_targets"].shape == (3, 7)
     assert batch["is_isolated"].shape == (3, 1)
+    assert batch["n_neighbors"].shape == (3, 1)
+    assert batch["local_density_per_um2"].shape == (3, 1)
     assert batch["local_density"].shape == (3, 1)
     torch.testing.assert_close(
         (batch["weights"] * batch["mask"]).sum(dim=2),
@@ -187,6 +189,8 @@ def test_cell_niche_dataset_isolated_cell_uses_zero_context_token() -> None:
     batch = dataset.collate_fn([0])
 
     assert bool(batch["is_isolated"][0, 0])
+    assert float(batch["n_neighbors"][0, 0]) == 0.0
+    assert float(batch["local_density_per_um2"][0, 0]) == 0.0
     assert float(batch["local_density"][0, 0]) == 0.0
     torch.testing.assert_close(batch["tokens"][0, 0, 0], torch.zeros(9))
     torch.testing.assert_close(batch["weights"][0, 0], torch.tensor([1.0, 0.0, 0.0]))
@@ -334,6 +338,13 @@ def test_deepshe_forward_backward_runs() -> None:
     loss.backward()
 
     assert np.isfinite(metrics["loss"])
+    assert outputs["embedding_raw"].shape == outputs["embedding"].shape
+    torch.testing.assert_close(
+        outputs["embedding"].norm(dim=1),
+        torch.ones(outputs["embedding"].shape[0]),
+        atol=1e-5,
+        rtol=1e-5,
+    )
     assert model.encoder.fuse[-1].weight.grad is not None
 
 
@@ -431,10 +442,25 @@ def test_cell_niche_descriptor_run_writes_cell_level_outputs(tmp_path: Path) -> 
     assert fitted.obsm["X_spatial_heterogeneity"].shape[1] == 4
     assert "spatial_niche" in fitted.obs
     assert "spatial_niche_confidence" in fitted.obs
+    assert "spatial_niche_assignment_score" in fitted.obs
+    assert "spatial_niche_assignment_score_type" in fitted.obs
     assert "spatial_niche_instance" in fitted.obs
     assert "spatial_connectivities_r2p5" in fitted.obsp
     assert "spatial_distances_r4" in fitted.obsp
     assert "n_neighbors_r2p5" in fitted.obs
+    assert "local_density_per_um2_r2p5" in fitted.obs
+    np.testing.assert_allclose(
+        fitted.obs["local_density_per_um2_r2p5"].to_numpy(dtype=np.float32),
+        fitted.obs["n_neighbors_r2p5"].to_numpy(dtype=np.float32) / (np.pi * 2.5 * 2.5),
+        rtol=1e-5,
+        atol=1e-7,
+    )
+    np.testing.assert_allclose(
+        fitted.obs["local_density_r2p5"].to_numpy(dtype=np.float32),
+        fitted.obs["local_density_per_um2_r2p5"].to_numpy(dtype=np.float32),
+        rtol=1e-6,
+        atol=1e-8,
+    )
     assert "is_isolated_r2p5" in fitted.obs
     assert fitted.uns["spatial_niche_summary"]["primary_unit"] == "cell"
     assert summary["primary_unit"] == "cell"
@@ -542,6 +568,10 @@ def test_cell_niche_deep_ot_run_writes_deepshe_outputs(tmp_path: Path) -> None:
 
     fitted = ad.read_h5ad(summary["outputs"]["h5ad"])
     assert "X_spatial_ot_deepshe" in fitted.obsm
+    assert "X_spatial_ot_deepshe_raw" in fitted.obsm
+    assert fitted.obsm["X_spatial_ot_deepshe_raw"].shape == fitted.obsm[
+        "X_spatial_ot_deepshe"
+    ].shape
     assert "X_spatial_ot_prototype_distances" in fitted.obsm
     assert fitted.obsm["X_spatial_ot_prototype_distances"].shape == (n_cells, 3)
     assert set(fitted.obs["spatial_niche_source"].astype(str)) == {"deep_plus_ot_kmeans"}

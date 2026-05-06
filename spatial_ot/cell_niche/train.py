@@ -18,6 +18,7 @@ class DeepSHEResult:
     embedding: np.ndarray
     prototype_distances: np.ndarray | None
     prototype_posterior: np.ndarray | None
+    embedding_raw: np.ndarray | None = None
     history: list[dict[str, float]] = field(default_factory=list)
     model: OTDeepSHEModel | None = None
     metadata: dict[str, object] = field(default_factory=dict)
@@ -130,6 +131,7 @@ def fit_deepshe_embedding(
         num_workers=0,
     )
     embeddings = np.zeros((len(dataset), int(config.embedding_dim)), dtype=np.float32)
+    raw_embeddings = np.zeros((len(dataset), int(config.embedding_dim)), dtype=np.float32)
     proto_dist: np.ndarray | None = None
     proto_post: np.ndarray | None = None
     if use_ot:
@@ -142,6 +144,10 @@ def fit_deepshe_embedding(
             device_batch = _to_device(batch, device)
             outputs = model(device_batch)
             embeddings[ids] = outputs["embedding"].detach().cpu().numpy().astype(np.float32)
+            if isinstance(outputs["embedding_raw"], torch.Tensor):
+                raw_embeddings[ids] = (
+                    outputs["embedding_raw"].detach().cpu().numpy().astype(np.float32)
+                )
             if proto_dist is not None and isinstance(outputs["prototype_distances"], torch.Tensor):
                 proto_dist[ids] = (
                     outputs["prototype_distances"].detach().cpu().numpy().astype(np.float32)
@@ -153,6 +159,7 @@ def fit_deepshe_embedding(
 
     return DeepSHEResult(
         embedding=embeddings,
+        embedding_raw=raw_embeddings,
         prototype_distances=proto_dist,
         prototype_posterior=proto_post,
         history=history,

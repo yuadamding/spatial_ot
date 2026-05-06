@@ -196,6 +196,33 @@ def _standardize_for_feature_concat(values: np.ndarray) -> np.ndarray:
     )
 
 
+def _row_max_distances(graph: NeighborhoodGraph) -> np.ndarray:
+    dist = graph.distances.tocsr()
+    out = np.zeros(int(dist.shape[0]), dtype=np.float32)
+    for row in range(int(dist.shape[0])):
+        start, stop = int(dist.indptr[row]), int(dist.indptr[row + 1])
+        if start == stop:
+            continue
+        values = np.asarray(dist.data[start:stop], dtype=np.float32)
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            out[row] = float(np.max(finite))
+    return out
+
+
+def _local_density_per_um2(graph: NeighborhoodGraph) -> np.ndarray:
+    degree = np.diff(graph.connectivities.indptr).astype(np.float32)
+    if graph.radius_um is not None and float(graph.radius_um) > 0.0:
+        radius = np.full(degree.shape, float(graph.radius_um), dtype=np.float32)
+    else:
+        radius = _row_max_distances(graph)
+    area = np.pi * np.square(radius.astype(np.float64))
+    density = np.zeros(degree.shape, dtype=np.float32)
+    valid = area > 1.0e-12
+    density[valid] = (degree[valid].astype(np.float64) / area[valid]).astype(np.float32)
+    return density
+
+
 def run_cell_niche_on_h5ad(
     *,
     input_h5ad: str | Path,
@@ -431,6 +458,8 @@ def run_cell_niche_on_h5ad(
             metadata={
                 "method": str(requested_encoder),
                 "reduction": "mini_batch_deepshe_encoder",
+                "embedding_variant": "l2_normalized",
+                "raw_embedding_available": deepshe_result.embedding_raw is not None,
                 "requested_dim": int(embedding_dim),
                 "embedding_dim": int(deepshe_result.embedding.shape[1]),
                 "training": dict(deepshe_result.metadata),
@@ -496,6 +525,10 @@ def run_cell_niche_on_h5ad(
     )
     if requested_encoder != "descriptor":
         adata.obsm["X_spatial_ot_deepshe"] = embedding.values.astype(np.float32)
+        if deepshe_result is not None and deepshe_result.embedding_raw is not None:
+            adata.obsm["X_spatial_ot_deepshe_raw"] = deepshe_result.embedding_raw.astype(
+                np.float32
+            )
         adata.obsm["X_spatial_ot_deepshe_cluster_features"] = cluster_features.astype(
             np.float32
         )
@@ -510,6 +543,11 @@ def run_cell_niche_on_h5ad(
     adata.obs["spatial_niche"] = pd.Categorical(niche_names)
     adata.obs["spatial_niche_int"] = cluster.labels.astype(np.int32)
     adata.obs["spatial_niche_confidence"] = cluster.confidence.astype(np.float32)
+    adata.obs["spatial_niche_assignment_score"] = cluster.confidence.astype(np.float32)
+    score_type = str(cluster.metadata.get("assignment_score_type", "unknown"))
+    adata.obs["spatial_niche_assignment_score_type"] = pd.Categorical(
+        np.full(int(adata.n_obs), score_type, dtype=object)
+    )
     adata.obs["spatial_niche_source"] = pd.Categorical(
         np.full(int(adata.n_obs), str(niche_source), dtype=object)
     )
@@ -518,8 +556,11 @@ def run_cell_niche_on_h5ad(
     for graph_key, graph in graphs.items():
         suffix = str(graph_key).replace("-", "_")
         degree = np.diff(graph.connectivities.indptr).astype(np.float32)
+        density = _local_density_per_um2(graph)
         adata.obs[f"n_neighbors_{suffix}"] = degree
-        adata.obs[f"local_density_{suffix}"] = degree
+        adata.obs[f"local_density_per_um2_{suffix}"] = density
+        # Backward-compatible alias; this is area-normalized density, not count.
+        adata.obs[f"local_density_{suffix}"] = density
         adata.obs[f"is_isolated_{suffix}"] = degree == 0
 
     h5ad_path = out_dir / "cells_cell_niche.h5ad"
@@ -540,6 +581,8 @@ def run_cell_niche_on_h5ad(
         arrays["prototype_distances"] = prototype_distances.astype(np.float32)
     if prototype_posterior is not None:
         arrays["prototype_posterior"] = prototype_posterior.astype(np.float32)
+    if deepshe_result is not None and deepshe_result.embedding_raw is not None:
+        arrays["embedding_raw"] = deepshe_result.embedding_raw.astype(np.float32)
     np.savez_compressed(descriptor_npz_path, **arrays)
 
     summary: dict[str, object] = {

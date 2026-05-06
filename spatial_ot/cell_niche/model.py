@@ -78,7 +78,7 @@ class MultiScaleDeepSetEncoder(nn.Module):
         weights: torch.Tensor,
         mask: torch.Tensor,
         is_isolated: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         scale_contexts: list[torch.Tensor] = []
         token_embeddings: list[torch.Tensor] = []
         for radius_idx in range(self.n_radii):
@@ -104,8 +104,9 @@ class MultiScaleDeepSetEncoder(nn.Module):
             scale_contexts.append(context)
             token_embeddings.append(e)
         self_context = self.self_mlp(z_self)
-        h = self.fuse(torch.cat([self_context] + scale_contexts, dim=1))
-        return F.normalize(h, dim=1), torch.stack(token_embeddings, dim=1)
+        h_raw = self.fuse(torch.cat([self_context] + scale_contexts, dim=1))
+        h_norm = F.normalize(h_raw, dim=1)
+        return h_raw, h_norm, torch.stack(token_embeddings, dim=1)
 
 
 class OTPrototypeHead(nn.Module):
@@ -229,14 +230,14 @@ class OTDeepSHEModel(nn.Module):
         )
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor | None]:
-        h, token_embeddings = self.encoder(
+        h_raw, h, token_embeddings = self.encoder(
             z_self=batch["z_self"],
             token_inputs=batch["tokens"],
             weights=batch["weights"],
             mask=batch["mask"],
             is_isolated=batch.get("is_isolated"),
         )
-        decoded = self.context_decoder(h)
+        decoded = self.context_decoder(h_raw)
         if self.ot_head is not None:
             distances, posterior = self.ot_head(
                 token_embeddings=token_embeddings,
@@ -246,6 +247,7 @@ class OTDeepSHEModel(nn.Module):
         else:
             distances, posterior = None, None
         return {
+            "embedding_raw": h_raw,
             "embedding": h,
             "decoded_descriptor": decoded,
             "token_embeddings": token_embeddings,

@@ -133,12 +133,13 @@ The H5AD stores:
 - `adata.obsm["X_spatial_heterogeneity_descriptor"]`
 - `adata.obsm["X_spatial_heterogeneity"]`
 - `adata.obsm["X_spatial_ot_deepshe"]` for deep encoder runs
+- `adata.obsm["X_spatial_ot_deepshe_raw"]` for deep encoder runs before L2 normalization
 - `adata.obsm["X_spatial_ot_prototype_distances"]` when OT prototypes are enabled
 - `adata.obs["spatial_niche"]`
-- `adata.obs["spatial_niche_confidence"]`
+- `adata.obs["spatial_niche_confidence"]` and `adata.obs["spatial_niche_assignment_score"]`
 - `adata.obs["spatial_niche_source"]`
 - `adata.obs["spatial_niche_instance"]`
-- per-graph `adata.obs["n_neighbors_<scale>"]`, `adata.obs["local_density_<scale>"]`, and `adata.obs["is_isolated_<scale>"]`
+- per-graph `adata.obs["n_neighbors_<scale>"]`, `adata.obs["local_density_per_um2_<scale>"]`, `adata.obs["local_density_<scale>"]`, and `adata.obs["is_isolated_<scale>"]`
 - one `adata.obsp["spatial_connectivities_<scale>"]` and `adata.obsp["spatial_distances_<scale>"]` per radius/kNN graph
 - `adata.uns["spatial_heterogeneity_config"]`
 - `adata.uns["spatial_niche_summary"]`
