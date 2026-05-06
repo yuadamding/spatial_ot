@@ -42,6 +42,10 @@ parallel = [
 viz = [
   "umap-learn>=0.5",
 ]
+ot-deep = [
+  "geomloss>=0.2.6",
+  "pykeops>=2.2",
+]
 dev = [
   "mypy>=1.10",
   "pre-commit>=3.7",

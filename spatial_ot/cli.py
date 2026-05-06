@@ -10,6 +10,7 @@ from .config import (
     load_multilevel_config,
     validate_multilevel_config,
 )
+from .cell_niche import run_cell_niche_on_h5ad
 from .deep import fit_deep_features_on_h5ad, transform_h5ad_with_deep_model
 from .feature_source import default_precomputed_x_feature_key, prepare_h5ad_feature_cache
 from .multilevel import (
@@ -830,6 +831,234 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional transform batch size for non-graph encoders.",
     )
+
+    cell_niche = sub.add_parser(
+        "cell-niche",
+        help="Run cell-centered spatial heterogeneity embedding and cluster cells into reusable spatial niches.",
+    )
+    cell_niche.add_argument(
+        "cell_niche_action",
+        nargs="?",
+        choices=["fit"],
+        default="fit",
+        help="Action to run. 'fit' is the current cell-niche action.",
+    )
+    cell_niche.add_argument("--input-h5ad", required=True, help="Input cell-level H5AD.")
+    cell_niche.add_argument(
+        "--output-dir", required=True, help="Output directory for cell-niche artifacts."
+    )
+    cell_niche.add_argument(
+        "--feature-obsm-key",
+        required=True,
+        help="Feature source used for cell-centered descriptors. Accepts an obsm key or 'X'. Prefer PCA/SVD/scVI/marker features; avoid UMAP unless exploratory.",
+    )
+    cell_niche.add_argument(
+        "--spatial-x-key", required=True, help="obs key for the x coordinate."
+    )
+    cell_niche.add_argument(
+        "--spatial-y-key", required=True, help="obs key for the y coordinate."
+    )
+    cell_niche.add_argument(
+        "--sample-obs-key",
+        default="sample_id",
+        help="obs key storing sample identifiers. Neighborhood graphs never connect across samples.",
+    )
+    cell_niche.add_argument(
+        "--spatial-scale",
+        type=float,
+        default=1.0,
+        help="Multiply spatial coordinates by this value to convert them into microns.",
+    )
+    cell_niche.add_argument(
+        "--radii-um",
+        default="20,50,100",
+        help="Comma-separated physical radii in microns for same-sample neighborhoods. Use '' to disable radius graphs when --knn-values is set.",
+    )
+    cell_niche.add_argument(
+        "--knn-values",
+        default=None,
+        help="Optional comma-separated kNN neighborhood sizes for density-normalized sensitivity runs, e.g. '10,30,80'.",
+    )
+    cell_niche.add_argument(
+        "--max-neighbors",
+        type=int,
+        default=256,
+        help="Maximum neighbors retained per cell per graph for memory safety.",
+    )
+    cell_niche.add_argument(
+        "--graph-kernel",
+        default="gaussian",
+        choices=["gaussian", "binary", "inverse"],
+        help="Kernel used to weight neighbors inside each local context graph.",
+    )
+    cell_niche.add_argument(
+        "--density-correction",
+        type=float,
+        default=0.5,
+        help="Neighbor-density downweighting exponent in [0, 1].",
+    )
+    cell_niche.add_argument(
+        "--state-codebook-size",
+        type=int,
+        default=64,
+        help="Global soft cell-state codebook size.",
+    )
+    cell_niche.add_argument(
+        "--state-codebook-sample-size",
+        type=int,
+        default=50000,
+        help="Maximum cells sampled to fit the global codebook.",
+    )
+    cell_niche.add_argument(
+        "--feature-pca-dim",
+        type=int,
+        default=128,
+        help="Whitened molecular feature dimension used before local descriptor aggregation.",
+    )
+    cell_niche.add_argument(
+        "--descriptor-blocks",
+        default="composition,diversity,moments,radial,pair,covariance,gradient",
+        help="Comma-separated context blocks: composition,diversity,moments,radial,pair,covariance,gradient.",
+    )
+    cell_niche.add_argument(
+        "--radial-shells",
+        type=int,
+        default=3,
+        help="Number of radial shells per physical/kNN context.",
+    )
+    cell_niche.add_argument(
+        "--pair-mode",
+        default="anchor_neighbor",
+        choices=["anchor_neighbor", "none", "disabled"],
+        help="Pair texture descriptor mode. MVP supports anchor_neighbor.",
+    )
+    cell_niche.add_argument(
+        "--pair-top-states",
+        type=int,
+        default=16,
+        help="Top codebook states retained in the anchor-neighbor pair block.",
+    )
+    cell_niche.add_argument(
+        "--covariance-dims",
+        type=int,
+        default=8,
+        help="Leading feature dimensions used for the COVET-like local covariance block.",
+    )
+    cell_niche.add_argument(
+        "--encoder",
+        default="descriptor",
+        choices=["descriptor", "deepsets", "attention_deepsets", "ot_deepshe"],
+        help="Cell-niche encoder tier: descriptor baseline, mini-batch DeepSets, attention DeepSets, or OT-DeepSHE.",
+    )
+    cell_niche.add_argument(
+        "--max-neighbors-per-radius",
+        type=int,
+        default=None,
+        help="Maximum sampled neighbors per graph for the mini-batch DeepSHE encoder. Defaults to min(--max-neighbors, 64).",
+    )
+    cell_niche.add_argument("--token-dim", type=int, default=128)
+    cell_niche.add_argument("--hidden-dim", type=int, default=256)
+    cell_niche.add_argument("--epochs", type=int, default=50)
+    cell_niche.add_argument("--batch-size", type=int, default=1024)
+    cell_niche.add_argument("--learning-rate", type=float, default=1e-3)
+    cell_niche.add_argument("--weight-decay", type=float, default=1e-4)
+    cell_niche.add_argument("--device", default="auto")
+    cell_niche.add_argument(
+        "--use-ot-prototypes",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the balanced Sinkhorn learned prototype head for DeepSHE runs.",
+    )
+    cell_niche.add_argument("--n-ot-prototypes", type=int, default=20)
+    cell_niche.add_argument("--prototype-support-size", type=int, default=32)
+    cell_niche.add_argument("--ot-epsilon", type=float, default=0.05)
+    cell_niche.add_argument("--ot-temperature", type=float, default=0.25)
+    cell_niche.add_argument(
+        "--ot-distance-feature-weight",
+        type=float,
+        default=1.0,
+        help="Scale applied to standardized OT prototype distances before clustering deep embeddings.",
+    )
+    cell_niche.add_argument("--context-reconstruction-weight", type=float, default=1.0)
+    cell_niche.add_argument("--ot-prototype-weight", type=float, default=0.5)
+    cell_niche.add_argument("--prototype-balance-weight", type=float, default=0.05)
+    cell_niche.add_argument("--variance-weight", type=float, default=0.02)
+    cell_niche.add_argument("--decorrelation-weight", type=float, default=0.005)
+    cell_niche.add_argument(
+        "--embedding-method",
+        default="descriptor_pca",
+        choices=["descriptor_pca", "none"],
+        help="Cell heterogeneity embedding method.",
+    )
+    cell_niche.add_argument(
+        "--embedding-dim",
+        type=int,
+        default=64,
+        help="Target dimension for the cell-level spatial heterogeneity embedding.",
+    )
+    cell_niche.add_argument(
+        "--cluster-method",
+        default="kmeans",
+        choices=["kmeans", "leiden"],
+        help="Cluster method for cell-level niche motifs.",
+    )
+    cell_niche.add_argument(
+        "--n-clusters",
+        type=int,
+        default=None,
+        help="Number of niches for k-means fixed-K runs.",
+    )
+    cell_niche.add_argument(
+        "--resolution",
+        type=float,
+        default=1.0,
+        help="Leiden resolution for exploratory runs.",
+    )
+    cell_niche.add_argument(
+        "--candidate-resolutions",
+        default=None,
+        help="Optional comma-separated Leiden resolutions; the best silhouette is selected.",
+    )
+    cell_niche.add_argument(
+        "--embedding-neighbors",
+        type=int,
+        default=15,
+        help="Neighbors used by Leiden on the cell embedding.",
+    )
+    cell_niche.add_argument(
+        "--self-weight",
+        "--include-self-weight",
+        dest="self_weight",
+        type=float,
+        default=0.25,
+        help="Weight of the anchor cell intrinsic feature block. Set to 0 for the key context-only ablation.",
+    )
+    cell_niche.add_argument("--composition-weight", type=float, default=0.25)
+    cell_niche.add_argument("--diversity-weight", type=float, default=0.25)
+    cell_niche.add_argument("--moments-weight", type=float, default=0.15)
+    cell_niche.add_argument("--radial-weight", type=float, default=0.15)
+    cell_niche.add_argument("--pair-weight", type=float, default=0.15)
+    cell_niche.add_argument("--covariance-weight", type=float, default=0.15)
+    cell_niche.add_argument("--gradient-weight", type=float, default=0.10)
+    cell_niche.add_argument(
+        "--allow-umap-as-feature",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Allow UMAP-like feature coordinates for exploratory cell-niche runs.",
+    )
+    cell_niche.add_argument(
+        "--run-null-checks",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Record intent to run null checks. Full null reports are planned after descriptor MVP.",
+    )
+    cell_niche.add_argument(
+        "--run-ablation-report",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Record intent to run ablation reports. Full ablation reports are planned after descriptor MVP.",
+    )
+    cell_niche.add_argument("--seed", type=int, default=1337, help="Random seed.")
 
     multilevel = sub.add_parser(
         "multilevel-ot",
@@ -2599,6 +2828,69 @@ def main() -> None:
             spatial_scale=args.spatial_scale,
             output_obsm_key=args.output_obsm_key,
             batch_size=args.batch_size,
+        )
+        print(json.dumps(summary, indent=2))
+    elif args.command == "cell-niche":
+        summary = run_cell_niche_on_h5ad(
+            input_h5ad=args.input_h5ad,
+            output_dir=args.output_dir,
+            feature_obsm_key=args.feature_obsm_key,
+            spatial_x_key=args.spatial_x_key,
+            spatial_y_key=args.spatial_y_key,
+            sample_obs_key=args.sample_obs_key,
+            spatial_scale=args.spatial_scale,
+            radii_um=args.radii_um,
+            knn_values=args.knn_values,
+            max_neighbors=args.max_neighbors,
+            graph_kernel=args.graph_kernel,
+            density_correction=args.density_correction,
+            state_codebook_size=args.state_codebook_size,
+            state_codebook_sample_size=args.state_codebook_sample_size,
+            feature_pca_dim=args.feature_pca_dim,
+            descriptor_blocks=args.descriptor_blocks,
+            radial_shells=args.radial_shells,
+            pair_mode=args.pair_mode,
+            pair_top_states=args.pair_top_states,
+            covariance_dims=args.covariance_dims,
+            embedding_method=args.embedding_method,
+            embedding_dim=args.embedding_dim,
+            encoder=args.encoder,
+            max_neighbors_per_radius=args.max_neighbors_per_radius,
+            token_dim=args.token_dim,
+            hidden_dim=args.hidden_dim,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            device=args.device,
+            use_ot_prototypes=bool(args.use_ot_prototypes),
+            n_ot_prototypes=args.n_ot_prototypes,
+            prototype_support_size=args.prototype_support_size,
+            ot_epsilon=args.ot_epsilon,
+            ot_temperature=args.ot_temperature,
+            ot_distance_feature_weight=args.ot_distance_feature_weight,
+            context_reconstruction_weight=args.context_reconstruction_weight,
+            ot_prototype_weight=args.ot_prototype_weight,
+            prototype_balance_weight=args.prototype_balance_weight,
+            variance_weight=args.variance_weight,
+            decorrelation_weight=args.decorrelation_weight,
+            cluster_method=args.cluster_method,
+            n_clusters=args.n_clusters,
+            resolution=args.resolution,
+            candidate_resolutions=args.candidate_resolutions,
+            embedding_neighbors=args.embedding_neighbors,
+            self_weight=args.self_weight,
+            composition_weight=args.composition_weight,
+            diversity_weight=args.diversity_weight,
+            moments_weight=args.moments_weight,
+            radial_weight=args.radial_weight,
+            pair_weight=args.pair_weight,
+            covariance_weight=args.covariance_weight,
+            gradient_weight=args.gradient_weight,
+            allow_umap_as_feature=bool(args.allow_umap_as_feature),
+            run_null_checks=bool(args.run_null_checks),
+            run_ablation_report=bool(args.run_ablation_report),
+            seed=args.seed,
         )
         print(json.dumps(summary, indent=2))
     elif args.command == "multilevel-ot":

@@ -1,8 +1,16 @@
 # spatial_ot
 
-`spatial_ot` is a compact research package for multilevel spatial subregion discovery and pooled feature-latent niche clustering.
+`spatial_ot` is a compact research package for cell-centered spatial heterogeneity embedding, spatial niche discovery, and multilevel OT diagnostics.
 
-The active path realizes:
+The active cell-niche path realizes:
+
+- cell-centered local neighborhood measures across multiple physical-radius or kNN scales
+- global soft cell-state codebooks for continuous local composition rather than hard cell-type counts
+- deterministic spatial heterogeneity descriptors over composition, diversity, feature moments, radial-shell organization, pair texture, and gradient/anisotropy
+- direct cell-level spatial niche clustering, with connected same-label components saved as niche instances
+- AnnData-compatible outputs in `obsm`, `obs`, `obsp`, and `uns`
+
+The multilevel OT baseline/diagnostic path realizes:
 
 - geometry-only OT normalization of each subregion into a shared reference domain for fixed-label atom/projection diagnostics
 - an optional learned deep feature adapter with fit/transform/save/load behavior
@@ -18,7 +26,8 @@ Always write outputs outside the package directory to keep it compact.
 
 ## Layout
 
-- `spatial_ot/multilevel/`: active multilevel OT path
+- `spatial_ot/cell_niche/`: active cell-centered spatial heterogeneity embedding path
+- `spatial_ot/multilevel/`: subregion-first multilevel OT baseline and diagnostics
 - `spatial_ot/deep/`: reusable deep feature adapter
 - `spatial_ot/`: shared config/CLI, pooling, feature preparation, and compatibility entrypoints for the active method
 - `scripts/`: canonical operational shell/Python helpers
@@ -46,7 +55,111 @@ The packaged path expects cohort H5AD inputs under the sibling directory `../spa
 
 Operational helpers live under `scripts/`; root-level shell wrappers were removed to keep the package compact.
 
-## Multilevel OT — primary path
+## Cell-Niche — primary path
+
+`spatial_ot cell-niche` changes the primary unit from a fitted subregion to a cell-centered local context:
+
+```text
+cell i -> local neighborhood measures around i -> heterogeneity embedding h_i -> cell spatial niche
+```
+
+Global `spatial_niche` labels are reusable microenvironment motifs that can recur in disconnected tissue locations or samples. `spatial_niche_instance` is the connected component of a niche label within the chosen neighborhood graph.
+
+The default implementation is descriptor-first (`SHE-lite`): it computes interpretable multi-scale descriptor blocks, standardizes them by block, reduces them with SVD/PCA, and clusters cells. The opt-in experimental path (`OT-DeepSHE`) trains a mini-batch DeepSets encoder on cell-centered local measures and can append balanced Sinkhorn distances to learned niche prototypes before clustering. The subregion-first `multilevel-ot` path remains available as a baseline and for OT atom/projection diagnostics.
+
+### Quick cell-niche run
+
+```bash
+cd spatial_ot
+../.venv/bin/python -m spatial_ot cell-niche \
+  --input-h5ad ../spatial_ot_input/xenium_spatial_ot_input_pooled.h5ad \
+  --output-dir ../outputs/spatial_ot/cell_niche_xenium \
+  --feature-obsm-key X_spatial_ot_x_svd_421 \
+  --spatial-x-key original_cell_x \
+  --spatial-y-key original_cell_y \
+  --sample-obs-key sample_id \
+  --spatial-scale 1.0 \
+  --radii-um 20,50,100 \
+  --state-codebook-size 64 \
+  --descriptor-blocks composition,diversity,moments,radial,pair,covariance,gradient \
+  --embedding-method descriptor_pca \
+  --embedding-dim 64 \
+  --cluster-method kmeans \
+  --n-clusters 15 \
+  --density-correction 0.5 \
+  --max-neighbors 256 \
+  --self-weight 0.25
+```
+
+For a context-only ablation, set:
+
+```bash
+--self-weight 0
+```
+
+For the experimental mini-batch OT-DeepSHE tier:
+
+```bash
+../.venv/bin/python -m spatial_ot cell-niche fit \
+  --input-h5ad ../spatial_ot_input/xenium_spatial_ot_input_pooled.h5ad \
+  --output-dir ../outputs/spatial_ot/cell_niche_xenium_ot_deepshe \
+  --feature-obsm-key X_spatial_ot_x_svd_421 \
+  --spatial-x-key original_cell_x \
+  --spatial-y-key original_cell_y \
+  --sample-obs-key sample_id \
+  --radii-um 20,50,100 \
+  --encoder attention_deepsets \
+  --embedding-dim 64 \
+  --max-neighbors-per-radius 64 \
+  --use-ot-prototypes \
+  --n-ot-prototypes 20 \
+  --prototype-support-size 32 \
+  --ot-epsilon 0.05 \
+  --cluster-method kmeans \
+  --n-clusters 15
+```
+
+Outputs include:
+
+- `cells_cell_niche.h5ad`
+- `cell_niche_descriptor_arrays.npz`
+- `cell_niche_model.pt` when a deep encoder is selected
+- `summary.json`
+- `cell_niche_spatial_map.png`
+- `cell_niche_embedding.png`
+
+The H5AD stores:
+
+- `adata.obsm["X_spatial_heterogeneity_descriptor"]`
+- `adata.obsm["X_spatial_heterogeneity"]`
+- `adata.obsm["X_spatial_ot_deepshe"]` for deep encoder runs
+- `adata.obsm["X_spatial_ot_prototype_distances"]` when OT prototypes are enabled
+- `adata.obs["spatial_niche"]`
+- `adata.obs["spatial_niche_confidence"]`
+- `adata.obs["spatial_niche_source"]`
+- `adata.obs["spatial_niche_instance"]`
+- one `adata.obsp["spatial_connectivities_<scale>"]` and `adata.obsp["spatial_distances_<scale>"]` per radius/kNN graph
+- `adata.uns["spatial_heterogeneity_config"]`
+- `adata.uns["spatial_niche_summary"]`
+
+Current `cell-niche` status:
+
+| Capability | Status |
+| --- | --- |
+| radius/kNN same-sample graphs | implemented |
+| soft state codebook | implemented |
+| composition/diversity/moments/radial/pair/covariance/gradient descriptors | implemented |
+| descriptor PCA/SVD embedding | implemented |
+| KMeans clustering | implemented |
+| Leiden clustering | implemented when Scanpy Leiden extras are installed |
+| connected niche instances | implemented |
+| mini-batch weighted/attention DeepSets encoder | implemented, experimental |
+| balanced Sinkhorn OT prototype head | implemented, experimental |
+| null and ablation reports | planned |
+| OT distance distillation | planned |
+| transform/predict for new samples | planned |
+
+## Multilevel OT — subregion baseline and diagnostics
 
 `spatial_ot multilevel-ot` forms spatial subregions, converts every subregion to either a cohort-comparable heterogeneity descriptor, a baseline feature-distribution embedding, or a transport-measure object, and clusters subregions with the selected representation.
 

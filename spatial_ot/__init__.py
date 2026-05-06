@@ -44,6 +44,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "optimal_search",
         "run_multilevel_optimal_search",
     ),
+    "run_cell_niche_on_h5ad": ("cell_niche", "run_cell_niche_on_h5ad"),
     "run_multilevel_ot_on_h5ad": ("multilevel", "run_multilevel_ot_on_h5ad"),
     "run_multilevel_ot_with_config": ("multilevel", "run_multilevel_ot_with_config"),
     "spatial_niche_validation_report": (
