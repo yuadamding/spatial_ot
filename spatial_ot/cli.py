@@ -888,7 +888,7 @@ def build_parser() -> argparse.ArgumentParser:
     cell_niche.add_argument(
         "--graph-kernel",
         default="gaussian",
-        choices=["gaussian", "binary", "inverse"],
+        choices=["gaussian", "uniform", "inverse_distance", "binary", "inverse"],
         help="Kernel used to weight neighbors inside each local context graph.",
     )
     cell_niche.add_argument(

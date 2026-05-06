@@ -6,7 +6,7 @@ The active cell-niche path realizes:
 
 - cell-centered local neighborhood measures across multiple physical-radius or kNN scales
 - global soft cell-state codebooks for continuous local composition rather than hard cell-type counts
-- deterministic spatial heterogeneity descriptors over composition, diversity, feature moments, radial-shell organization, pair texture, and gradient/anisotropy
+- deterministic spatial heterogeneity descriptors over composition, diversity, feature moments, radial-shell organization, anchor-neighbor pair texture, COVET-like covariance, and gradient/anisotropy
 - direct cell-level spatial niche clustering, with connected same-label components saved as niche instances
 - AnnData-compatible outputs in `obsm`, `obs`, `obsp`, and `uns`
 
@@ -71,7 +71,7 @@ The default implementation is descriptor-first (`SHE-lite`): it computes interpr
 
 ```bash
 cd spatial_ot
-../.venv/bin/python -m spatial_ot cell-niche \
+../.venv/bin/python -m spatial_ot cell-niche fit \
   --input-h5ad ../spatial_ot_input/xenium_spatial_ot_input_pooled.h5ad \
   --output-dir ../outputs/spatial_ot/cell_niche_xenium \
   --feature-obsm-key X_spatial_ot_x_svd_421 \
@@ -138,6 +138,7 @@ The H5AD stores:
 - `adata.obs["spatial_niche_confidence"]`
 - `adata.obs["spatial_niche_source"]`
 - `adata.obs["spatial_niche_instance"]`
+- per-graph `adata.obs["n_neighbors_<scale>"]`, `adata.obs["local_density_<scale>"]`, and `adata.obs["is_isolated_<scale>"]`
 - one `adata.obsp["spatial_connectivities_<scale>"]` and `adata.obsp["spatial_distances_<scale>"]` per radius/kNN graph
 - `adata.uns["spatial_heterogeneity_config"]`
 - `adata.uns["spatial_niche_summary"]`
@@ -147,6 +148,7 @@ Current `cell-niche` status:
 | Capability | Status |
 | --- | --- |
 | radius/kNN same-sample graphs | implemented |
+| radial-shell-preserving radius neighbor cap | implemented |
 | soft state codebook | implemented |
 | composition/diversity/moments/radial/pair/covariance/gradient descriptors | implemented |
 | descriptor PCA/SVD embedding | implemented |
@@ -158,6 +160,8 @@ Current `cell-niche` status:
 | null and ablation reports | planned |
 | OT distance distillation | planned |
 | transform/predict for new samples | planned |
+
+The correct method claim for this release is: deterministic cell-centered spatial heterogeneity embedding is implemented as the stable path; DeepSHE and OT prototype features are experimental opt-ins. Full transform/predict bundles, OT distance distillation, and leakage/null validation reports are still planned.
 
 ## Multilevel OT — subregion baseline and diagnostics
 

@@ -41,17 +41,78 @@ def _format_number(value: float | int) -> str:
     return text.replace("-", "m").replace(".", "p")
 
 
+def _canonical_kernel(kernel: str) -> str:
+    requested = str(kernel or "gaussian").strip().lower()
+    aliases = {
+        "binary": "uniform",
+        "none": "uniform",
+        "inverse": "inverse_distance",
+        "inverse_distance": "inverse_distance",
+        "rbf": "gaussian",
+        "gaussian": "gaussian",
+        "uniform": "uniform",
+    }
+    try:
+        return aliases[requested]
+    except KeyError as exc:
+        raise ValueError(
+            "kernel must be gaussian, uniform, or inverse_distance "
+            "(aliases: rbf, binary, none, inverse)."
+        ) from exc
+
+
 def _kernel_weights(distances: np.ndarray, *, kernel: str, scale: float) -> np.ndarray:
     dist = np.asarray(distances, dtype=np.float32)
-    requested = str(kernel or "gaussian").strip().lower()
-    if requested in {"binary", "uniform", "none"}:
+    requested = _canonical_kernel(kernel)
+    if requested == "uniform":
         return np.ones_like(dist, dtype=np.float32)
-    if requested in {"inverse", "inverse_distance"}:
+    if requested == "inverse_distance":
         return (1.0 / np.maximum(dist, 1e-6)).astype(np.float32)
-    if requested in {"gaussian", "rbf"}:
+    if requested == "gaussian":
         bandwidth = max(float(scale), 1e-6)
         return np.exp(-0.5 * (dist / bandwidth) ** 2).astype(np.float32)
-    raise ValueError("kernel must be gaussian, binary, or inverse.")
+    raise AssertionError("unreachable kernel branch")
+
+
+def _stratified_distance_cap(
+    *,
+    indices: np.ndarray,
+    distances: np.ndarray,
+    weights: np.ndarray,
+    max_neighbors: int,
+    radius_um: float,
+    n_shells: int = 3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cap dense radius neighborhoods while retaining outer radial shells."""
+
+    if indices.size <= int(max_neighbors):
+        return indices, distances, weights
+    shells = max(int(n_shells), 1)
+    denom = max(float(radius_um), 1e-8)
+    shell_idx = np.floor(np.clip(distances / denom, 0.0, 0.999999) * shells).astype(
+        np.int32
+    )
+    present = [int(shell) for shell in range(shells) if np.any(shell_idx == shell)]
+    if not present:
+        order = np.argsort(distances, kind="stable")[: int(max_neighbors)]
+        return indices[order], distances[order], weights[order]
+    selected: list[int] = []
+    base_quota = int(max_neighbors) // len(present)
+    remainder = int(max_neighbors) - base_quota * len(present)
+    for pos, shell in enumerate(present):
+        quota = base_quota + (1 if pos < remainder else 0)
+        if quota <= 0:
+            continue
+        candidates = np.flatnonzero(shell_idx == shell)
+        order = candidates[np.argsort(distances[candidates], kind="stable")]
+        selected.extend(int(idx) for idx in order[:quota])
+    if len(selected) < int(max_neighbors):
+        remaining = np.setdiff1d(np.arange(indices.size), np.asarray(selected), assume_unique=False)
+        top_up = remaining[np.argsort(distances[remaining], kind="stable")]
+        selected.extend(int(idx) for idx in top_up[: int(max_neighbors) - len(selected)])
+    chosen = np.asarray(selected[: int(max_neighbors)], dtype=np.int64)
+    chosen = chosen[np.argsort(distances[chosen], kind="stable")]
+    return indices[chosen], distances[chosen], weights[chosen]
 
 
 def _apply_density_correction(
@@ -86,7 +147,7 @@ def _graph_metadata(
         "mode": str(mode),
         "radius_um": None if radius_um is None else float(radius_um),
         "k": None if k is None else int(k),
-        "kernel": str(kernel),
+        "kernel": _canonical_kernel(kernel),
         "max_neighbors": int(max_neighbors),
         "density_correction": float(density_correction),
         "n_cells": int(matrix.shape[0]),
@@ -148,17 +209,23 @@ def build_radius_graphs(
                 ind = ind[finite]
                 if dist.size == 0:
                     continue
+                row_weights = _kernel_weights(
+                    dist, kernel=kernel, scale=max(radius / 2.0, 1e-6)
+                )
                 if dist.size > max_neighbors:
-                    dist = dist[:max_neighbors]
-                    ind = ind[:max_neighbors]
+                    ind, dist, row_weights = _stratified_distance_cap(
+                        indices=ind,
+                        distances=dist,
+                        weights=row_weights,
+                        max_neighbors=max_neighbors,
+                        radius_um=float(radius),
+                    )
                 rows.append(
                     np.full(ind.shape[0], int(global_idx[row_local]), dtype=np.int64)
                 )
                 cols.append(global_idx[ind].astype(np.int64, copy=False))
                 distances.append(dist.astype(np.float32, copy=False))
-                weights.append(
-                    _kernel_weights(dist, kernel=kernel, scale=max(radius / 2.0, 1e-6))
-                )
+                weights.append(row_weights.astype(np.float32, copy=False))
         n_cells = int(xy.shape[0])
         if rows:
             row_arr = np.concatenate(rows)

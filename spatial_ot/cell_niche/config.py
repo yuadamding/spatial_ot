@@ -16,7 +16,7 @@ class CellNicheConfig:
     radii_um: tuple[float, ...] = (20.0, 50.0, 100.0)
     spatial_scale: float = 1.0
     max_neighbors_per_radius: int = 64
-    kernel: Literal["gaussian", "triangular", "uniform", "binary", "inverse"] = "gaussian"
+    kernel: Literal["gaussian", "uniform", "inverse_distance"] = "gaussian"
 
     molecular_dim: int = 128
     state_codebook_size: int = 64

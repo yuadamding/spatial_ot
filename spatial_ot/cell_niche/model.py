@@ -77,6 +77,7 @@ class MultiScaleDeepSetEncoder(nn.Module):
         token_inputs: torch.Tensor,
         weights: torch.Tensor,
         mask: torch.Tensor,
+        is_isolated: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         scale_contexts: list[torch.Tensor] = []
         token_embeddings: list[torch.Tensor] = []
@@ -84,7 +85,14 @@ class MultiScaleDeepSetEncoder(nn.Module):
             x = token_inputs[:, radius_idx]
             w = weights[:, radius_idx]
             m = mask[:, radius_idx]
+            isolated = (
+                is_isolated[:, radius_idx]
+                if is_isolated is not None
+                else torch.zeros(x.shape[0], dtype=torch.bool, device=x.device)
+            )
             e = self.token_mlps[radius_idx](x)
+            if torch.any(isolated):
+                e = torch.where(isolated[:, None, None], torch.zeros_like(e), e)
             if self.use_attention:
                 logits = self.attn_mlps[radius_idx](e).squeeze(-1)
             else:
@@ -226,6 +234,7 @@ class OTDeepSHEModel(nn.Module):
             token_inputs=batch["tokens"],
             weights=batch["weights"],
             mask=batch["mask"],
+            is_isolated=batch.get("is_isolated"),
         )
         decoded = self.context_decoder(h)
         if self.ot_head is not None:

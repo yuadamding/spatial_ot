@@ -5,6 +5,11 @@ import shutil
 import subprocess
 import sys
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib
+
 import pytest
 
 
@@ -54,12 +59,14 @@ def test_no_generated_files_tracked_when_git_metadata_is_available() -> None:
         assert not any(path.endswith(suffix) for suffix in forbidden_suffixes)
 
 
-def test_package_version_matches_0_2_5_state() -> None:
+def test_package_version_matches_pyproject() -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    pyproject_toml = (repo_root / "pyproject.toml").read_text()
-    package_init = (repo_root / "spatial_ot" / "__init__.py").read_text()
-    assert 'version = "0.2.7"' in pyproject_toml
-    assert '__version__ = "0.2.7"' in package_init
+    with (repo_root / "pyproject.toml").open("rb") as handle:
+        pyproject = tomllib.load(handle)
+
+    import spatial_ot
+
+    assert spatial_ot.__version__ == pyproject["project"]["version"]
 
 
 def test_default_entrypoints_do_not_hardcode_workspace_absolute_paths() -> None:

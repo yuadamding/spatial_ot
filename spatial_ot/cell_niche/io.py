@@ -517,9 +517,10 @@ def run_cell_niche_on_h5ad(
     adata.obs["spatial_niche_instance_int"] = instance_ids.astype(np.int32)
     for graph_key, graph in graphs.items():
         suffix = str(graph_key).replace("-", "_")
-        adata.obs[f"local_density_{suffix}"] = np.diff(graph.connectivities.indptr).astype(
-            np.float32
-        )
+        degree = np.diff(graph.connectivities.indptr).astype(np.float32)
+        adata.obs[f"n_neighbors_{suffix}"] = degree
+        adata.obs[f"local_density_{suffix}"] = degree
+        adata.obs[f"is_isolated_{suffix}"] = degree == 0
 
     h5ad_path = out_dir / "cells_cell_niche.h5ad"
     descriptor_npz_path = out_dir / "cell_niche_descriptor_arrays.npz"

@@ -71,24 +71,69 @@ class CellNicheDataset(Dataset):
     def __getitem__(self, index: int) -> int:
         return int(index)
 
+    def _stratified_cap(
+        self,
+        *,
+        cols: np.ndarray,
+        distances: np.ndarray,
+        weights: np.ndarray,
+        graph: NeighborhoodGraph,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if cols.size <= self.max_neighbors_per_graph:
+            return cols, distances, weights
+        denom = self._radius_denominator(graph, distances)
+        shell_idx = np.floor(
+            np.clip(distances / max(denom, 1e-8), 0.0, 0.999999)
+            * self.radial_shells
+        ).astype(np.int32)
+        present = [
+            int(shell)
+            for shell in range(self.radial_shells)
+            if np.any(shell_idx == shell)
+        ]
+        selected: list[int] = []
+        base_quota = self.max_neighbors_per_graph // max(len(present), 1)
+        remainder = self.max_neighbors_per_graph - base_quota * max(len(present), 1)
+        for pos, shell in enumerate(present):
+            quota = base_quota + (1 if pos < remainder else 0)
+            if quota <= 0:
+                continue
+            candidates = np.flatnonzero(shell_idx == shell)
+            order = candidates[np.argsort(distances[candidates], kind="stable")]
+            selected.extend(int(idx) for idx in order[:quota])
+        if len(selected) < self.max_neighbors_per_graph:
+            remaining = np.setdiff1d(
+                np.arange(cols.size), np.asarray(selected), assume_unique=False
+            )
+            top_up = remaining[np.argsort(distances[remaining], kind="stable")]
+            selected.extend(
+                int(idx)
+                for idx in top_up[: self.max_neighbors_per_graph - len(selected)]
+            )
+        chosen = np.asarray(selected[: self.max_neighbors_per_graph], dtype=np.int64)
+        chosen = chosen[np.argsort(distances[chosen], kind="stable")]
+        return cols[chosen], distances[chosen], weights[chosen]
+
     def _row_neighbors(self, graph: NeighborhoodGraph, row: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         conn = graph.connectivities.tocsr()
         dist = graph.distances.tocsr()
         start, stop = int(conn.indptr[row]), int(conn.indptr[row + 1])
         if start == stop:
             return (
-                np.asarray([row], dtype=np.int64),
-                np.asarray([0.0], dtype=np.float32),
-                np.asarray([1.0], dtype=np.float32),
+                np.zeros(0, dtype=np.int64),
+                np.zeros(0, dtype=np.float32),
+                np.zeros(0, dtype=np.float32),
             )
         cols = conn.indices[start:stop].astype(np.int64, copy=False)
         weights = np.asarray(conn.data[start:stop], dtype=np.float32)
         distances = np.asarray(dist.data[start:stop], dtype=np.float32)
         if cols.size > self.max_neighbors_per_graph:
-            order = np.argsort(-weights, kind="stable")[: self.max_neighbors_per_graph]
-            cols = cols[order]
-            weights = weights[order]
-            distances = distances[order]
+            cols, distances, weights = self._stratified_cap(
+                cols=cols,
+                distances=distances,
+                weights=weights,
+                graph=graph,
+            )
         weight_sum = float(np.sum(weights))
         if weight_sum <= 1e-12:
             weights = np.full(weights.shape, 1.0 / max(int(weights.size), 1), dtype=np.float32)
@@ -111,6 +156,8 @@ class CellNicheDataset(Dataset):
         tokens = np.zeros((batch_size, n_graphs, max_neighbors, token_dim), dtype=np.float32)
         weights = np.zeros((batch_size, n_graphs, max_neighbors), dtype=np.float32)
         mask = np.zeros((batch_size, n_graphs, max_neighbors), dtype=bool)
+        isolated = np.zeros((batch_size, n_graphs), dtype=bool)
+        local_density = np.zeros((batch_size, n_graphs), dtype=np.float32)
 
         z_dim = int(self.features.shape[1])
         q_dim = int(self.posteriors.shape[1])
@@ -124,6 +171,12 @@ class CellNicheDataset(Dataset):
                 cols = cols[:keep]
                 distances = distances[:keep]
                 row_weights = row_weights[:keep]
+                local_density[batch_row, graph_pos] = float(keep)
+                if keep == 0:
+                    isolated[batch_row, graph_pos] = True
+                    weights[batch_row, graph_pos, 0] = 1.0
+                    mask[batch_row, graph_pos, 0] = True
+                    continue
                 denom = max(self._radius_denominator(graph, distances), 1e-8)
                 rel = (self.coords_um[cols] - anchor_xy[None, :]) / denom
                 relative_distance = distances / denom
@@ -156,6 +209,8 @@ class CellNicheDataset(Dataset):
             "tokens": torch.as_tensor(tokens, dtype=torch.float32),
             "weights": torch.as_tensor(weights, dtype=torch.float32),
             "mask": torch.as_tensor(mask, dtype=torch.bool),
+            "is_isolated": torch.as_tensor(isolated, dtype=torch.bool),
+            "local_density": torch.as_tensor(local_density, dtype=torch.float32),
         }
         if self.descriptor_targets is not None:
             out["descriptor_targets"] = torch.as_tensor(

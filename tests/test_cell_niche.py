@@ -48,6 +48,36 @@ def test_radius_graphs_never_connect_across_samples() -> None:
     assert graph[1, 3] == 0
 
 
+def test_radius_graph_cap_preserves_outer_shell_neighbors() -> None:
+    coords = np.asarray(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.2, 0.0],
+            [1.4, 0.0],
+            [4.8, 0.0],
+            [5.1, 0.0],
+            [9.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    samples = np.asarray(["s"] * coords.shape[0], dtype=object)
+
+    graphs = build_radius_graphs(
+        coords,
+        samples,
+        radii_um=(10.0,),
+        max_neighbors=3,
+        include_self=False,
+        kernel="uniform",
+    )
+
+    dist = graphs["r10"].distances.tocsr()
+    row0_distances = dist.data[dist.indptr[0] : dist.indptr[1]]
+    assert row0_distances.size == 3
+    assert np.any(row0_distances > 8.0)
+
+
 def test_knn_graphs_never_connect_across_samples() -> None:
     coords = np.asarray(
         [
@@ -73,6 +103,20 @@ def test_knn_graphs_never_connect_across_samples() -> None:
     assert graph[2, 3] > 0
     assert graph[0, 2] == 0
     assert graph[1, 3] == 0
+
+
+def test_graph_kernel_aliases_are_canonicalized() -> None:
+    coords = np.asarray([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+    samples = np.asarray(["s", "s"], dtype=object)
+
+    graphs = build_radius_graphs(
+        coords,
+        samples,
+        radii_um=(2.0,),
+        kernel="binary",
+    )
+
+    assert graphs["r2"].metadata["kernel"] == "uniform"
 
 
 def test_soft_codebook_rows_sum_to_one() -> None:
@@ -117,10 +161,35 @@ def test_cell_niche_dataset_batch_shapes() -> None:
     assert batch["weights"].shape == (3, 1, 2)
     assert batch["mask"].dtype == torch.bool
     assert batch["descriptor_targets"].shape == (3, 7)
+    assert batch["is_isolated"].shape == (3, 1)
+    assert batch["local_density"].shape == (3, 1)
     torch.testing.assert_close(
         (batch["weights"] * batch["mask"]).sum(dim=2),
         torch.ones((3, 1), dtype=torch.float32),
     )
+
+
+def test_cell_niche_dataset_isolated_cell_uses_zero_context_token() -> None:
+    coords = np.asarray([[0.0, 0.0], [100.0, 0.0]], dtype=np.float32)
+    samples = np.asarray(["s", "s"], dtype=object)
+    graphs = build_radius_graphs(coords, samples, radii_um=(1.0,), max_neighbors=4)
+    features = np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    posteriors = np.eye(2, dtype=np.float32)
+    dataset = CellNicheDataset(
+        features=features,
+        posteriors=posteriors,
+        coords_um=coords,
+        graphs=graphs,
+        radial_shells=2,
+        max_neighbors_per_graph=3,
+    )
+
+    batch = dataset.collate_fn([0])
+
+    assert bool(batch["is_isolated"][0, 0])
+    assert float(batch["local_density"][0, 0]) == 0.0
+    torch.testing.assert_close(batch["tokens"][0, 0, 0], torch.zeros(9))
+    torch.testing.assert_close(batch["weights"][0, 0], torch.tensor([1.0, 0.0, 0.0]))
 
 
 def test_covariance_descriptor_block_metadata_is_present() -> None:
@@ -163,6 +232,41 @@ def test_ot_cost_identical_single_support_measures_is_zero() -> None:
     )
 
     torch.testing.assert_close(distances, torch.zeros(2), atol=1e-7, rtol=1e-7)
+
+
+def test_sinkhorn_identical_measure_cost_is_finite_and_small() -> None:
+    torch.manual_seed(17)
+    points = torch.randn(1, 4, 3)
+    cost = torch.cdist(points, points, p=2.0).pow(2)
+    weights = torch.full((1, 4), 0.25)
+
+    distance = sinkhorn_balanced_distance(
+        cost,
+        weights,
+        weights,
+        epsilon=0.01,
+        n_iters=80,
+    )
+
+    assert torch.isfinite(distance).all()
+    assert float(distance[0]) < 1e-3
+
+
+def test_sinkhorn_gradients_are_finite() -> None:
+    torch.manual_seed(19)
+    left = torch.randn(1, 5, 3, requires_grad=True)
+    right = torch.randn(1, 6, 3, requires_grad=True)
+    cost = torch.cdist(left, right, p=2.0).pow(2)
+    a = torch.full((1, 5), 0.2)
+    b = torch.full((1, 6), 1.0 / 6.0)
+
+    distance = sinkhorn_balanced_distance(cost, a, b, epsilon=0.05, n_iters=20)
+    distance.sum().backward()
+
+    assert left.grad is not None
+    assert right.grad is not None
+    assert torch.isfinite(left.grad).all()
+    assert torch.isfinite(right.grad).all()
 
 
 def test_ot_prototype_head_output_shape() -> None:
@@ -233,6 +337,42 @@ def test_deepshe_forward_backward_runs() -> None:
     assert model.encoder.fuse[-1].weight.grad is not None
 
 
+def test_deepshe_keeps_isolated_context_tokens_zero() -> None:
+    coords = np.asarray([[0.0, 0.0], [100.0, 0.0]], dtype=np.float32)
+    samples = np.asarray(["s", "s"], dtype=object)
+    graphs = build_radius_graphs(coords, samples, radii_um=(1.0,), max_neighbors=4)
+    features = np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    posteriors = np.eye(2, dtype=np.float32)
+    targets = np.zeros((2, 4), dtype=np.float32)
+    dataset = CellNicheDataset(
+        features=features,
+        posteriors=posteriors,
+        coords_um=coords,
+        graphs=graphs,
+        descriptor_targets=targets,
+        radial_shells=2,
+        max_neighbors_per_graph=3,
+    )
+    batch = dataset.collate_fn([0])
+    model = OTDeepSHEModel(
+        z_dim=2,
+        token_input_dim=dataset.token_input_dim,
+        n_radii=1,
+        descriptor_dim=4,
+        token_dim=8,
+        hidden_dim=16,
+        embedding_dim=4,
+    )
+
+    outputs = model(batch)
+
+    assert bool(batch["is_isolated"][0, 0])
+    torch.testing.assert_close(
+        outputs["token_embeddings"][0, 0],
+        torch.zeros_like(outputs["token_embeddings"][0, 0]),
+    )
+
+
 def test_cell_niche_descriptor_run_writes_cell_level_outputs(tmp_path: Path) -> None:
     rng = np.random.default_rng(123)
     n_per_sample = 18
@@ -294,6 +434,8 @@ def test_cell_niche_descriptor_run_writes_cell_level_outputs(tmp_path: Path) -> 
     assert "spatial_niche_instance" in fitted.obs
     assert "spatial_connectivities_r2p5" in fitted.obsp
     assert "spatial_distances_r4" in fitted.obsp
+    assert "n_neighbors_r2p5" in fitted.obs
+    assert "is_isolated_r2p5" in fitted.obs
     assert fitted.uns["spatial_niche_summary"]["primary_unit"] == "cell"
     assert summary["primary_unit"] == "cell"
     assert summary["n_niches"] == 3
