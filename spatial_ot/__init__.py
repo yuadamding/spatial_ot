@@ -50,7 +50,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "sinkhorn_ot_block": ("pairwise_niche", "sinkhorn_ot_block"),
 }
 
-__version__ = "3.0.9"
+__version__ = "3.0.10"
 __all__ = ["__version__", *_LAZY_EXPORTS]
 
 

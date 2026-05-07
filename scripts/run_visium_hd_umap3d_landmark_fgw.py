@@ -33,10 +33,12 @@ from spatial_ot.pairwise_niche.fgw import (
 )
 from spatial_ot.pairwise_niche.local_measure import (
     _cap_neighbors,
+    _canonical_fgw_structure_mode,
+    _fgw_structure_disconnected_metadata,
     _fit_ground_cost_scales,
     _fit_state_labels,
     _kernel_weights,
-    _local_structure_matrix,
+    _local_structure_matrix_with_diagnostics,
 )
 
 
@@ -148,6 +150,9 @@ def _build_compact_local_measures(
     selected_ids: list[np.ndarray] = [np.empty(0, dtype=np.int64) for _ in range(n)]
     selected_dist: list[np.ndarray] = [np.empty(0, dtype=np.float32) for _ in range(n)]
     selected_weights: list[np.ndarray] = [np.empty(0, dtype=np.float32) for _ in range(n)]
+    requested_structure_mode = str(fgw_structure_mode)
+    canonical_structure_mode = _canonical_fgw_structure_mode(requested_structure_mode)
+    structure_disconnected = np.zeros(n, dtype=bool)
     full_counts = np.zeros(n, dtype=np.int32)
     retained_counts = np.zeros(n, dtype=np.int32)
     max_active = 1 if bool(include_anchor) else 0
@@ -237,12 +242,14 @@ def _build_compact_local_measures(
             mask[row, pos] = True
             pos += 1
         coords = np.vstack(rel_coords).astype(np.float32, copy=False)
-        structure[row, : coords.shape[0], : coords.shape[0]] = _local_structure_matrix(
+        graph_dist, disconnected, _ = _local_structure_matrix_with_diagnostics(
             coords,
-            mode=str(fgw_structure_mode),
+            mode=canonical_structure_mode,
             knn=int(fgw_structure_knn),
             radius_fraction=float(fgw_structure_radius_fraction),
         )
+        structure_disconnected[row] = bool(disconnected)
+        structure[row, : coords.shape[0], : coords.shape[0]] = graph_dist
     scales = _fit_ground_cost_scales(
         tokens,
         mask,
@@ -271,10 +278,16 @@ def _build_compact_local_measures(
         "cap_state_clusters": int(cap_state_clusters),
         "radial_shells": int(radial_shells),
         "isolated_policy": str(isolated_policy),
-        "fgw_structure_mode": str(fgw_structure_mode),
+        "fgw_structure_mode": str(canonical_structure_mode),
+        "fgw_structure_requested_mode": str(requested_structure_mode),
         "fgw_structure_knn": int(fgw_structure_knn),
         "fgw_structure_radius_fraction": float(fgw_structure_radius_fraction),
-        "uses_graph_topology_structure": str(fgw_structure_mode) != "complete_euclidean",
+        **_fgw_structure_disconnected_metadata(
+            structure_disconnected,
+            mode=canonical_structure_mode,
+        ),
+        "uses_graph_topology_structure": str(canonical_structure_mode)
+        != "complete_euclidean",
         "expression_weight": float(expression_weight),
         "spatial_weight": float(spatial_weight),
         "distance_weight": float(distance_weight),
@@ -385,12 +398,14 @@ def _compute_landmark_fgw(
                 sinkhorn_iters=int(sinkhorn_iters),
                 fgw_iters=int(fgw_iters),
             ).detach().cpu().numpy().astype(np.float32)
+            if j_start == start:
+                block = (0.5 * (block + block.T)).astype(np.float32, copy=False)
+                np.fill_diagonal(block, 0.0)
             out[start:stop, j_start:j_stop] = block
             if j_start != start:
                 out[j_start:j_stop, start:stop] = block.T
         if start == 0 or (start // int(block_size)) % 5 == 0 or stop == n:
             _log(log_path, f"  landmark rows {start}-{stop}/{n}; elapsed {time.time() - t0:.1f}s")
-    out[:] = 0.5 * (out + out.T)
     np.fill_diagonal(out, 0.0)
     return out
 
@@ -1009,6 +1024,7 @@ def build_parser() -> argparse.ArgumentParser:
             "complete_euclidean",
             "local_knn_shortest_path",
             "radius_graph_shortest_path",
+            "binary_edge_distance",
             "adjacency",
         ],
     )

@@ -55,6 +55,7 @@ class PairwiseNicheConfig:
         "complete_euclidean",
         "local_knn_shortest_path",
         "radius_graph_shortest_path",
+        "binary_edge_distance",
         "adjacency",
     ] = "local_knn_shortest_path"
     fgw_structure_knn: int = 6
@@ -68,6 +69,7 @@ class PairwiseNicheConfig:
     max_ot_work_units: float = 5e11
     max_fgw_work_units: float = 1e12
     force_large_exact_ot: bool = False
+    target_block_memory_gib: float | None = None
     distance_store: Literal["auto", "h5ad", "npy_memmap"] = "auto"
 
     cluster_method: Literal["agglomerative", "kmedoids", "leiden_ot_knn"] = "agglomerative"

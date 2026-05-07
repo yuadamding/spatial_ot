@@ -473,6 +473,18 @@ def _select_fixed_k_model(
     }
 
 
+def _ordered_neighbors(distance: np.ndarray, row: int, limit: int | None = None) -> np.ndarray:
+    order = np.argsort(distance[row], kind="stable")
+    order = order[order != row]
+    return order if limit is None else order[:limit]
+
+
+def _knn_orders(distance: np.ndarray, *, k: int) -> list[np.ndarray]:
+    n = int(distance.shape[0])
+    neighbors = min(max(int(k), 1), max(n - 1, 1))
+    return [_ordered_neighbors(distance, row, neighbors) for row in range(n)]
+
+
 def ot_knn_affinity(
     distance: np.ndarray,
     *,
@@ -481,7 +493,7 @@ def ot_knn_affinity(
 ) -> sparse.csr_matrix:
     d = np.asarray(distance, dtype=np.float32)
     n = int(d.shape[0])
-    neighbors = min(max(int(k), 1), max(n - 1, 1))
+    orders = _knn_orders(d, k=int(k))
     rows: list[int] = []
     cols: list[int] = []
     data: list[float] = []
@@ -493,14 +505,11 @@ def ot_knn_affinity(
     local_sigma = np.full(n, global_sigma, dtype=np.float32)
     if requested_scaling == "local" and n > 1:
         for row in range(n):
-            order = np.argsort(d[row], kind="stable")
-            order = order[order != row]
-            positive = d[row, order][d[row, order] > 0]
+            ordered = _ordered_neighbors(d, row)
+            positive = d[row, ordered][d[row, ordered] > 0]
             if positive.size:
-                local_sigma[row] = float(positive[min(neighbors - 1, positive.size - 1)])
-    for row in range(n):
-        order = np.argsort(d[row], kind="stable")
-        order = order[order != row][:neighbors]
+                local_sigma[row] = float(positive[min(positive.size - 1, orders[row].size - 1)])
+    for row, order in enumerate(orders):
         rows.extend([row] * int(order.size))
         cols.extend(int(col) for col in order)
         if requested_scaling == "global":
@@ -515,6 +524,20 @@ def ot_knn_affinity(
                 )
                 for col in order
             )
+    graph = sparse.coo_matrix((data, (rows, cols)), shape=(n, n), dtype=np.float32).tocsr()
+    return graph.maximum(graph.T).tocsr()
+
+
+def ot_knn_distance_graph(distance: np.ndarray, *, k: int = 30) -> sparse.csr_matrix:
+    d = np.asarray(distance, dtype=np.float32)
+    n = int(d.shape[0])
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    for row, order in enumerate(_knn_orders(d, k=int(k))):
+        rows.extend([row] * int(order.size))
+        cols.extend(int(col) for col in order)
+        data.extend(float(d[row, col]) for col in order)
     graph = sparse.coo_matrix((data, (rows, cols)), shape=(n, n), dtype=np.float32).tocsr()
     return graph.maximum(graph.T).tocsr()
 
@@ -535,7 +558,7 @@ def _leiden_ot_knn(
     graph = ot_knn_affinity(distance, k=int(k), scaling=str(affinity_scaling))
     tmp = ad.AnnData(X=np.zeros((distance.shape[0], 1), dtype=np.float32))
     tmp.obsp["connectivities"] = graph
-    tmp.obsp["distances"] = sparse.csr_matrix(distance)
+    tmp.obsp["distances"] = ot_knn_distance_graph(distance, k=int(k))
     try:
         sc.tl.leiden(
             tmp,

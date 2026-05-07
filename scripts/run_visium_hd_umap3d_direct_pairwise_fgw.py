@@ -402,6 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
             "complete_euclidean",
             "local_knn_shortest_path",
             "radius_graph_shortest_path",
+            "binary_edge_distance",
             "adjacency",
         ],
     )

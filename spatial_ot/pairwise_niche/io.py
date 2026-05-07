@@ -58,6 +58,65 @@ def _cluster_counts(labels: np.ndarray) -> dict[str, int]:
     return {f"ON{int(label)}": int(count) for label, count in zip(values, counts, strict=False)}
 
 
+def _cluster_medoids(distance: np.ndarray, labels: np.ndarray) -> dict[str, int]:
+    d = np.asarray(distance, dtype=np.float32)
+    y = np.asarray(labels, dtype=np.int32)
+    out: dict[str, int] = {}
+    for label in sorted(np.unique(y)):
+        members = np.flatnonzero(y == int(label))
+        if members.size == 0:
+            continue
+        intra = d[np.ix_(members, members)]
+        out[f"ON{int(label)}"] = int(members[np.argmin(np.sum(intra, axis=1))])
+    return out
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True, default=_json_default),
+        encoding="utf-8",
+    )
+
+
+def _save_reference_model_bundle(
+    *,
+    model_dir: Path,
+    obs_names: pd.Index,
+    labels: np.ndarray,
+    distance: np.ndarray,
+) -> dict[str, object]:
+    medoids = _cluster_medoids(distance, labels)
+    paths = {
+        "reference_cluster_labels": model_dir / "reference_cluster_labels.npy",
+        "reference_medoid_indices": model_dir / "reference_medoid_indices.npy",
+        "reference_obs_names": model_dir / "reference_obs_names.json",
+        "reference_medoid_obs_names": model_dir / "reference_medoid_obs_names.json",
+        "cluster_medoids": model_dir / "cluster_medoids.json",
+    }
+    medoid_indices = np.asarray(list(medoids.values()), dtype=np.int64)
+    np.save(paths["reference_cluster_labels"], np.asarray(labels, dtype=np.int32))
+    np.save(paths["reference_medoid_indices"], medoid_indices)
+    _write_json(paths["reference_obs_names"], [str(value) for value in obs_names])
+    _write_json(
+        paths["reference_medoid_obs_names"],
+        [str(obs_names[int(idx)]) for idx in medoid_indices],
+    )
+    _write_json(
+        paths["cluster_medoids"],
+        {
+            "cluster_to_row_index": medoids,
+            "cluster_to_obs_name": {
+                label: str(obs_names[int(idx)]) for label, idx in medoids.items()
+            },
+        },
+    )
+    return {
+        **{key: str(path) for key, path in paths.items()},
+        "assignment_rule": "nearest_reference_medoid_distances",
+        "transform_command_available": False,
+    }
+
+
 def _distance_output_path(
     *,
     output_dir: Path,
@@ -142,6 +201,7 @@ def run_pairwise_niche_on_h5ad(
     max_ot_work_units: float = 5e11,
     max_fgw_work_units: float = 1e12,
     force_large_exact_ot: bool = False,
+    target_block_memory_gib: float | None = None,
     distance_store: str = "auto",
     cluster_method: str = "agglomerative",
     n_clusters: int | None = None,
@@ -237,6 +297,7 @@ def run_pairwise_niche_on_h5ad(
         max_ot_work_units=float(max_ot_work_units),
         max_fgw_work_units=float(max_fgw_work_units),
         force_large_exact_ot=bool(force_large_exact_ot),
+        target_block_memory_gib=target_block_memory_gib,
         distance_store=str(distance_store),  # type: ignore[arg-type]
         cluster_method=requested_cluster_method,  # type: ignore[arg-type]
         n_clusters=n_clusters,
@@ -315,6 +376,7 @@ def run_pairwise_niche_on_h5ad(
         max_ot_work_units=float(max_ot_work_units),
         max_fgw_work_units=float(max_fgw_work_units),
         force_large_exact_ot=bool(force_large_exact_ot),
+        target_block_memory_gib=target_block_memory_gib,
     )
     distance_array = np.asarray(distance, dtype=np.float32)
     cluster = cluster_from_distance(
@@ -380,6 +442,12 @@ def run_pairwise_niche_on_h5ad(
     model_dir.mkdir(parents=True, exist_ok=True)
     embedding_state_path = model_dir / "expression_embedding_state.npz"
     save_expression_embedding_state(embedding.state, embedding_state_path)
+    reference_model_bundle = _save_reference_model_bundle(
+        model_dir=model_dir,
+        obs_names=adata.obs_names,
+        labels=cluster.labels,
+        distance=distance_array,
+    )
 
     sample_count = len(set(sample_ids.tolist()))
     batch_note = _batch_embedding_note(
@@ -399,6 +467,7 @@ def run_pairwise_niche_on_h5ad(
         "config": config.to_dict(),
         "expression_embedding": dict(embedding.metadata),
         "expression_embedding_state": str(embedding_state_path),
+        "reference_model_bundle": reference_model_bundle,
         "batch_embedding": batch_note,
         "local_measure": dict(measures.metadata),
         "distance_matrix": dict(distance_metadata),
@@ -439,6 +508,6 @@ def run_pairwise_niche_on_h5ad(
     summary_path = out_dir / "summary.json"
     color_path = out_dir / "ot_niche_colors.json"
     adata.write_h5ad(h5ad_path, compression="gzip")
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True, default=_json_default))
-    color_path.write_text(json.dumps(niche_colors, indent=2, sort_keys=True))
+    _write_json(summary_path, summary)
+    _write_json(color_path, niche_colors)
     return summary

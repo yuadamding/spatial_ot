@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from .cluster import ClusterResult, cluster_from_distance
+from .cluster import ClusterResult, cluster_from_distance, ot_knn_distance_graph
 from .colors import HIGH_CONTRAST_PALETTE, assign_high_contrast_colors
 from .config import PairwiseNicheConfig
 from .distance_matrix import (
+    choose_pairwise_block_size,
     compute_pairwise_ot_distance_matrix,
     estimate_pairwise_fgw_work,
     estimate_pairwise_ot_work,
@@ -39,6 +40,7 @@ __all__ = [
     "batched_sinkhorn_cost",
     "build_instance_neighbor_indices",
     "build_local_measures",
+    "choose_pairwise_block_size",
     "cluster_from_distance",
     "compute_pairwise_ot_distance_matrix",
     "estimate_pairwise_fgw_work",
@@ -46,6 +48,7 @@ __all__ = [
     "fit_expression_embedding",
     "fused_gromov_wasserstein_block",
     "load_expression_embedding_state",
+    "ot_knn_distance_graph",
     "run_pairwise_niche_on_h5ad",
     "save_expression_embedding_state",
     "sinkhorn_ot_block",

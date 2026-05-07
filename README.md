@@ -104,9 +104,9 @@ spatial-ot pairwise-niche fit \
 UMAP is accepted only with this opt-in because it is useful for quick visual/debug
 runs but is not generally metric-preserving enough for claim-grade OT distances.
 
-Use `--distance-mode fused_gromov_wasserstein` to compare local graph structure. In that mode, each cell graph is bounded by both `--radius-um` and `--max-neighbors`. The default `--fgw-structure-mode local_knn_shortest_path` builds a retained-support kNN graph and stores shortest-path distances; `complete_euclidean`, `radius_graph_shortest_path`, and `adjacency` are also available. The default `--fgw-node-feature-mode expression_only` keeps relative spatial geometry out of the node-feature cost so FGW does not double-count it. The structure term is normalized with `--fgw-structure-normalization sampled_median` before `--fgw-alpha` is applied.
+Use `--distance-mode fused_gromov_wasserstein` to compare local graph structure. In that mode, each cell graph is bounded by both `--radius-um` and `--max-neighbors`. The default `--fgw-structure-mode local_knn_shortest_path` builds a retained-support kNN graph and stores shortest-path distances; `complete_euclidean`, `radius_graph_shortest_path`, and `binary_edge_distance` are also available. `adjacency` is accepted as a backwards-compatible alias for `binary_edge_distance`, which stores a distance-like edge/nonedge matrix. The default `--fgw-node-feature-mode expression_only` keeps relative spatial geometry out of the node-feature cost so FGW does not double-count it. The structure term is normalized with `--fgw-structure-normalization sampled_median` before `--fgw-alpha` is applied, and disconnected shortest-path structures are reported in the run metadata.
 
-Exact all-pairs OT/FGW is quadratic in the number of cells. The command intentionally refuses oversized dense exact jobs unless `--max-exact-cells` is raised, and it also guards against excessive Sinkhorn work with `--max-ot-work-units`. For full Visium HD cohorts with hundreds of thousands of cells, use sampled/landmark subsets until the approximate sparse mode is added.
+Exact all-pairs OT/FGW is quadratic in the number of cells. The command intentionally refuses oversized dense exact jobs unless `--max-exact-cells` is raised, and it also guards against excessive Sinkhorn work with `--max-ot-work-units`. Use `--target-block-memory-gib` to cap the pairwise block size by an approximate memory budget; with `--block-size 0`, the block size is chosen from that cap. For full Visium HD cohorts with hundreds of thousands of cells, use sampled/landmark subsets until the approximate sparse mode is added.
 
 For full-cohort exploratory Visium HD runs where exact all-cell-pair FGW is infeasible, the repository includes scripts that make the approximation explicit:
 
@@ -120,6 +120,7 @@ Main outputs:
 - `cell_ot_dissimilarity.npy`, when `--distance-store npy_memmap` or automatic memmap output is selected.
 - `summary.json`
 - `ot_niche_colors.json`, a deterministic high-contrast color map for niche labels.
+- `pairwise_niche_model/`, containing expression-transform state, reference labels, reference medoids, and reference cell IDs for future medoid-distance transform/assignment workflows.
 
 Key AnnData fields:
 
@@ -155,7 +156,7 @@ node feature cost: ||z_a - z_b||^2
 local structure cost: (C_i[a,a'] - C_k[b,b'])^2
 ```
 
-where `C_i` is the retained local structure matrix for anchor cell `i`. By default this is a kNN shortest-path matrix over retained support nodes. Use `--fgw-structure-mode complete_euclidean` for the older complete spatial-distance structure, or `radius_graph_shortest_path` / `adjacency` for explicit radius graph structure. `--fgw-alpha` controls the normalized structure weight.
+where `C_i` is the retained local structure matrix for anchor cell `i`. By default this is a kNN shortest-path matrix over retained support nodes. Use `--fgw-structure-mode complete_euclidean` for the older complete spatial-distance structure, or `radius_graph_shortest_path` / `binary_edge_distance` for explicit radius graph structure. `--fgw-alpha` controls the normalized structure weight.
 
 By default, expression, relative-xy, and radial-distance cost contributions are normalized by sampled median component costs before user weights are applied. This keeps a 32-dimensional expression embedding from automatically overwhelming the lower-dimensional spatial terms.
 
@@ -208,7 +209,7 @@ Implemented:
 - shell/state-aware neighbor caps
 - exact blockwise balanced Sinkhorn OT
 - debiased entropic transport option
-- fused Gromov-Wasserstein distance mode over kNN, radius-graph, adjacency, or complete local structures
+- fused Gromov-Wasserstein distance mode over kNN, radius-graph, binary edge-distance, or complete local structures
 - dense or memmap OT distance output
 - distance-based clustering from the precomputed OT matrix
 - connected cell-level niche instances

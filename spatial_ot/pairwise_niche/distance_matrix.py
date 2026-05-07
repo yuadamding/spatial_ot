@@ -67,6 +67,38 @@ def estimate_pairwise_fgw_work(
     }
 
 
+def choose_pairwise_block_size(
+    *,
+    support_size: int,
+    requested_block_size: int,
+    target_memory_gib: float | None,
+    use_fgw: bool,
+) -> tuple[int, dict[str, object]]:
+    requested = int(requested_block_size)
+    if target_memory_gib is None or float(target_memory_gib) <= 0.0:
+        block_size = max(requested, 1)
+        return block_size, {
+            "adaptive_block_size_enabled": False,
+            "requested_block_size": int(requested),
+            "target_block_memory_gib": None,
+            "block_size_memory_cap": None,
+            "block_size_live_tensor_estimate": None,
+        }
+
+    live_tensors = 12 if bool(use_fgw) else 4
+    target_bytes = float(target_memory_gib) * 1024**3
+    denominator = live_tensors * max(int(support_size), 1) ** 2 * np.dtype("float32").itemsize
+    memory_cap = max(int(np.floor(np.sqrt(max(target_bytes, 1.0) / max(denominator, 1)))), 1)
+    block_size = memory_cap if requested <= 0 else min(max(requested, 1), memory_cap)
+    return block_size, {
+        "adaptive_block_size_enabled": True,
+        "requested_block_size": int(requested),
+        "target_block_memory_gib": float(target_memory_gib),
+        "block_size_memory_cap": int(memory_cap),
+        "block_size_live_tensor_estimate": int(live_tensors),
+    }
+
+
 def _fgw_node_feature_array(
     tokens: np.ndarray,
     metadata: dict[str, object],
@@ -193,6 +225,7 @@ def compute_pairwise_ot_distance_matrix(
     max_ot_work_units: float = 5e11,
     max_fgw_work_units: float = 1e12,
     force_large_exact_ot: bool = False,
+    target_block_memory_gib: float | None = None,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Compute a dense exact pairwise OT matrix, optionally backed by a .npy memmap."""
 
@@ -305,7 +338,12 @@ def compute_pairwise_ot_distance_matrix(
         )
         structures = structures / np.float32(np.sqrt(max(fgw_structure_scale, 1e-8)))
 
-    bs = max(int(block_size), 1)
+    bs, block_metadata = choose_pairwise_block_size(
+        support_size=int(tokens.shape[1]),
+        requested_block_size=int(block_size),
+        target_memory_gib=target_block_memory_gib,
+        use_fgw=bool(use_fgw),
+    )
     for a_start in range(0, n, bs):
         a_stop = min(a_start + bs, n)
         tok_a = torch.as_tensor(tokens[a_start:a_stop], dtype=torch.float32, device=resolved_device)
@@ -368,12 +406,15 @@ def compute_pairwise_ot_distance_matrix(
                 block = block + float(anchor_weight) * np.maximum(anchor_cost, 0.0).astype(
                     np.float32
                 )
+            if b_start == a_start:
+                block = (0.5 * (block + block.T)).astype(np.float32, copy=False)
+                np.fill_diagonal(block, 0.0)
             out[a_start:a_stop, b_start:b_stop] = block
             if b_start != a_start:
                 out[b_start:b_stop, a_start:a_stop] = block.T
 
-    out[:] = 0.5 * (out[:] + out[:].T)
-    np.fill_diagonal(out, 0.0)
+    diag = np.arange(n)
+    out[diag, diag] = 0.0
     if hasattr(out, "flush"):
         out.flush()
     metadata = {
@@ -390,11 +431,15 @@ def compute_pairwise_ot_distance_matrix(
         ),
         "returns_plan_transport_cost_only": True,
         "includes_entropy_objective_term": False,
+        "blockwise_symmetric_write": True,
+        "global_dense_symmetrization": False,
         "epsilon": float(epsilon),
         "sinkhorn_iters": int(n_iters),
         "anchor_weight": float(anchor_weight),
         "fgw_alpha": float(fgw_alpha) if use_fgw else None,
         "fgw_iters": int(fgw_iters) if use_fgw else None,
+        "fgw_debiased": False if use_fgw else None,
+        "fgw_diagonal_forced_zero": True if use_fgw else None,
         "uses_graph_topology": bool(
             use_fgw
             and str(measures.metadata.get("fgw_structure_mode", "complete_euclidean"))
@@ -408,13 +453,35 @@ def compute_pairwise_ot_distance_matrix(
         "fgw_structure_mode": measures.metadata.get("fgw_structure_mode")
         if use_fgw
         else None,
+        "fgw_structure_requested_mode": measures.metadata.get(
+            "fgw_structure_requested_mode"
+        )
+        if use_fgw
+        else None,
         "fgw_structure_semantics": (
             None
             if not use_fgw
             else "complete pairwise spatial-distance structure, not adjacency/shortest-path topology"
             if str(measures.metadata.get("fgw_structure_mode")) == "complete_euclidean"
-            else "explicit graph-derived structure"
+            else "binary edge/nonedge distance structure"
+            if str(measures.metadata.get("fgw_structure_mode")) == "binary_edge_distance"
+            else "explicit graph-derived shortest-path structure"
         ),
+        "fgw_structure_disconnected_fraction": measures.metadata.get(
+            "fgw_structure_disconnected_fraction"
+        )
+        if use_fgw
+        else None,
+        "fgw_structure_inf_fill_policy": measures.metadata.get(
+            "fgw_structure_inf_fill_policy"
+        )
+        if use_fgw
+        else None,
+        "fgw_structure_disconnected_warning": measures.metadata.get(
+            "fgw_structure_disconnected_warning"
+        )
+        if use_fgw
+        else None,
         "fgw_structure_normalization": str(fgw_structure_normalization)
         if use_fgw
         else None,
@@ -423,6 +490,7 @@ def compute_pairwise_ot_distance_matrix(
         else None,
         "fgw_structure_cost_scale": float(fgw_structure_scale) if use_fgw else None,
         "block_size": int(bs),
+        **block_metadata,
         "device": str(resolved_device),
         "n_cells": int(n),
         "matrix_bytes": int(_estimate_dense_bytes(n)),
@@ -438,6 +506,7 @@ def compute_pairwise_ot_distance_matrix(
 
 
 __all__ = [
+    "choose_pairwise_block_size",
     "compute_pairwise_ot_distance_matrix",
     "estimate_pairwise_fgw_work",
     "estimate_pairwise_ot_work",

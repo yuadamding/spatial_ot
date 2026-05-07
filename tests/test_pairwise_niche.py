@@ -9,6 +9,7 @@ from spatial_ot.pairwise_niche import (
     assign_high_contrast_colors,
     build_instance_neighbor_indices,
     build_local_measures,
+    choose_pairwise_block_size,
     cluster_from_distance,
     compute_pairwise_ot_distance_matrix,
     estimate_pairwise_fgw_work,
@@ -18,7 +19,7 @@ from spatial_ot.pairwise_niche import (
     run_pairwise_niche_on_h5ad,
     save_expression_embedding_state,
 )
-from spatial_ot.pairwise_niche.cluster import ot_knn_affinity
+from spatial_ot.pairwise_niche.cluster import ot_knn_affinity, ot_knn_distance_graph
 from spatial_ot.pairwise_niche.fgw import fused_gromov_wasserstein_block
 from spatial_ot.pairwise_niche.local_measure import _cap_neighbors
 from spatial_ot.cli import _parse_int_list
@@ -167,6 +168,51 @@ def test_local_measure_fgw_structure_modes_are_recorded() -> None:
     assert topology.metadata["uses_graph_topology_structure"] is True
     assert topology.metadata["fgw_structure_mode"] == "local_knn_shortest_path"
     assert not np.allclose(complete.structure_matrices, topology.structure_matrices)
+
+    edge_distance = build_local_measures(
+        expression_embedding=features,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=2.0,
+        max_neighbors=3,
+        include_anchor=True,
+        fgw_structure_mode="adjacency",
+    )
+    assert edge_distance.metadata["fgw_structure_requested_mode"] == "adjacency"
+    assert edge_distance.metadata["fgw_structure_mode"] == "binary_edge_distance"
+    assert edge_distance.metadata["fgw_structure_inf_fill_policy"] == "none"
+
+
+def test_local_measure_reports_disconnected_shortest_path_structures() -> None:
+    features = np.eye(4, dtype=np.float32)
+    coords = np.asarray(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.1],
+        ],
+        dtype=np.float32,
+    )
+    samples = np.asarray(["A", "A", "A", "A"], dtype=object)
+    measures = build_local_measures(
+        expression_embedding=features,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=2.0,
+        max_neighbors=3,
+        include_anchor=True,
+        fgw_structure_mode="radius_graph_shortest_path",
+        fgw_structure_radius_fraction=0.2,
+    )
+    assert measures.metadata["fgw_structure_mode"] == "radius_graph_shortest_path"
+    assert measures.metadata["fgw_structure_inf_fill_policy"] == "2x_max_finite_path"
+    assert int(measures.metadata["fgw_structure_disconnected_count"]) > 0
+    assert float(measures.metadata["fgw_structure_disconnected_fraction"]) > 0.0
+    assert (
+        measures.metadata["fgw_structure_disconnected_warning"]
+        == "more_than_20_percent_disconnected_shortest_path_structures"
+    )
 
 
 def test_local_measure_rejects_invalid_radius_and_neighbor_cap() -> None:
@@ -326,10 +372,42 @@ def test_pairwise_fgw_matrix_uses_graph_structure_and_scaled_features() -> None:
     assert metadata["fgw_structure_normalization"] == "sampled_median"
     assert float(metadata["fgw_structure_cost_scale"]) > 0.0
     assert metadata["fgw_alpha"] == 0.6
+    assert metadata["fgw_debiased"] is False
+    assert metadata["fgw_diagonal_forced_zero"] is True
+    assert metadata["blockwise_symmetric_write"] is True
+    assert metadata["global_dense_symmetrization"] is False
+    assert metadata["adaptive_block_size_enabled"] is False
+    assert metadata["fgw_structure_inf_fill_policy"] == "2x_max_finite_path"
     assert distance.shape == (8, 8)
     np.testing.assert_allclose(distance, distance.T, atol=1e-5)
     np.testing.assert_allclose(np.diag(distance), 0.0)
     assert np.isfinite(distance).all()
+
+
+def test_pairwise_distance_uses_adaptive_block_size_metadata() -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=3)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=2)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+    )
+    distance, metadata = compute_pairwise_ot_distance_matrix(
+        measures=measures,
+        anchor_embedding=embedding.values,
+        block_size=0,
+        target_block_memory_gib=0.000001,
+        device="cpu",
+        n_iters=3,
+        max_exact_cells=20,
+    )
+    assert metadata["adaptive_block_size_enabled"] is True
+    assert metadata["requested_block_size"] == 0
+    assert int(metadata["block_size"]) == int(metadata["block_size_memory_cap"])
+    assert distance.shape == (6, 6)
 
 
 def test_pairwise_ot_rejects_unbounded_or_unknown_distance_modes() -> None:
@@ -383,6 +461,35 @@ def test_pairwise_ot_rejects_unbounded_or_unknown_distance_modes() -> None:
     )
     assert fgw_estimate["fgw_structure_units"] == 21.0 * 2.0 * 27.0
     assert fgw_estimate["fgw_sinkhorn_units"] == 21.0 * 2.0 * 9.0 * 5.0
+
+
+def test_adaptive_pairwise_block_size_caps_exact_blocks() -> None:
+    sinkhorn_size, sinkhorn_metadata = choose_pairwise_block_size(
+        support_size=32,
+        requested_block_size=512,
+        target_memory_gib=0.001,
+        use_fgw=False,
+    )
+    fgw_size, fgw_metadata = choose_pairwise_block_size(
+        support_size=32,
+        requested_block_size=512,
+        target_memory_gib=0.001,
+        use_fgw=True,
+    )
+    assert sinkhorn_metadata["adaptive_block_size_enabled"] is True
+    assert fgw_metadata["adaptive_block_size_enabled"] is True
+    assert int(fgw_metadata["block_size_live_tensor_estimate"]) > int(
+        sinkhorn_metadata["block_size_live_tensor_estimate"]
+    )
+    assert 1 <= fgw_size <= sinkhorn_size <= 512
+
+    automatic_size, automatic_metadata = choose_pairwise_block_size(
+        support_size=16,
+        requested_block_size=0,
+        target_memory_gib=0.001,
+        use_fgw=False,
+    )
+    assert automatic_size == automatic_metadata["block_size_memory_cap"]
 
 
 def test_clustering_uses_precomputed_distance_not_kmeans() -> None:
@@ -469,6 +576,23 @@ def test_singleton_cluster_assignment_score_is_zero() -> None:
     assert np.all(result.assignment_score[singleton_rows] == 0.0)
 
 
+def test_ot_knn_distance_graph_is_sparse_not_dense() -> None:
+    distance = np.asarray(
+        [
+            [0.0, 1.0, 5.0, 6.0],
+            [1.0, 0.0, 2.0, 7.0],
+            [5.0, 2.0, 0.0, 3.0],
+            [6.0, 7.0, 3.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    graph = ot_knn_distance_graph(distance, k=1)
+    assert graph.shape == distance.shape
+    assert graph.nnz < distance.size - distance.shape[0]
+    assert np.all(graph.diagonal() == 0.0)
+    np.testing.assert_allclose(graph.toarray(), graph.toarray().T)
+
+
 def test_candidate_cluster_range_parser_is_inclusive() -> None:
     assert _parse_int_list("5:8") == (5, 6, 7, 8)
     assert _parse_int_list("8-5") == (8, 7, 6, 5)
@@ -529,6 +653,11 @@ def test_pairwise_niche_h5ad_end_to_end(tmp_path) -> None:
     assert "n_neighbors_full_r3" in out.obs
     assert "neighbor_retention_fraction_r3" in out.obs
     assert (output_dir / "pairwise_niche_model" / "expression_embedding_state.npz").exists()
+    assert (output_dir / "pairwise_niche_model" / "reference_cluster_labels.npy").exists()
+    assert (output_dir / "pairwise_niche_model" / "reference_medoid_indices.npy").exists()
+    assert (output_dir / "pairwise_niche_model" / "reference_obs_names.json").exists()
+    assert (output_dir / "pairwise_niche_model" / "cluster_medoids.json").exists()
+    assert summary["reference_model_bundle"]["transform_command_available"] is False
     assert summary["batch_embedding"]["batch_correction_applied_by_pairwise_niche"] is False
     assert summary["method_semantics"]["anchor_expression_enters_twice"] is False
     assert summary["clustering"]["model_selection"]["selected_n_clusters"] in {2, 3}
@@ -621,6 +750,8 @@ def test_pairwise_niche_memmap_distance_store(tmp_path) -> None:
     matrix = np.load(str(distance_path), mmap_mode="r")
     assert matrix.shape == (8, 8)
     np.testing.assert_allclose(matrix, matrix.T, atol=1e-5)
+    assert summary["distance_matrix"]["blockwise_symmetric_write"] is True
+    assert summary["distance_matrix"]["global_dense_symmetrization"] is False
     out = ad.read_h5ad(output_dir / "cells_pairwise_niche.h5ad")
     assert "cell_ot_dissimilarity" not in out.obsp
     assert out.uns["cell_ot_dissimilarity_store"] == str(distance_path)

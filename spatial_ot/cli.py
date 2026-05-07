@@ -198,6 +198,7 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
             "complete_euclidean",
             "local_knn_shortest_path",
             "radius_graph_shortest_path",
+            "binary_edge_distance",
             "adjacency",
         ],
         help="Local structure matrix used by FGW.",
@@ -212,7 +213,7 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         "--fgw-structure-radius-fraction",
         type=float,
         default=0.5,
-        help="Radius fraction for radius_graph_shortest_path or adjacency FGW structure.",
+        help="Radius fraction for radius_graph_shortest_path or binary_edge_distance FGW structure.",
     )
     parser.add_argument(
         "--fgw-structure-normalization",
@@ -256,6 +257,16 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Override exact all-pairs size and work guards.",
+    )
+    parser.add_argument(
+        "--target-block-memory-gib",
+        type=float,
+        default=None,
+        help=(
+            "Optional approximate memory target for each pairwise distance block. "
+            "When set, --block-size is capped to fit this target; use --block-size 0 "
+            "to choose the cap directly."
+        ),
     )
     parser.add_argument(
         "--distance-store",
@@ -429,6 +440,7 @@ def main() -> None:
             max_ot_work_units=args.max_ot_work_units,
             max_fgw_work_units=args.max_fgw_work_units,
             force_large_exact_ot=args.force_large_exact_ot,
+            target_block_memory_gib=args.target_block_memory_gib,
             distance_store=args.distance_store,
             cluster_method=args.cluster_method,
             n_clusters=args.n_clusters,

@@ -142,32 +142,40 @@ def _pairwise_spatial_distance(values: np.ndarray) -> np.ndarray:
     )
 
 
-def _all_pairs_shortest_path(graph: np.ndarray) -> np.ndarray:
+def _canonical_fgw_structure_mode(mode: str) -> str:
+    requested = str(mode or "local_knn_shortest_path").strip().lower()
+    if requested == "adjacency":
+        return "binary_edge_distance"
+    return requested
+
+
+def _all_pairs_shortest_path(graph: np.ndarray) -> tuple[np.ndarray, bool]:
     path = np.asarray(graph, dtype=np.float32).copy()
     for mid in range(path.shape[0]):
         path = np.minimum(path, path[:, mid, None] + path[None, mid, :])
+    disconnected = bool(np.any(~np.isfinite(path)))
     finite = path[np.isfinite(path)]
     fill = float(np.max(finite)) * 2.0 if finite.size else 1.0
     path[~np.isfinite(path)] = max(fill, 1.0)
     np.fill_diagonal(path, 0.0)
-    return path.astype(np.float32, copy=False)
+    return path.astype(np.float32, copy=False), disconnected
 
 
-def _local_structure_matrix(
+def _local_structure_matrix_with_diagnostics(
     relative_coords: np.ndarray,
     *,
     mode: str,
     knn: int,
     radius_fraction: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, bool, str]:
     rel = np.asarray(relative_coords, dtype=np.float32)
     count = int(rel.shape[0])
+    requested = _canonical_fgw_structure_mode(mode)
     if count <= 1:
-        return np.zeros((count, count), dtype=np.float32)
+        return np.zeros((count, count), dtype=np.float32), False, requested
     pairwise = _pairwise_spatial_distance(rel)
-    requested = str(mode or "local_knn_shortest_path").strip().lower()
     if requested == "complete_euclidean":
-        return pairwise
+        return pairwise, False, requested
 
     graph = np.full((count, count), np.inf, dtype=np.float32)
     np.fill_diagonal(graph, 0.0)
@@ -178,23 +186,61 @@ def _local_structure_matrix(
             order = order[order != row][:k]
             graph[row, order] = pairwise[row, order]
         graph = np.minimum(graph, graph.T)
-        return _all_pairs_shortest_path(graph)
+        path, disconnected = _all_pairs_shortest_path(graph)
+        return path, disconnected, requested
 
-    if requested in {"radius_graph_shortest_path", "adjacency"}:
+    if requested in {"radius_graph_shortest_path", "binary_edge_distance"}:
         edge_radius = max(float(radius_fraction), 1e-8)
         edge = (pairwise <= edge_radius) & (pairwise > 0)
-        if requested == "adjacency":
+        if requested == "binary_edge_distance":
             graph[edge] = 1.0
             graph[~edge & ~np.eye(count, dtype=bool)] = 2.0
-            return graph.astype(np.float32, copy=False)
+            return graph.astype(np.float32, copy=False), False, requested
         graph[edge] = pairwise[edge]
         graph = np.minimum(graph, graph.T)
-        return _all_pairs_shortest_path(graph)
+        path, disconnected = _all_pairs_shortest_path(graph)
+        return path, disconnected, requested
 
     raise ValueError(
         "fgw_structure_mode must be complete_euclidean, local_knn_shortest_path, "
-        "radius_graph_shortest_path, or adjacency."
+        "radius_graph_shortest_path, binary_edge_distance, or adjacency."
     )
+
+
+def _local_structure_matrix(
+    relative_coords: np.ndarray,
+    *,
+    mode: str,
+    knn: int,
+    radius_fraction: float,
+) -> np.ndarray:
+    matrix, _, _ = _local_structure_matrix_with_diagnostics(
+        relative_coords,
+        mode=mode,
+        knn=knn,
+        radius_fraction=radius_fraction,
+    )
+    return matrix
+
+
+def _fgw_structure_disconnected_metadata(
+    disconnected: np.ndarray,
+    *,
+    mode: str,
+) -> dict[str, object]:
+    values = np.asarray(disconnected, dtype=bool)
+    fraction = float(np.mean(values)) if values.size else 0.0
+    shortest_path = str(mode) in {"local_knn_shortest_path", "radius_graph_shortest_path"}
+    return {
+        "fgw_structure_disconnected_count": int(np.sum(values)),
+        "fgw_structure_disconnected_fraction": fraction,
+        "fgw_structure_disconnected_warning": (
+            "more_than_20_percent_disconnected_shortest_path_structures"
+            if shortest_path and fraction > 0.2
+            else None
+        ),
+        "fgw_structure_inf_fill_policy": "2x_max_finite_path" if shortest_path else "none",
+    }
 
 
 def _median_component_cost(
@@ -334,6 +380,9 @@ def build_local_measures(
     full_counts = np.zeros(n, dtype=np.int32)
     retained_counts = np.zeros(n, dtype=np.int32)
     structure = np.zeros((n, support, support), dtype=np.float32)
+    structure_disconnected = np.zeros(n, dtype=bool)
+    requested_structure_mode = str(fgw_structure_mode)
+    canonical_structure_mode = _canonical_fgw_structure_mode(requested_structure_mode)
 
     state_labels = _fit_state_labels(
         z,
@@ -423,12 +472,13 @@ def build_local_measures(
             mask[anchor, :count] = True
             neighbor_indices[anchor, :count] = ids_arr
             rel_graph = (xy[ids_arr] - xy[anchor]) / max(radius, 1e-8)
-            graph_dist = _local_structure_matrix(
+            graph_dist, disconnected, _ = _local_structure_matrix_with_diagnostics(
                 rel_graph,
-                mode=str(fgw_structure_mode),
+                mode=canonical_structure_mode,
                 knn=int(fgw_structure_knn),
                 radius_fraction=float(fgw_structure_radius_fraction),
             )
+            structure_disconnected[anchor] = bool(disconnected)
             structure[anchor, :count, :count] = graph_dist
 
     slices = _component_slices(z.shape[1])
@@ -463,10 +513,15 @@ def build_local_measures(
         "cap_state_clusters": int(cap_state_clusters),
         "radial_shells": int(radial_shells),
         "isolated_policy": str(isolated_policy),
-        "fgw_structure_mode": str(fgw_structure_mode),
+        "fgw_structure_mode": str(canonical_structure_mode),
+        "fgw_structure_requested_mode": str(requested_structure_mode),
         "fgw_structure_knn": int(fgw_structure_knn),
         "fgw_structure_radius_fraction": float(fgw_structure_radius_fraction),
-        "uses_graph_topology_structure": str(fgw_structure_mode)
+        **_fgw_structure_disconnected_metadata(
+            structure_disconnected,
+            mode=canonical_structure_mode,
+        ),
+        "uses_graph_topology_structure": str(canonical_structure_mode)
         != "complete_euclidean",
         "expression_weight": float(expression_weight),
         "spatial_weight": float(spatial_weight),

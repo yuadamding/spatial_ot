@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.0.10
+
+- Avoid full-matrix dense symmetrization for memmap distance outputs by symmetrizing diagonal blocks during blockwise writes.
+- Keep Leiden OT-kNN clustering on sparse kNN distance/connectivity graphs instead of storing the full dense distance matrix as a sparse matrix.
+- Canonicalize FGW `adjacency` mode to `binary_edge_distance` and record disconnected shortest-path structure diagnostics.
+- Record FGW debiasing and diagonal-forcing semantics in distance metadata.
+- Add adaptive exact-run block sizing through `--target-block-memory-gib`.
+- Save reference labels, medoids, and cell IDs in the model bundle for future transform/assignment workflows.
+
 ## 3.0.9
 
 - Default `pairwise-niche` to context-first anchor handling with `anchor_weight=0`.
