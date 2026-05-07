@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.0.15
+
+- Add cross OT/FGW work estimators and safety guards for query-to-reference distance computations.
+- Add optional `.npy` memmap output for cross-distance matrices.
+- Allow debiased cross Sinkhorn runs to reuse cached query/reference self-costs with finite nonnegative validation.
+- Add `assign_by_reference_medoids()` for nearest-medoid labels, distance-margin scores, nearest reference indices, and nearest distances.
+- Export cross work estimators and medoid assignment helpers from `spatial_ot` and `spatial_ot.pairwise_niche`.
+- Add regression tests for cross work guards, memmap parity, cached self-cost parity, medoid assignment margins, and invalid cached/distance inputs.
+
 ## 3.0.14
 
 - Add `compute_cross_ot_distance_matrix()` for query-to-reference OT/FGW distances without building a query-by-query all-pairs matrix.

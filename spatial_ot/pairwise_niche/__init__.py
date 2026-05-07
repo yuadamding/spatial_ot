@@ -4,9 +4,12 @@ from .cluster import ClusterResult, cluster_from_distance, ot_knn_distance_graph
 from .colors import HIGH_CONTRAST_PALETTE, assign_high_contrast_colors
 from .config import PairwiseNicheConfig
 from .distance_matrix import (
+    assign_by_reference_medoids,
     choose_pairwise_block_size,
     compute_cross_ot_distance_matrix,
     compute_pairwise_ot_distance_matrix,
+    estimate_cross_fgw_work,
+    estimate_cross_ot_work,
     estimate_pairwise_fgw_work,
     estimate_pairwise_ot_work,
 )
@@ -42,6 +45,7 @@ __all__ = [
     "HIGH_CONTRAST_PALETTE",
     "LocalMeasureSet",
     "PairwiseNicheConfig",
+    "assign_by_reference_medoids",
     "assign_high_contrast_colors",
     "batched_fused_gromov_wasserstein_cost",
     "batched_sinkhorn_cost",
@@ -51,6 +55,8 @@ __all__ = [
     "cluster_from_distance",
     "compute_cross_ot_distance_matrix",
     "compute_pairwise_ot_distance_matrix",
+    "estimate_cross_fgw_work",
+    "estimate_cross_ot_work",
     "estimate_pairwise_fgw_work",
     "estimate_pairwise_ot_work",
     "fit_expression_embedding",

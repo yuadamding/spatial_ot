@@ -11,6 +11,7 @@ import torch
 from spatial_ot.pairwise_niche import (
     LocalMeasureSet,
     PairwiseNicheConfig,
+    assign_by_reference_medoids,
     assign_high_contrast_colors,
     build_instance_neighbor_indices,
     build_local_measures,
@@ -18,6 +19,8 @@ from spatial_ot.pairwise_niche import (
     cluster_from_distance,
     compute_cross_ot_distance_matrix,
     compute_pairwise_ot_distance_matrix,
+    estimate_cross_fgw_work,
+    estimate_cross_ot_work,
     estimate_pairwise_fgw_work,
     estimate_pairwise_ot_work,
     fit_expression_embedding,
@@ -74,6 +77,18 @@ def _subset_measures(measures: LocalMeasureSet, rows: np.ndarray) -> LocalMeasur
         structure_matrices=None
         if measures.structure_matrices is None
         else measures.structure_matrices[idx],
+    )
+
+
+def _self_costs_for_test(measures: LocalMeasureSet) -> np.ndarray:
+    tokens = torch.as_tensor(measures.tokens, dtype=torch.float32)
+    weights = torch.as_tensor(measures.weights, dtype=torch.float32)
+    return (
+        sinkhorn_self_cost_batch(tokens, weights, epsilon=0.05, n_iters=5)
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
     )
 
 
@@ -563,6 +578,160 @@ def test_cross_ot_distance_matches_exact_submatrix() -> None:
     assert metadata["cross_distance"] is True
     assert metadata["matrix_shape"] == [3, 3]
     np.testing.assert_allclose(cross, exact[np.ix_(query, reference)], atol=1e-5)
+
+
+def test_cross_distance_work_estimators_and_guard() -> None:
+    ot = estimate_cross_ot_work(
+        n_query=10,
+        n_reference=20,
+        support_size_query=4,
+        support_size_reference=5,
+        sinkhorn_iters=6,
+    )
+    fgw = estimate_cross_fgw_work(
+        n_query=10,
+        n_reference=20,
+        support_size_query=4,
+        support_size_reference=5,
+        sinkhorn_iters=6,
+        fgw_iters=3,
+    )
+    assert ot["n_cross_pairs"] == 200.0
+    assert ot["work_units"] == 24000.0
+    assert fgw["fgw_total_units"] > ot["work_units"]
+
+    features, coords, samples = _toy_cohort(n_per_sample=4)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+        seed=13,
+    )
+    with pytest.raises(ValueError, match="Cross OT work estimate is too large"):
+        compute_cross_ot_distance_matrix(
+            query_measures=measures,
+            reference_measures=measures,
+            query_anchor_embedding=embedding.values,
+            reference_anchor_embedding=embedding.values,
+            max_cross_ot_work_units=1.0,
+        )
+
+
+def test_cross_distance_memmap_output_matches_dense(tmp_path) -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=4)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+        seed=13,
+    )
+    query = np.asarray([0, 2, 4], dtype=np.int64)
+    reference = np.asarray([5, 6, 7], dtype=np.int64)
+    kwargs = dict(
+        query_measures=_subset_measures(measures, query),
+        reference_measures=_subset_measures(measures, reference),
+        query_anchor_embedding=embedding.values[query],
+        reference_anchor_embedding=embedding.values[reference],
+        block_size=2,
+        device="cpu",
+        epsilon=0.05,
+        n_iters=5,
+        anchor_weight=0.1,
+    )
+    dense, _ = compute_cross_ot_distance_matrix(**kwargs)
+    memmap_path = tmp_path / "cross.npy"
+    memmap, metadata = compute_cross_ot_distance_matrix(
+        **kwargs,
+        output_path=memmap_path,
+    )
+    assert metadata["output_path"] == str(memmap_path)
+    assert isinstance(memmap, np.memmap)
+    np.testing.assert_allclose(np.asarray(memmap), dense, atol=1e-6)
+    np.testing.assert_allclose(np.load(memmap_path, mmap_mode="r"), dense, atol=1e-6)
+
+
+def test_cross_debiased_self_cost_cache_matches_recomputed() -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=4)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+        seed=13,
+    )
+    query = np.asarray([0, 2, 4], dtype=np.int64)
+    reference = np.asarray([5, 6, 7], dtype=np.int64)
+    query_measures = _subset_measures(measures, query)
+    reference_measures = _subset_measures(measures, reference)
+    kwargs = dict(
+        query_measures=query_measures,
+        reference_measures=reference_measures,
+        query_anchor_embedding=embedding.values[query],
+        reference_anchor_embedding=embedding.values[reference],
+        block_size=2,
+        device="cpu",
+        epsilon=0.05,
+        n_iters=5,
+    )
+    recomputed, recomputed_metadata = compute_cross_ot_distance_matrix(**kwargs)
+    cached, cached_metadata = compute_cross_ot_distance_matrix(
+        **kwargs,
+        query_self_costs=_self_costs_for_test(query_measures),
+        reference_self_costs=_self_costs_for_test(reference_measures),
+    )
+    assert recomputed_metadata["query_self_cost_source"] == "computed"
+    assert cached_metadata["query_self_cost_source"] == "provided"
+    assert cached_metadata["reference_self_cost_source"] == "provided"
+    np.testing.assert_allclose(cached, recomputed, atol=1e-6)
+
+    bad_self = _self_costs_for_test(query_measures)
+    bad_self[0] = np.nan
+    with pytest.raises(ValueError, match="query_self_costs must contain finite"):
+        compute_cross_ot_distance_matrix(
+            **kwargs,
+            query_self_costs=bad_self,
+            reference_self_costs=_self_costs_for_test(reference_measures),
+        )
+
+
+def test_assign_by_reference_medoids_margin_and_unknown() -> None:
+    distance = np.asarray(
+        [
+            [0.1, 0.5, 0.2],
+            [1.0, 0.8, 0.7],
+            [0.2, 0.21, 0.9],
+        ],
+        dtype=np.float32,
+    )
+    labels = np.asarray([10, 20, 30], dtype=np.int32)
+    assigned, score, nearest, nearest_distance = assign_by_reference_medoids(
+        distance,
+        labels,
+        margin_threshold=0.1,
+        unknown_label=-1,
+    )
+    np.testing.assert_array_equal(nearest, [0, 2, 0])
+    np.testing.assert_allclose(nearest_distance, [0.1, 0.7, 0.2])
+    np.testing.assert_array_equal(assigned, [10, 30, -1])
+    assert score[0] > score[2]
+    with pytest.raises(ValueError, match="finite values"):
+        assign_by_reference_medoids(
+            np.asarray([[np.nan, 1.0]], dtype=np.float32),
+            np.asarray([1, 2]),
+        )
+    with pytest.raises(ValueError, match="finite nonnegative"):
+        assign_by_reference_medoids(distance, labels, margin_threshold=-0.1)
 
 
 def test_local_measure_structure_matrix_and_fgw_distance() -> None:

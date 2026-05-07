@@ -19,6 +19,10 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "batched_fused_gromov_wasserstein_cost",
     ),
     "assign_high_contrast_colors": ("pairwise_niche", "assign_high_contrast_colors"),
+    "assign_by_reference_medoids": (
+        "pairwise_niche",
+        "assign_by_reference_medoids",
+    ),
     "cluster_from_distance": ("pairwise_niche", "cluster_from_distance"),
     "compute_pairwise_ot_distance_matrix": (
         "pairwise_niche",
@@ -34,6 +38,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     ),
     "estimate_pairwise_ot_work": ("pairwise_niche", "estimate_pairwise_ot_work"),
     "estimate_pairwise_fgw_work": ("pairwise_niche", "estimate_pairwise_fgw_work"),
+    "estimate_cross_ot_work": ("pairwise_niche", "estimate_cross_ot_work"),
+    "estimate_cross_fgw_work": ("pairwise_niche", "estimate_cross_fgw_work"),
     "fit_expression_embedding": ("pairwise_niche", "fit_expression_embedding"),
     "load_expression_embedding_state": (
         "pairwise_niche",
@@ -54,7 +60,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "sinkhorn_ot_block": ("pairwise_niche", "sinkhorn_ot_block"),
 }
 
-__version__ = "3.0.14"
+__version__ = "3.0.15"
 __all__ = ["__version__", *_LAZY_EXPORTS]
 
 

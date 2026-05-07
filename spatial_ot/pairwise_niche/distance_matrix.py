@@ -142,6 +142,10 @@ def _estimate_dense_bytes(n_cells: int) -> int:
     return int(n_cells) * int(n_cells) * np.dtype("float32").itemsize
 
 
+def _estimate_rectangular_bytes(n_query: int, n_reference: int) -> int:
+    return int(n_query) * int(n_reference) * np.dtype("float32").itemsize
+
+
 def estimate_pairwise_ot_work(
     *,
     n_cells: int,
@@ -156,6 +160,29 @@ def estimate_pairwise_ot_work(
         "sinkhorn_iters": float(sinkhorn_iters),
         "work_units": float(work_units),
         "matrix_gib": float(_estimate_dense_bytes(int(n_cells)) / 1024**3),
+    }
+
+
+def estimate_cross_ot_work(
+    *,
+    n_query: int,
+    n_reference: int,
+    support_size_query: int,
+    support_size_reference: int,
+    sinkhorn_iters: int,
+) -> dict[str, float]:
+    n_pairs = int(n_query) * int(n_reference)
+    support_work = int(support_size_query) * int(support_size_reference)
+    work_units = float(n_pairs) * float(support_work) * float(sinkhorn_iters)
+    return {
+        "n_query": float(n_query),
+        "n_reference": float(n_reference),
+        "n_cross_pairs": float(n_pairs),
+        "support_size_query": float(support_size_query),
+        "support_size_reference": float(support_size_reference),
+        "sinkhorn_iters": float(sinkhorn_iters),
+        "work_units": float(work_units),
+        "matrix_gib": float(_estimate_rectangular_bytes(n_query, n_reference) / 1024**3),
     }
 
 
@@ -185,6 +212,41 @@ def estimate_pairwise_fgw_work(
         "fgw_sinkhorn_units": float(sinkhorn_units),
         "fgw_total_units": float(structure_units + sinkhorn_units),
         "matrix_gib": float(_estimate_dense_bytes(int(n_cells)) / 1024**3),
+    }
+
+
+def estimate_cross_fgw_work(
+    *,
+    n_query: int,
+    n_reference: int,
+    support_size_query: int,
+    support_size_reference: int,
+    sinkhorn_iters: int,
+    fgw_iters: int,
+) -> dict[str, float]:
+    n_pairs = int(n_query) * int(n_reference)
+    lq = int(support_size_query)
+    lr = int(support_size_reference)
+    structure_units = float(n_pairs) * float(fgw_iters) * float(lq) * float(lr) * float(max(lq, lr))
+    sinkhorn_units = (
+        float(n_pairs)
+        * float(fgw_iters)
+        * float(lq)
+        * float(lr)
+        * float(sinkhorn_iters)
+    )
+    return {
+        "n_query": float(n_query),
+        "n_reference": float(n_reference),
+        "n_cross_pairs": float(n_pairs),
+        "support_size_query": float(lq),
+        "support_size_reference": float(lr),
+        "sinkhorn_iters": float(sinkhorn_iters),
+        "fgw_iters": float(fgw_iters),
+        "fgw_structure_units": float(structure_units),
+        "fgw_sinkhorn_units": float(sinkhorn_units),
+        "fgw_total_units": float(structure_units + sinkhorn_units),
+        "matrix_gib": float(_estimate_rectangular_bytes(n_query, n_reference) / 1024**3),
     }
 
 
@@ -326,6 +388,80 @@ def _self_sinkhorn_costs(
             .astype(np.float32)
         )
     return out
+
+
+def _cached_or_computed_self_costs(
+    measures: LocalMeasureSet,
+    provided: np.ndarray | None,
+    *,
+    block_size: int,
+    device: torch.device,
+    epsilon: float,
+    n_iters: int,
+    label: str,
+) -> tuple[np.ndarray, str]:
+    n = int(measures.tokens.shape[0])
+    if provided is None:
+        return (
+            _self_sinkhorn_costs(
+                measures,
+                block_size=int(block_size),
+                device=device,
+                epsilon=float(epsilon),
+                n_iters=int(n_iters),
+            ),
+            "computed",
+        )
+    out = np.asarray(provided, dtype=np.float32)
+    if out.shape != (n,):
+        raise ValueError(f"{label}_self_costs must have shape ({n},).")
+    if not np.all(np.isfinite(out)) or np.any(out < 0.0):
+        raise ValueError(f"{label}_self_costs must contain finite nonnegative values.")
+    return out, "provided"
+
+
+def assign_by_reference_medoids(
+    cross_distance: np.ndarray,
+    medoid_labels: np.ndarray,
+    *,
+    margin_threshold: float | None = None,
+    unknown_label: object = -1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Assign each query row to its nearest reference medoid.
+
+    Returns labels, distance-margin scores, nearest reference columns, and nearest distances.
+    """
+
+    distance = np.asarray(cross_distance, dtype=np.float32)
+    labels = np.asarray(medoid_labels)
+    if distance.ndim != 2:
+        raise ValueError("cross_distance must be a 2D query x reference matrix.")
+    if labels.shape[0] != distance.shape[1]:
+        raise ValueError("medoid_labels must have one label per reference column.")
+    if distance.shape[1] == 0:
+        raise ValueError("cross_distance must contain at least one reference column.")
+    if not np.all(np.isfinite(distance)):
+        raise ValueError("cross_distance must contain only finite values.")
+    if margin_threshold is not None and (
+        not np.isfinite(float(margin_threshold)) or float(margin_threshold) < 0.0
+    ):
+        raise ValueError("margin_threshold must be a finite nonnegative value.")
+
+    nearest = np.argmin(distance, axis=1).astype(np.int64)
+    row = np.arange(distance.shape[0])
+    nearest_distance = distance[row, nearest].astype(np.float32, copy=False)
+    if distance.shape[1] == 1:
+        score = np.ones(distance.shape[0], dtype=np.float32)
+    else:
+        two = np.partition(distance, kth=1, axis=1)[:, :2]
+        two.sort(axis=1)
+        score = ((two[:, 1] - two[:, 0]) / (two[:, 1] + 1e-8)).astype(np.float32)
+
+    assigned = labels[nearest].copy()
+    if margin_threshold is not None:
+        assigned = assigned.astype(object, copy=False)
+        assigned[score < float(margin_threshold)] = unknown_label
+    return assigned, score, nearest, nearest_distance
 
 
 def compute_pairwise_ot_distance_matrix(
@@ -639,6 +775,7 @@ def compute_cross_ot_distance_matrix(
     reference_measures: LocalMeasureSet,
     query_anchor_embedding: np.ndarray,
     reference_anchor_embedding: np.ndarray,
+    output_path: str | Path | None = None,
     block_size: int = 64,
     device: str = "auto",
     epsilon: float = 0.05,
@@ -651,6 +788,11 @@ def compute_cross_ot_distance_matrix(
     fgw_structure_normalization: str = "sampled_median",
     fgw_structure_sample_pairs: int = 10000,
     fgw_structure_cost_scale: float | None = None,
+    query_self_costs: np.ndarray | None = None,
+    reference_self_costs: np.ndarray | None = None,
+    max_cross_ot_work_units: float = 5e11,
+    max_cross_fgw_work_units: float = 1e12,
+    force_large_cross_ot: bool = False,
     target_block_memory_gib: float | None = None,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Compute query-to-reference OT/FGW distances without an all-by-all query matrix."""
@@ -673,6 +815,46 @@ def compute_cross_ot_distance_matrix(
         or reference_measures.structure_matrices is None
     ):
         raise ValueError("fused_gromov_wasserstein requires local graph structure matrices.")
+    work_estimate = estimate_cross_ot_work(
+        n_query=n_query,
+        n_reference=n_reference,
+        support_size_query=int(query_tokens.shape[1]),
+        support_size_reference=int(reference_tokens.shape[1]),
+        sinkhorn_iters=int(n_iters),
+    )
+    fgw_work_estimate = None
+    if work_estimate["work_units"] > float(max_cross_ot_work_units) and not bool(
+        force_large_cross_ot
+    ):
+        raise ValueError(
+            "Cross OT work estimate is too large: "
+            f"{work_estimate['work_units']:.3g} work units for {n_query} query cells, "
+            f"{n_reference} reference cells, supports {query_tokens.shape[1]} x "
+            f"{reference_tokens.shape[1]}, and {int(n_iters)} Sinkhorn iterations. "
+            "Increase max_cross_ot_work_units or set force_large_cross_ot=True only "
+            "if this rectangular computation is intentional."
+        )
+    if use_fgw:
+        fgw_work_estimate = estimate_cross_fgw_work(
+            n_query=n_query,
+            n_reference=n_reference,
+            support_size_query=int(query_tokens.shape[1]),
+            support_size_reference=int(reference_tokens.shape[1]),
+            sinkhorn_iters=int(n_iters),
+            fgw_iters=int(fgw_iters),
+        )
+        if fgw_work_estimate["fgw_total_units"] > float(max_cross_fgw_work_units) and not bool(
+            force_large_cross_ot
+        ):
+            raise ValueError(
+                "Cross FGW work estimate is too large: "
+                f"{fgw_work_estimate['fgw_total_units']:.3g} work units for "
+                f"{n_query} query cells, {n_reference} reference cells, supports "
+                f"{query_tokens.shape[1]} x {reference_tokens.shape[1]}, "
+                f"{int(fgw_iters)} FGW iterations, and {int(n_iters)} Sinkhorn iterations. "
+                "Increase max_cross_fgw_work_units or set force_large_cross_ot=True only "
+                "if this rectangular computation is intentional."
+            )
 
     resolved_device = _resolve_device(device)
     bs, block_metadata = choose_pairwise_block_size(
@@ -683,34 +865,38 @@ def compute_cross_ot_distance_matrix(
     )
     query_active = _active_counts(query_measures.mask)
     reference_active = _active_counts(reference_measures.mask)
-    query_self = (
-        _self_sinkhorn_costs(
+    query_self_source = reference_self_source = None
+    if debiased and not use_fgw:
+        query_self, query_self_source = _cached_or_computed_self_costs(
             query_measures,
+            query_self_costs,
             block_size=int(bs),
             device=resolved_device,
             epsilon=float(epsilon),
             n_iters=int(n_iters),
+            label="query",
         )
-        if debiased and not use_fgw
-        else np.zeros(n_query, dtype=np.float32)
-    )
-    reference_self = (
-        _self_sinkhorn_costs(
+        reference_self, reference_self_source = _cached_or_computed_self_costs(
             reference_measures,
+            reference_self_costs,
             block_size=int(bs),
             device=resolved_device,
             epsilon=float(epsilon),
             n_iters=int(n_iters),
+            label="reference",
         )
-        if debiased and not use_fgw
-        else np.zeros(n_reference, dtype=np.float32)
-    )
+    else:
+        query_self = np.zeros(n_query, dtype=np.float32)
+        reference_self = np.zeros(n_reference, dtype=np.float32)
 
     fgw_feature_metadata: dict[str, object] = {}
     query_structures = None
     reference_structures = None
     fgw_structure_scale = 1.0
     if use_fgw:
+        requested_structure_normalization = str(fgw_structure_normalization).strip().lower()
+        if requested_structure_normalization not in {"none", "sampled_median"}:
+            raise ValueError("fgw_structure_normalization must be none or sampled_median.")
         query_tokens, fgw_feature_metadata = _fgw_node_feature_array(
             query_tokens,
             query_measures.metadata,
@@ -731,7 +917,7 @@ def compute_cross_ot_distance_matrix(
             if not np.isfinite(fgw_structure_scale) or fgw_structure_scale <= 0.0:
                 raise ValueError("fgw_structure_cost_scale must be a positive finite value.")
             fgw_structure_scale_source = "provided"
-        elif str(fgw_structure_normalization).strip().lower() == "sampled_median":
+        elif requested_structure_normalization == "sampled_median":
             query_scale = _fit_fgw_structure_scale(
                 query_structures,
                 query_measures.mask,
@@ -748,8 +934,6 @@ def compute_cross_ot_distance_matrix(
             )
             fgw_structure_scale = float(np.mean([query_scale, reference_scale]))
             fgw_structure_scale_source = "query_reference_sampled_median"
-        elif str(fgw_structure_normalization).strip().lower() != "none":
-            raise ValueError("fgw_structure_normalization must be none or sampled_median.")
         else:
             fgw_structure_scale_source = "none"
         query_structures = query_structures / np.float32(
@@ -759,7 +943,17 @@ def compute_cross_ot_distance_matrix(
             np.sqrt(max(fgw_structure_scale, 1e-8))
         )
 
-    out = np.zeros((n_query, n_reference), dtype=np.float32)
+    if output_path is None:
+        out = np.zeros((n_query, n_reference), dtype=np.float32)
+    else:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out = np.lib.format.open_memmap(
+            path,
+            mode="w+",
+            dtype="float32",
+            shape=(n_query, n_reference),
+        )
     for q_start in range(0, n_query, bs):
         q_stop = min(q_start + bs, n_query)
         q_width = int(np.max(query_active[q_start:q_stop]))
@@ -837,6 +1031,8 @@ def compute_cross_ot_distance_matrix(
             )
             out[q_start:q_stop, r_start:r_stop] = block
 
+    if hasattr(out, "flush"):
+        out.flush()
     metadata = {
         "distance_mode": _canonical_distance_mode(debiased=debiased, use_fgw=use_fgw),
         "requested_distance_mode": str(requested_mode),
@@ -856,18 +1052,30 @@ def compute_cross_ot_distance_matrix(
         "fgw_structure_cost_scale_source": fgw_structure_scale_source
         if use_fgw
         else None,
+        "query_self_cost_source": query_self_source,
+        "reference_self_cost_source": reference_self_source,
         "block_size": int(bs),
         **block_metadata,
         "device": str(resolved_device),
+        "matrix_bytes": int(_estimate_rectangular_bytes(n_query, n_reference)),
+        "work_estimate": work_estimate,
+        "fgw_work_estimate": fgw_work_estimate,
+        "max_cross_ot_work_units": float(max_cross_ot_work_units),
+        "max_cross_fgw_work_units": float(max_cross_fgw_work_units),
+        "force_large_cross_ot": bool(force_large_cross_ot),
+        "output_path": None if output_path is None else str(output_path),
         **fgw_feature_metadata,
     }
     return out, metadata
 
 
 __all__ = [
+    "assign_by_reference_medoids",
     "choose_pairwise_block_size",
     "compute_cross_ot_distance_matrix",
     "compute_pairwise_ot_distance_matrix",
+    "estimate_cross_fgw_work",
+    "estimate_cross_ot_work",
     "estimate_pairwise_fgw_work",
     "estimate_pairwise_ot_work",
 ]
