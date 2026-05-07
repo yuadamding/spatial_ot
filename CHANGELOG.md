@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.8
+
+- Add precomputed UMAP feature opt-in for exploratory pairwise-niche runs.
+- Add distance-matrix model selection over candidate cluster counts/resolutions, defaulting fixed-K selection to `5:30` when no `--n-clusters` is supplied.
+- Add deterministic high-contrast niche colors, including bright orange for `ON12`.
+- Add full-cohort Visium HD runner scripts for direct all-pairs FGW feasibility checks, landmark FGW, and per-sample rough clustering followed by full-cohort fine FGW.
+- Confirm package metadata version `3.0.8`.
+
 ## 3.0.7
 
 - Add graph-topology fused Gromov-Wasserstein (FGW) neighborhood distances.

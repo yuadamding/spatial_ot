@@ -6,6 +6,7 @@ import anndata as ad
 import pytest
 
 from spatial_ot.pairwise_niche import (
+    assign_high_contrast_colors,
     build_instance_neighbor_indices,
     build_local_measures,
     cluster_from_distance,
@@ -16,6 +17,7 @@ from spatial_ot.pairwise_niche import (
 )
 from spatial_ot.pairwise_niche.cluster import ot_knn_affinity
 from spatial_ot.pairwise_niche.fgw import fused_gromov_wasserstein_block
+from spatial_ot.cli import _parse_int_list
 
 
 def _toy_cohort(n_per_sample: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -300,6 +302,61 @@ def test_clustering_uses_precomputed_distance_not_kmeans() -> None:
     np.testing.assert_allclose(global_affinity.toarray(), global_affinity.toarray().T)
 
 
+def test_cluster_model_selection_chooses_candidate_k() -> None:
+    distance = np.asarray(
+        [
+            [0.0, 0.1, 0.2, 5.0, 5.1, 5.2],
+            [0.1, 0.0, 0.2, 5.1, 5.0, 5.1],
+            [0.2, 0.2, 0.0, 5.2, 5.1, 5.0],
+            [5.0, 5.1, 5.2, 0.0, 0.1, 0.2],
+            [5.1, 5.0, 5.1, 0.1, 0.0, 0.2],
+            [5.2, 5.1, 5.0, 0.2, 0.2, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    result = cluster_from_distance(
+        distance,
+        method="agglomerative",
+        candidate_n_clusters=(2, 3),
+    )
+    assert result.metadata["model_selection"]["selected_n_clusters"] == 2
+    assert result.metadata["model_selection"]["criterion"] == "rank_ensemble"
+    assert result.metadata["model_selection"]["metrics"] == [
+        "silhouette",
+        "calinski_harabasz",
+        "davies_bouldin",
+        "dunn",
+    ]
+    first_result = result.metadata["model_selection"]["results"][0]
+    assert set(first_result["scores"]) == {
+        "silhouette",
+        "calinski_harabasz",
+        "davies_bouldin",
+        "dunn",
+    }
+    assert set(first_result["ranks"]) == {
+        "silhouette",
+        "calinski_harabasz",
+        "davies_bouldin",
+        "dunn",
+    }
+    assert result.metadata["candidate_n_clusters"] == [2, 3]
+    assert int(np.unique(result.labels).size) == 2
+
+
+def test_candidate_cluster_range_parser_is_inclusive() -> None:
+    assert _parse_int_list("5:8") == (5, 6, 7, 8)
+    assert _parse_int_list("8-5") == (8, 7, 6, 5)
+    assert _parse_int_list("5:7,10") == (5, 6, 7, 10)
+
+
+def test_high_contrast_colors_are_deterministic_and_keep_on12_orange() -> None:
+    colors = assign_high_contrast_colors([f"ON{idx}" for idx in range(15)])
+    assert colors["ON12"] == "#ff7f00"
+    assert len(set(colors.values())) == 15
+    assert colors == assign_high_contrast_colors(reversed([f"ON{idx}" for idx in range(15)]))
+
+
 def test_pairwise_niche_h5ad_end_to_end(tmp_path) -> None:
     features, coords, samples = _toy_cohort(n_per_sample=5)
     adata = ad.AnnData(X=features)
@@ -332,7 +389,7 @@ def test_pairwise_niche_h5ad_end_to_end(tmp_path) -> None:
         device="cpu",
         max_exact_cells=20,
         cluster_method="agglomerative",
-        n_clusters=2,
+        candidate_n_clusters=(2, 3),
         seed=17,
     )
     assert summary["active_path"] == "pairwise-niche"
@@ -341,13 +398,62 @@ def test_pairwise_niche_h5ad_end_to_end(tmp_path) -> None:
     assert "cell_ot_dissimilarity" in out.obsp
     assert "cell_ot_affinity" in out.obsp
     assert "ot_niche" in out.obs
+    assert "ot_niche_colors" in out.uns
+    assert (output_dir / "ot_niche_colors.json").exists()
     assert "ot_niche_instance" in out.obs
     assert "n_neighbors_full_r3" in out.obs
     assert "neighbor_retention_fraction_r3" in out.obs
     assert (output_dir / "pairwise_niche_model" / "expression_embedding_state.npz").exists()
     assert summary["batch_embedding"]["batch_correction_applied_by_pairwise_niche"] is False
     assert summary["method_semantics"]["anchor_expression_enters_twice"] is True
+    assert summary["clustering"]["model_selection"]["selected_n_clusters"] in {2, 3}
     np.testing.assert_allclose(out.obsp["cell_ot_dissimilarity"], out.obsp["cell_ot_dissimilarity"].T)
+
+
+def test_pairwise_niche_umap_feature_requires_explicit_opt_in(tmp_path) -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=4)
+    adata = ad.AnnData(X=features)
+    adata.obsm["X_umap_marker_genes_3d"] = features[:, :3]
+    adata.obs = pd.DataFrame(
+        {
+            "sample_id": samples,
+            "x": coords[:, 0],
+            "y": coords[:, 1],
+        },
+        index=[f"cell_{idx}" for idx in range(features.shape[0])],
+    )
+    input_path = tmp_path / "input_umap.h5ad"
+    adata.write_h5ad(input_path)
+    with pytest.raises(ValueError, match="UMAP"):
+        run_pairwise_niche_on_h5ad(
+            input_h5ad=input_path,
+            output_dir=tmp_path / "pairwise_reject",
+            feature_obsm_key="X_umap_marker_genes_3d",
+            spatial_x_key="x",
+            spatial_y_key="y",
+            sample_obs_key="sample_id",
+            embedding_method="precomputed",
+            n_clusters=2,
+            max_exact_cells=20,
+            sinkhorn_iters=3,
+            device="cpu",
+        )
+    summary = run_pairwise_niche_on_h5ad(
+        input_h5ad=input_path,
+        output_dir=tmp_path / "pairwise_accept",
+        feature_obsm_key="X_umap_marker_genes_3d",
+        spatial_x_key="x",
+        spatial_y_key="y",
+        sample_obs_key="sample_id",
+        embedding_method="precomputed",
+        allow_umap_as_feature=True,
+        n_clusters=2,
+        max_exact_cells=20,
+        sinkhorn_iters=3,
+        device="cpu",
+    )
+    assert summary["feature_source"]["feature_embedding_warning"] == "umap_exploratory"
+    assert summary["config"]["allow_umap_as_feature"] is True
 
 
 def test_pairwise_niche_memmap_distance_store(tmp_path) -> None:

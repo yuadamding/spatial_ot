@@ -8,7 +8,13 @@ import numpy as np
 import pandas as pd
 
 from ..feature_source import resolve_h5ad_features
-from .cluster import cluster_from_distance, connected_components_by_label, ot_knn_affinity
+from .cluster import (
+    DEFAULT_CANDIDATE_N_CLUSTERS,
+    cluster_from_distance,
+    connected_components_by_label,
+    ot_knn_affinity,
+)
+from .colors import assign_high_contrast_colors
 from .config import PairwiseNicheConfig
 from .distance_matrix import compute_pairwise_ot_distance_matrix
 from .expression_embedding import fit_expression_embedding, save_expression_embedding_state
@@ -31,6 +37,8 @@ def _sanitize(value):
     if isinstance(value, dict):
         return {str(key): _sanitize(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
+        if all(isinstance(item, dict) for item in value):
+            return {str(idx): _sanitize(item) for idx, item in enumerate(value)}
         return [_sanitize(item) for item in value]
     if isinstance(value, np.ndarray):
         return _sanitize(value.tolist())
@@ -101,6 +109,7 @@ def run_pairwise_niche_on_h5ad(
     embedding_dim: int = 32,
     expression_batch_key: str | None = None,
     standardize_precomputed: bool = True,
+    allow_umap_as_feature: bool = False,
     radius_um: float = 50.0,
     max_neighbors: int = 32,
     include_anchor: bool = True,
@@ -129,9 +138,12 @@ def run_pairwise_niche_on_h5ad(
     distance_store: str = "auto",
     cluster_method: str = "agglomerative",
     n_clusters: int | None = None,
+    candidate_n_clusters: tuple[int, ...] | list[int] | None = None,
+    model_selection_metrics: tuple[str, ...] | list[str] | None = None,
     ot_knn: int = 30,
     ot_affinity_scaling: str = "local",
     leiden_resolution: float = 1.0,
+    candidate_resolutions: tuple[float, ...] | list[float] | None = None,
     instance_radius_um: float | None = None,
     instance_max_neighbors: int = 512,
     seed: int = 1337,
@@ -153,7 +165,7 @@ def run_pairwise_niche_on_h5ad(
     features, feature_source = resolve_h5ad_features(
         adata,
         feature_obsm_key=feature_obsm_key,
-        allow_umap_as_feature=False,
+        allow_umap_as_feature=bool(allow_umap_as_feature),
     )
     sample_ids = (
         adata.obs[str(sample_obs_key)].astype(str).to_numpy()
@@ -166,6 +178,14 @@ def run_pairwise_niche_on_h5ad(
             np.asarray(adata.obs[spatial_y_key], dtype=np.float32) * float(spatial_scale),
         ]
     ).astype(np.float32)
+    requested_cluster_method = str(cluster_method or "agglomerative").strip().lower()
+    effective_candidate_n_clusters = candidate_n_clusters
+    if (
+        requested_cluster_method in {"agglomerative", "kmedoids", "pam"}
+        and n_clusters is None
+        and candidate_n_clusters is None
+    ):
+        effective_candidate_n_clusters = DEFAULT_CANDIDATE_N_CLUSTERS
 
     config = PairwiseNicheConfig(
         feature_obsm_key=str(feature_obsm_key),
@@ -177,6 +197,7 @@ def run_pairwise_niche_on_h5ad(
         embedding_dim=int(embedding_dim),
         expression_batch_key=expression_batch_key,
         standardize_precomputed=bool(standardize_precomputed),
+        allow_umap_as_feature=bool(allow_umap_as_feature),
         radius_um=float(radius_um),
         max_neighbors=int(max_neighbors),
         include_anchor=bool(include_anchor),
@@ -203,11 +224,20 @@ def run_pairwise_niche_on_h5ad(
         max_ot_work_units=float(max_ot_work_units),
         force_large_exact_ot=bool(force_large_exact_ot),
         distance_store=str(distance_store),  # type: ignore[arg-type]
-        cluster_method=str(cluster_method),  # type: ignore[arg-type]
+        cluster_method=requested_cluster_method,  # type: ignore[arg-type]
         n_clusters=n_clusters,
+        candidate_n_clusters=tuple(int(value) for value in effective_candidate_n_clusters)
+        if effective_candidate_n_clusters
+        else None,
+        model_selection_metrics=tuple(str(value) for value in model_selection_metrics)
+        if model_selection_metrics
+        else ("silhouette", "calinski_harabasz", "davies_bouldin", "dunn"),
         ot_knn=int(ot_knn),
         ot_affinity_scaling=str(ot_affinity_scaling),  # type: ignore[arg-type]
         leiden_resolution=float(leiden_resolution),
+        candidate_resolutions=tuple(float(value) for value in candidate_resolutions)
+        if candidate_resolutions
+        else None,
         instance_radius_um=instance_radius_um,
         instance_max_neighbors=int(instance_max_neighbors),
         seed=int(seed),
@@ -263,11 +293,14 @@ def run_pairwise_niche_on_h5ad(
     distance_array = np.asarray(distance, dtype=np.float32)
     cluster = cluster_from_distance(
         distance_array,
-        method=str(cluster_method),
+        method=requested_cluster_method,
         n_clusters=n_clusters,
+        candidate_n_clusters=effective_candidate_n_clusters,
+        model_selection_metrics=model_selection_metrics,
         ot_knn=int(ot_knn),
         ot_affinity_scaling=str(ot_affinity_scaling),
         leiden_resolution=float(leiden_resolution),
+        candidate_resolutions=candidate_resolutions,
         random_state=int(seed),
     )
     instance_indices = build_instance_neighbor_indices(
@@ -282,9 +315,10 @@ def run_pairwise_niche_on_h5ad(
     )
 
     adata.obsm["X_gene_cohort"] = embedding.values.astype(np.float32)
-    adata.obs["ot_niche"] = pd.Categorical(
-        np.asarray([f"ON{int(label)}" for label in cluster.labels], dtype=object)
-    )
+    niche_categories = [f"ON{int(label)}" for label in sorted(np.unique(cluster.labels))]
+    niche_names = np.asarray([f"ON{int(label)}" for label in cluster.labels], dtype=object)
+    niche_colors = assign_high_contrast_colors(niche_categories)
+    adata.obs["ot_niche"] = pd.Categorical(niche_names, categories=niche_categories)
     adata.obs["ot_niche_int"] = cluster.labels.astype(np.int32)
     adata.obs["ot_niche_assignment_score"] = cluster.assignment_score.astype(np.float32)
     adata.obs["ot_niche_instance"] = pd.Categorical(instance_names)
@@ -343,6 +377,7 @@ def run_pairwise_niche_on_h5ad(
         "local_measure": dict(measures.metadata),
         "distance_matrix": dict(distance_metadata),
         "clustering": dict(cluster.metadata),
+        "niche_colors": dict(niche_colors),
         "method_semantics": {
             "anchor_in_measure": bool(include_anchor),
             "direct_anchor_cost_weight": float(anchor_weight),
@@ -359,6 +394,7 @@ def run_pairwise_niche_on_h5ad(
         "outputs": {
             "h5ad": str(out_dir / "cells_pairwise_niche.h5ad"),
             "summary": str(out_dir / "summary.json"),
+            "niche_colors": str(out_dir / "ot_niche_colors.json"),
             "distance_matrix": distance_store_path,
             "expression_embedding_state": str(embedding_state_path),
         },
@@ -368,9 +404,15 @@ def run_pairwise_niche_on_h5ad(
     adata.uns["pairwise_niche_embedding_summary"] = _sanitize(embedding.metadata)
     adata.uns["pairwise_niche_distance_summary"] = _sanitize(distance_metadata)
     adata.uns["pairwise_niche_clustering_summary"] = _sanitize(cluster.metadata)
+    adata.uns["pairwise_niche_color_map"] = _sanitize(niche_colors)
+    adata.uns["ot_niche_colors"] = [
+        niche_colors[str(category)] for category in niche_categories
+    ]
 
     h5ad_path = out_dir / "cells_pairwise_niche.h5ad"
     summary_path = out_dir / "summary.json"
+    color_path = out_dir / "ot_niche_colors.json"
     adata.write_h5ad(h5ad_path, compression="gzip")
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True, default=_json_default))
+    color_path.write_text(json.dumps(niche_colors, indent=2, sort_keys=True))
     return summary

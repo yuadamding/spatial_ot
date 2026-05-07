@@ -6,6 +6,16 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics import silhouette_score
+
+DEFAULT_CANDIDATE_N_CLUSTERS = tuple(range(5, 31))
+DEFAULT_MODEL_SELECTION_METRICS = (
+    "silhouette",
+    "calinski_harabasz",
+    "davies_bouldin",
+    "dunn",
+)
+_MODEL_SELECTION_METRICS = frozenset(DEFAULT_MODEL_SELECTION_METRICS)
 
 
 @dataclass(frozen=True)
@@ -86,6 +96,277 @@ def _kmedoids(
         medoids = updated
         labels = new_labels
     return labels.astype(np.int32), medoids.astype(np.int64)
+
+
+def _sanitize_candidate_clusters(
+    values: list[int] | tuple[int, ...] | None,
+    *,
+    n_cells: int,
+) -> list[int]:
+    if not values:
+        return []
+    out = sorted({int(value) for value in values if 1 < int(value) < int(n_cells)})
+    if not out:
+        raise ValueError("candidate_n_clusters must include at least one value between 2 and n_cells-1.")
+    return out
+
+
+def _sanitize_candidate_resolutions(values: list[float] | tuple[float, ...] | None) -> list[float]:
+    if not values:
+        return []
+    out = sorted({float(value) for value in values if float(value) > 0.0})
+    if not out:
+        raise ValueError("candidate_resolutions must include at least one positive value.")
+    return out
+
+
+def _sanitize_model_selection_metrics(
+    values: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    if not values:
+        return list(DEFAULT_MODEL_SELECTION_METRICS)
+    out: list[str] = []
+    for value in values:
+        metric = str(value).strip().lower().replace("-", "_")
+        if not metric:
+            continue
+        if metric not in _MODEL_SELECTION_METRICS:
+            valid = ", ".join(sorted(_MODEL_SELECTION_METRICS))
+            raise ValueError(f"model_selection_metrics must contain only: {valid}.")
+        if metric not in out:
+            out.append(metric)
+    if not out:
+        raise ValueError("model_selection_metrics must include at least one metric.")
+    return out
+
+
+def _finite_score(value: float) -> float | None:
+    return float(value) if np.isfinite(value) else None
+
+
+def _distance_silhouette(distance: np.ndarray, labels: np.ndarray) -> float:
+    y = np.asarray(labels, dtype=np.int32)
+    unique = np.unique(y)
+    if unique.size < 2 or unique.size >= y.size:
+        return float("-inf")
+    try:
+        return float(silhouette_score(distance, y, metric="precomputed"))
+    except ValueError:
+        return float("-inf")
+
+
+def _cluster_medoids_from_labels(distance: np.ndarray, labels: np.ndarray) -> dict[int, int]:
+    d = np.asarray(distance, dtype=np.float32)
+    y = np.asarray(labels, dtype=np.int32)
+    out: dict[int, int] = {}
+    for label in np.unique(y):
+        members = np.flatnonzero(y == int(label))
+        if members.size == 0:
+            continue
+        intra = d[np.ix_(members, members)]
+        out[int(label)] = int(members[np.argmin(np.sum(intra, axis=1))])
+    return out
+
+
+def _distance_calinski_harabasz(distance: np.ndarray, labels: np.ndarray) -> float:
+    d = np.asarray(distance, dtype=np.float64)
+    y = np.asarray(labels, dtype=np.int32)
+    n = int(y.size)
+    unique = np.unique(y)
+    k = int(unique.size)
+    if k < 2 or k >= n:
+        return float("-inf")
+    d2 = d * d
+    total = float(np.sum(d2) / max(2 * n, 1))
+    within = 0.0
+    for label in unique:
+        members = np.flatnonzero(y == int(label))
+        if members.size:
+            within += float(np.sum(d2[np.ix_(members, members)]) / max(2 * members.size, 1))
+    between = max(total - within, 0.0)
+    denominator = max(within / max(n - k, 1), 1e-12)
+    numerator = between / max(k - 1, 1)
+    return float(numerator / denominator)
+
+
+def _distance_davies_bouldin(distance: np.ndarray, labels: np.ndarray) -> float:
+    d = np.asarray(distance, dtype=np.float32)
+    y = np.asarray(labels, dtype=np.int32)
+    unique = np.unique(y)
+    k = int(unique.size)
+    if k < 2 or k >= y.size:
+        return float("-inf")
+    medoids_by_label = _cluster_medoids_from_labels(d, y)
+    medoids = np.asarray([medoids_by_label[int(label)] for label in unique], dtype=np.int64)
+    scatter = np.zeros(k, dtype=np.float64)
+    for idx, label in enumerate(unique):
+        members = np.flatnonzero(y == int(label))
+        scatter[idx] = float(np.mean(d[members, medoids[idx]])) if members.size else 0.0
+    separation = d[np.ix_(medoids, medoids)].astype(np.float64)
+    ratios = np.full((k, k), -np.inf, dtype=np.float64)
+    for row in range(k):
+        for col in range(k):
+            if row == col:
+                continue
+            sep = float(separation[row, col])
+            if sep <= 1e-12:
+                ratios[row, col] = np.inf
+            else:
+                ratios[row, col] = (scatter[row] + scatter[col]) / sep
+    db = float(np.mean(np.max(ratios, axis=1)))
+    return float("-inf") if not np.isfinite(db) else float(-db)
+
+
+def _distance_dunn(distance: np.ndarray, labels: np.ndarray) -> float:
+    d = np.asarray(distance, dtype=np.float32)
+    y = np.asarray(labels, dtype=np.int32)
+    unique = np.unique(y)
+    if unique.size < 2 or unique.size >= y.size:
+        return float("-inf")
+    max_diameter = 0.0
+    min_inter = float("inf")
+    for i, left in enumerate(unique):
+        left_members = np.flatnonzero(y == int(left))
+        if left_members.size > 1:
+            max_diameter = max(
+                max_diameter,
+                float(np.max(d[np.ix_(left_members, left_members)])),
+            )
+        for right in unique[i + 1 :]:
+            right_members = np.flatnonzero(y == int(right))
+            if left_members.size and right_members.size:
+                min_inter = min(
+                    min_inter,
+                    float(np.min(d[np.ix_(left_members, right_members)])),
+                )
+    if not np.isfinite(min_inter):
+        return float("-inf")
+    return float(min_inter / max(max_diameter, 1e-12))
+
+
+def _model_selection_scores(
+    distance: np.ndarray,
+    labels: np.ndarray,
+    *,
+    metrics: list[str],
+) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for metric in metrics:
+        if metric == "silhouette":
+            scores[metric] = _distance_silhouette(distance, labels)
+        elif metric == "calinski_harabasz":
+            scores[metric] = _distance_calinski_harabasz(distance, labels)
+        elif metric == "davies_bouldin":
+            scores[metric] = _distance_davies_bouldin(distance, labels)
+        elif metric == "dunn":
+            scores[metric] = _distance_dunn(distance, labels)
+        else:  # pragma: no cover - protected by sanitizer.
+            raise ValueError(f"Unknown model-selection metric: {metric}")
+    return scores
+
+
+def _rank_model_selection_results(
+    results: list[dict[str, object]],
+    *,
+    metrics: list[str],
+    tie_break_key: str,
+) -> int:
+    if not results:
+        raise ValueError("model selection requires at least one candidate result.")
+    for result in results:
+        result["ranks"] = {}
+    for metric in metrics:
+        def score_for_rank(idx: int) -> float:
+            scores = results[idx].get("scores", {})
+            if not isinstance(scores, dict):
+                return float("-inf")
+            value = scores.get(metric)
+            return float(value) if value is not None else float("-inf")
+
+        order = sorted(
+            range(len(results)),
+            key=lambda idx: (
+                -score_for_rank(idx),
+                float(results[idx][tie_break_key]),
+            ),
+        )
+        for rank, idx in enumerate(order, start=1):
+            ranks = results[idx]["ranks"]
+            assert isinstance(ranks, dict)
+            ranks[metric] = int(rank)
+    best_idx = 0
+    best_key = (float("inf"), float("inf"))
+    for idx, result in enumerate(results):
+        ranks = result["ranks"]
+        assert isinstance(ranks, dict)
+        mean_rank = float(np.mean([float(ranks[metric]) for metric in metrics]))
+        result["mean_rank"] = mean_rank
+        key = (mean_rank, float(result[tie_break_key]))
+        if key < best_key:
+            best_key = key
+            best_idx = idx
+    return int(best_idx)
+
+
+def _fit_fixed_k(
+    distance: np.ndarray,
+    *,
+    method: str,
+    n_clusters: int,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    if method == "agglomerative":
+        return _agglomerative(distance, n_clusters=int(n_clusters)), None
+    if method in {"kmedoids", "pam"}:
+        return _kmedoids(distance, n_clusters=int(n_clusters))
+    raise ValueError("fixed-K model selection is only available for agglomerative and kmedoids.")
+
+
+def _select_fixed_k_model(
+    distance: np.ndarray,
+    *,
+    method: str,
+    candidate_n_clusters: list[int],
+    model_selection_metrics: list[str],
+) -> tuple[np.ndarray, np.ndarray | None, dict[str, object]]:
+    results: list[dict[str, object]] = []
+    labels_by_k: dict[int, np.ndarray] = {}
+    medoids_by_k: dict[int, np.ndarray | None] = {}
+    best_labels: np.ndarray | None = None
+    best_medoids: np.ndarray | None = None
+    for k in candidate_n_clusters:
+        labels, medoids = _fit_fixed_k(distance, method=method, n_clusters=int(k))
+        scores = _model_selection_scores(
+            distance,
+            labels,
+            metrics=model_selection_metrics,
+        )
+        labels_by_k[int(k)] = labels
+        medoids_by_k[int(k)] = medoids
+        results.append(
+            {
+                "n_clusters": int(k),
+                "scores": {metric: _finite_score(value) for metric, value in scores.items()},
+                "n_observed_clusters": int(np.unique(labels).size),
+            }
+        )
+    best_idx = _rank_model_selection_results(
+        results,
+        metrics=model_selection_metrics,
+        tie_break_key="n_clusters",
+    )
+    best_k = int(results[best_idx]["n_clusters"])
+    best_labels = labels_by_k[best_k]
+    best_medoids = medoids_by_k[best_k]
+    assert best_labels is not None
+    return best_labels, best_medoids, {
+        "enabled": True,
+        "criterion": "rank_ensemble",
+        "metrics": list(model_selection_metrics),
+        "candidate_n_clusters": [int(k) for k in candidate_n_clusters],
+        "selected_n_clusters": int(best_k),
+        "selected_mean_rank": float(results[best_idx]["mean_rank"]),
+        "results": results,
+    }
 
 
 def ot_knn_affinity(
@@ -171,9 +452,12 @@ def cluster_from_distance(
     *,
     method: str = "agglomerative",
     n_clusters: int | None = None,
+    candidate_n_clusters: list[int] | tuple[int, ...] | None = None,
+    model_selection_metrics: list[str] | tuple[str, ...] | None = None,
     ot_knn: int = 30,
     ot_affinity_scaling: str = "local",
     leiden_resolution: float = 1.0,
+    candidate_resolutions: list[float] | tuple[float, ...] | None = None,
     random_state: int = 1337,
 ) -> ClusterResult:
     d = np.asarray(distance, dtype=np.float32)
@@ -181,22 +465,99 @@ def cluster_from_distance(
         raise ValueError("distance must be a square matrix.")
     requested = str(method or "agglomerative").strip().lower()
     medoids = None
+    model_selection: dict[str, object] | None = None
+    selection_metrics = _sanitize_model_selection_metrics(model_selection_metrics)
+    requested_candidate_n_clusters = candidate_n_clusters
+    if (
+        requested in {"agglomerative", "kmedoids", "pam"}
+        and n_clusters is None
+        and candidate_n_clusters is None
+    ):
+        requested_candidate_n_clusters = DEFAULT_CANDIDATE_N_CLUSTERS
+    cluster_candidates = _sanitize_candidate_clusters(
+        requested_candidate_n_clusters,
+        n_cells=int(d.shape[0]),
+    )
+    resolution_candidates = _sanitize_candidate_resolutions(candidate_resolutions)
     if requested == "agglomerative":
-        if n_clusters is None:
+        if cluster_candidates:
+            labels, medoids, model_selection = _select_fixed_k_model(
+                d,
+                method=requested,
+                candidate_n_clusters=cluster_candidates,
+                model_selection_metrics=selection_metrics,
+            )
+        elif n_clusters is None:
             raise ValueError("agglomerative clustering requires --n-clusters.")
-        labels = _agglomerative(d, n_clusters=int(n_clusters))
+        else:
+            labels = _agglomerative(d, n_clusters=int(n_clusters))
     elif requested in {"kmedoids", "pam"}:
-        if n_clusters is None:
+        if cluster_candidates:
+            labels, medoids, model_selection = _select_fixed_k_model(
+                d,
+                method=requested,
+                candidate_n_clusters=cluster_candidates,
+                model_selection_metrics=selection_metrics,
+            )
+        elif n_clusters is None:
             raise ValueError("kmedoids clustering requires --n-clusters.")
-        labels, medoids = _kmedoids(d, n_clusters=int(n_clusters))
+        else:
+            labels, medoids = _kmedoids(d, n_clusters=int(n_clusters))
     elif requested == "leiden_ot_knn":
-        labels = _leiden_ot_knn(
-            d,
-            k=int(ot_knn),
-            affinity_scaling=str(ot_affinity_scaling),
-            resolution=float(leiden_resolution),
-            random_state=int(random_state),
-        )
+        if resolution_candidates:
+            results: list[dict[str, object]] = []
+            labels_by_resolution: dict[float, np.ndarray] = {}
+            for resolution in resolution_candidates:
+                labels_for_resolution = _leiden_ot_knn(
+                    d,
+                    k=int(ot_knn),
+                    affinity_scaling=str(ot_affinity_scaling),
+                    resolution=float(resolution),
+                    random_state=int(random_state),
+                )
+                scores = _model_selection_scores(
+                    d,
+                    labels_for_resolution,
+                    metrics=selection_metrics,
+                )
+                observed = int(np.unique(labels_for_resolution).size)
+                labels_by_resolution[float(resolution)] = labels_for_resolution
+                results.append(
+                    {
+                        "resolution": float(resolution),
+                        "scores": {
+                            metric: _finite_score(value) for metric, value in scores.items()
+                        },
+                        "n_observed_clusters": observed,
+                    }
+                )
+            best_idx = _rank_model_selection_results(
+                results,
+                metrics=selection_metrics,
+                tie_break_key="resolution",
+            )
+            best_resolution = float(results[best_idx]["resolution"])
+            best_labels = labels_by_resolution[best_resolution]
+            assert best_labels is not None
+            labels = best_labels
+            leiden_resolution = best_resolution
+            model_selection = {
+                "enabled": True,
+                "criterion": "rank_ensemble",
+                "metrics": list(selection_metrics),
+                "candidate_resolutions": [float(value) for value in resolution_candidates],
+                "selected_resolution": float(best_resolution),
+                "selected_mean_rank": float(results[best_idx]["mean_rank"]),
+                "results": results,
+            }
+        else:
+            labels = _leiden_ot_knn(
+                d,
+                k=int(ot_knn),
+                affinity_scaling=str(ot_affinity_scaling),
+                resolution=float(leiden_resolution),
+                random_state=int(random_state),
+            )
     else:
         raise ValueError("cluster_method must be agglomerative, kmedoids, or leiden_ot_knn.")
     metadata: dict[str, object] = {
@@ -206,12 +567,20 @@ def cluster_from_distance(
     }
     if n_clusters is not None:
         metadata["requested_n_clusters"] = int(n_clusters)
+    if cluster_candidates:
+        metadata["candidate_n_clusters"] = [int(value) for value in cluster_candidates]
     if medoids is not None:
         metadata["medoid_indices"] = medoids.astype(int).tolist()
     if requested == "leiden_ot_knn":
         metadata["ot_knn"] = int(ot_knn)
         metadata["ot_affinity_scaling"] = str(ot_affinity_scaling)
         metadata["leiden_resolution"] = float(leiden_resolution)
+        if resolution_candidates:
+            metadata["candidate_resolutions"] = [
+                float(value) for value in resolution_candidates
+            ]
+    if model_selection is not None:
+        metadata["model_selection"] = model_selection
     return ClusterResult(
         labels=labels.astype(np.int32),
         assignment_score=_cluster_assignment_score(d, labels),

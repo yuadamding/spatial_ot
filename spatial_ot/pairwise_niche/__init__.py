@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .cluster import ClusterResult, cluster_from_distance
+from .colors import HIGH_CONTRAST_PALETTE, assign_high_contrast_colors
 from .config import PairwiseNicheConfig
 from .distance_matrix import compute_pairwise_ot_distance_matrix, estimate_pairwise_ot_work
 from .expression_embedding import (
@@ -25,8 +26,10 @@ __all__ = [
     "ClusterResult",
     "ExpressionEmbedding",
     "ExpressionEmbeddingState",
+    "HIGH_CONTRAST_PALETTE",
     "LocalMeasureSet",
     "PairwiseNicheConfig",
+    "assign_high_contrast_colors",
     "batched_fused_gromov_wasserstein_cost",
     "batched_sinkhorn_cost",
     "build_instance_neighbor_indices",

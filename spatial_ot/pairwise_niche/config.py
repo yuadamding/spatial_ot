@@ -16,6 +16,7 @@ class PairwiseNicheConfig:
     embedding_dim: int = 32
     expression_batch_key: str | None = None
     standardize_precomputed: bool = True
+    allow_umap_as_feature: bool = False
 
     radius_um: float = 50.0
     max_neighbors: int = 32
@@ -55,9 +56,15 @@ class PairwiseNicheConfig:
 
     cluster_method: Literal["agglomerative", "kmedoids", "leiden_ot_knn"] = "agglomerative"
     n_clusters: int | None = None
+    candidate_n_clusters: tuple[int, ...] | None = None
+    model_selection_metrics: tuple[
+        Literal["silhouette", "calinski_harabasz", "davies_bouldin", "dunn"],
+        ...,
+    ] = ("silhouette", "calinski_harabasz", "davies_bouldin", "dunn")
     ot_knn: int = 30
     ot_affinity_scaling: Literal["local", "global"] = "local"
     leiden_resolution: float = 1.0
+    candidate_resolutions: tuple[float, ...] | None = None
     instance_radius_um: float | None = None
     instance_max_neighbors: int = 512
     seed: int = 1337

@@ -8,6 +8,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "ClusterResult": ("pairwise_niche", "ClusterResult"),
     "ExpressionEmbedding": ("pairwise_niche", "ExpressionEmbedding"),
     "ExpressionEmbeddingState": ("pairwise_niche", "ExpressionEmbeddingState"),
+    "HIGH_CONTRAST_PALETTE": ("pairwise_niche", "HIGH_CONTRAST_PALETTE"),
     "LocalMeasureSet": ("pairwise_niche", "LocalMeasureSet"),
     "OTDeepSHEModel": ("cell_niche", "OTDeepSHEModel"),
     "OTPrototypeHead": ("cell_niche", "OTPrototypeHead"),
@@ -23,6 +24,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "pairwise_niche",
         "batched_fused_gromov_wasserstein_cost",
     ),
+    "assign_high_contrast_colors": ("pairwise_niche", "assign_high_contrast_colors"),
     "cluster_embeddings": ("cell_niche", "cluster_embeddings"),
     "cluster_from_distance": ("pairwise_niche", "cluster_from_distance"),
     "compute_cell_heterogeneity_descriptors": (
@@ -61,7 +63,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "sinkhorn_divergence": ("cell_niche", "sinkhorn_divergence"),
 }
 
-__version__ = "3.0.7"
+__version__ = "3.0.8"
 __all__ = ["__version__", *_LAZY_EXPORTS]
 
 

@@ -86,18 +86,40 @@ spatial-ot pairwise-niche fit \
   --max-exact-cells 4000 \
   --max-ot-work-units 5e11 \
   --cluster-method agglomerative \
-  --n-clusters 15
+  --candidate-n-clusters 5:30 \
+  --model-selection-metrics silhouette,calinski_harabasz,davies_bouldin,dunn
 ```
+
+For exploratory runs that intentionally use a precomputed 3D UMAP as the cell feature
+space, pass it explicitly:
+
+```bash
+spatial-ot pairwise-niche fit \
+  --feature-obsm-key X_umap_marker_genes_3d \
+  --embedding-method precomputed \
+  --allow-umap-as-feature \
+  ...
+```
+
+UMAP is accepted only with this opt-in because it is useful for quick visual/debug
+runs but is not generally metric-preserving enough for claim-grade OT distances.
 
 Use `--distance-mode fused_gromov_wasserstein` to compare full local graph topology. In that mode, each cell graph is bounded by both `--radius-um` and `--max-neighbors`; the graph structure matrix stores pairwise spatial distances among the retained support nodes.
 
 Exact all-pairs OT/FGW is quadratic in the number of cells. The command intentionally refuses oversized dense exact jobs unless `--max-exact-cells` is raised, and it also guards against excessive Sinkhorn work with `--max-ot-work-units`. For full Visium HD cohorts with hundreds of thousands of cells, use sampled/landmark subsets until the approximate sparse mode is added.
+
+For full-cohort exploratory Visium HD runs where exact all-cell-pair FGW is infeasible, the repository includes scripts that make the approximation explicit:
+
+- `scripts/run_visium_hd_umap3d_direct_pairwise_fgw.py`: builds the full cell graphs and writes an exact all-pairs feasibility report without using landmarks or references.
+- `scripts/run_visium_hd_umap3d_sample_rough_full_fine_fgw.py`: rough-clusters cells independently per sample, compares all rough-cluster representative cell graphs with full-cohort FGW, then propagates fine labels back to cells.
+- `scripts/run_visium_hd_umap3d_landmark_fgw.py`: landmark FGW assignment for faster exploratory runs.
 
 Main outputs:
 
 - `cells_pairwise_niche.h5ad`
 - `cell_ot_dissimilarity.npy`, when `--distance-store npy_memmap` or automatic memmap output is selected.
 - `summary.json`
+- `ot_niche_colors.json`, a deterministic high-contrast color map for niche labels.
 
 Key AnnData fields:
 
@@ -121,6 +143,10 @@ M_i = sum_j a_ij delta([z_j, relative_x/r, relative_y/r, distance/r])
 ```
 
 The ground cost compares expression location and relative spatial organization. Clustering is performed from the precomputed OT dissimilarity matrix using agglomerative clustering, k-medoids, or Leiden on an OT-kNN affinity graph. KMeans is intentionally not used because it does not accept a precomputed dissimilarity matrix.
+
+For agglomerative or k-medoids runs, pass `--candidate-n-clusters 5:30` to select the cluster count across every K from 5 through 30. If `--n-clusters` is omitted and no candidate list is supplied, this 5:30 range is used by default. Candidates are ranked by a model-selection ensemble over precomputed-distance silhouette, distance-based Calinski-Harabasz, medoid Davies-Bouldin, and Dunn scores; customize the set with `--model-selection-metrics`. For Leiden runs, pass `--candidate-resolutions 0.4,0.6,0.8,1.0,1.2` to select a resolution with the same metric ensemble. The selected model and all candidate scores/ranks are written to `summary.json` and `adata.uns["pairwise_niche_clustering_summary"]`.
+
+Niche colors are deterministic and high contrast. They are stored in `ot_niche_colors.json`, `adata.uns["pairwise_niche_color_map"]`, and `adata.uns["ot_niche_colors"]`; `ON12` is kept bright orange (`#ff7f00`).
 
 For graph-topology runs, `--distance-mode fused_gromov_wasserstein` compares:
 

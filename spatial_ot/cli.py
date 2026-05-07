@@ -28,6 +28,38 @@ def _print_json(payload: dict[str, object]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True, default=_json_default))
 
 
+def _parse_int_list(value: str | None) -> tuple[int, ...] | None:
+    if value is None or str(value).strip() == "":
+        return None
+    out: list[int] = []
+    for item in str(value).split(","):
+        token = item.strip()
+        if not token:
+            continue
+        separator = ":" if ":" in token else "-" if "-" in token[1:] else None
+        if separator is None:
+            out.append(int(token))
+            continue
+        left, right = token.split(separator, 1)
+        start = int(left.strip())
+        stop = int(right.strip())
+        step = 1 if stop >= start else -1
+        out.extend(range(start, stop + step, step))
+    return tuple(out)
+
+
+def _parse_float_list(value: str | None) -> tuple[float, ...] | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return tuple(float(item.strip()) for item in str(value).split(",") if item.strip())
+
+
+def _parse_string_list(value: str | None) -> tuple[str, ...] | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return tuple(item.strip() for item in str(value).split(",") if item.strip())
+
+
 def _add_cell_niche_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "action",
@@ -223,6 +255,15 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         default=True,
         help="Standardize precomputed expression embeddings before OT.",
     )
+    parser.add_argument(
+        "--allow-umap-as-feature",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Allow a UMAP obsm key as the OT feature space for exploratory runs. "
+            "UMAP is not generally metric-preserving."
+        ),
+    )
     parser.add_argument("--radius-um", type=float, default=50.0)
     parser.add_argument(
         "--max-neighbors",
@@ -332,6 +373,23 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Required for agglomerative and k-medoids clustering.",
     )
+    parser.add_argument(
+        "--candidate-n-clusters",
+        default=None,
+        help=(
+            "Comma-separated K values or inclusive ranges for model selection with "
+            "agglomerative or k-medoids clustering. When omitted and --n-clusters is "
+            "not set, candidates default to 5:30."
+        ),
+    )
+    parser.add_argument(
+        "--model-selection-metrics",
+        default="silhouette,calinski_harabasz,davies_bouldin,dunn",
+        help=(
+            "Comma-separated precomputed-distance model-selection metrics. Supported: "
+            "silhouette, calinski_harabasz, davies_bouldin, dunn."
+        ),
+    )
     parser.add_argument("--ot-knn", type=int, default=30)
     parser.add_argument(
         "--ot-affinity-scaling",
@@ -339,6 +397,14 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         choices=["local", "global"],
     )
     parser.add_argument("--leiden-resolution", type=float, default=1.0)
+    parser.add_argument(
+        "--candidate-resolutions",
+        default=None,
+        help=(
+            "Comma-separated Leiden resolutions for model selection. Candidates are "
+            "ranked with --model-selection-metrics."
+        ),
+    )
     parser.add_argument("--instance-radius-um", type=float, default=None)
     parser.add_argument("--instance-max-neighbors", type=int, default=512)
     parser.add_argument("--seed", type=int, default=1337)
@@ -434,6 +500,7 @@ def main() -> None:
             embedding_dim=args.embedding_dim,
             expression_batch_key=args.expression_batch_key,
             standardize_precomputed=args.standardize_precomputed,
+            allow_umap_as_feature=args.allow_umap_as_feature,
             radius_um=args.radius_um,
             max_neighbors=args.max_neighbors,
             include_anchor=args.include_anchor,
@@ -462,9 +529,12 @@ def main() -> None:
             distance_store=args.distance_store,
             cluster_method=args.cluster_method,
             n_clusters=args.n_clusters,
+            candidate_n_clusters=_parse_int_list(args.candidate_n_clusters),
+            model_selection_metrics=_parse_string_list(args.model_selection_metrics),
             ot_knn=args.ot_knn,
             ot_affinity_scaling=args.ot_affinity_scaling,
             leiden_resolution=args.leiden_resolution,
+            candidate_resolutions=_parse_float_list(args.candidate_resolutions),
             instance_radius_um=args.instance_radius_um,
             instance_max_neighbors=args.instance_max_neighbors,
             seed=args.seed,
