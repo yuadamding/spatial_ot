@@ -7,7 +7,11 @@ import torch
 
 from .local_measure import LocalMeasureSet
 from .fgw import fused_gromov_wasserstein_block
-from .sinkhorn import sinkhorn_ot_block, sinkhorn_self_cost_batch
+from .sinkhorn import (
+    sinkhorn_ot_block,
+    sinkhorn_ot_marginal_error_block,
+    sinkhorn_self_cost_batch,
+)
 
 
 def _resolve_device(device: str) -> torch.device:
@@ -354,6 +358,9 @@ def compute_pairwise_ot_distance_matrix(
             seed=int(measures.metadata.get("seed", 1337)),
         )
         structures = structures / np.float32(np.sqrt(max(fgw_structure_scale, 1e-8)))
+    sinkhorn_diagnostic_errors: list[np.ndarray] = []
+    sinkhorn_diagnostic_block_limit = 4
+    sinkhorn_diagnostic_cells_per_axis = 8
     for a_start in range(0, n, bs):
         a_stop = min(a_start + bs, n)
         width_a = int(np.max(active_counts[a_start:a_stop]))
@@ -420,6 +427,24 @@ def compute_pairwise_ot_distance_matrix(
                     epsilon=float(epsilon),
                     n_iters=int(n_iters),
                 ).detach().cpu().numpy().astype(np.float32)
+                if len(sinkhorn_diagnostic_errors) < sinkhorn_diagnostic_block_limit:
+                    diag_a = min(int(tok_a.shape[0]), sinkhorn_diagnostic_cells_per_axis)
+                    diag_b = min(int(tok_b.shape[0]), sinkhorn_diagnostic_cells_per_axis)
+                    errors = (
+                        sinkhorn_ot_marginal_error_block(
+                            tok_a[:diag_a],
+                            w_a[:diag_a],
+                            tok_b[:diag_b],
+                            w_b[:diag_b],
+                            epsilon=float(epsilon),
+                            n_iters=int(n_iters),
+                        )
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32)
+                    )
+                    sinkhorn_diagnostic_errors.append(errors.reshape(-1))
             if debiased:
                 block = block - 0.5 * self_costs[a_start:a_stop, None]
                 block = block - 0.5 * self_costs[None, b_start:b_stop]
@@ -445,6 +470,25 @@ def compute_pairwise_ot_distance_matrix(
     out[diag, diag] = 0.0
     if hasattr(out, "flush"):
         out.flush()
+    if sinkhorn_diagnostic_errors and not use_fgw:
+        sinkhorn_errors = np.concatenate(sinkhorn_diagnostic_errors)
+        sinkhorn_diagnostics: dict[str, object] = {
+            "sampled_blocks": int(len(sinkhorn_diagnostic_errors)),
+            "sampled_pairs": int(sinkhorn_errors.size),
+            "mean_marginal_error": float(np.mean(sinkhorn_errors)),
+            "max_marginal_error": float(np.max(sinkhorn_errors)),
+            "epsilon": float(epsilon),
+            "sinkhorn_iters": int(n_iters),
+        }
+    else:
+        sinkhorn_diagnostics = {
+            "sampled_blocks": 0,
+            "sampled_pairs": 0,
+            "mean_marginal_error": None,
+            "max_marginal_error": None,
+            "epsilon": float(epsilon),
+            "sinkhorn_iters": int(n_iters),
+        }
     metadata = {
         "distance_mode": (
             "fused_gromov_wasserstein"
@@ -463,6 +507,7 @@ def compute_pairwise_ot_distance_matrix(
         "global_dense_symmetrization": False,
         "epsilon": float(epsilon),
         "sinkhorn_iters": int(n_iters),
+        "sinkhorn_diagnostics": sinkhorn_diagnostics,
         "anchor_weight": float(anchor_weight),
         "fgw_alpha": float(fgw_alpha) if use_fgw else None,
         "fgw_iters": int(fgw_iters) if use_fgw else None,

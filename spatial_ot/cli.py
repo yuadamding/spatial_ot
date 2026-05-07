@@ -118,7 +118,12 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
             "UMAP is not generally metric-preserving."
         ),
     )
-    parser.add_argument("--radius-um", type=float, default=50.0)
+    parser.add_argument(
+        "--radius-um",
+        type=float,
+        default=50.0,
+        help="Maximum same-sample neighbor radius in microns. Default: 50.",
+    )
     parser.add_argument(
         "--max-neighbors",
         type=int,

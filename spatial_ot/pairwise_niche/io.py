@@ -142,6 +142,12 @@ def _batch_embedding_note(
     method = str(embedding_method or "").strip().lower()
     active_correction = False
     note = None
+    warning = None
+    if sample_count > 1 and method in {"pca", "svd"}:
+        warning = (
+            "PCA/SVD expression embedding does not perform batch correction. "
+            "For cross-sample niche discovery, use a precomputed batch-corrected latent space."
+        )
     if expression_batch_key and sample_count > 1 and method in {"pca", "svd"}:
         note = (
             "expression_batch_key is recorded for provenance only; PCA/SVD embedding "
@@ -151,6 +157,7 @@ def _batch_embedding_note(
     return {
         "expression_batch_key": expression_batch_key,
         "batch_correction_applied_by_pairwise_niche": active_correction,
+        "warning": warning,
         "note": note,
     }
 

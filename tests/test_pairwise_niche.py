@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+
 import numpy as np
 import pandas as pd
 import anndata as ad
@@ -7,6 +9,7 @@ import pytest
 import torch
 
 from spatial_ot.pairwise_niche import (
+    PairwiseNicheConfig,
     assign_high_contrast_colors,
     build_instance_neighbor_indices,
     build_local_measures,
@@ -30,10 +33,11 @@ from spatial_ot.pairwise_niche.fgw import fused_gromov_wasserstein_block
 from spatial_ot.pairwise_niche.local_measure import _cap_neighbors
 from spatial_ot.pairwise_niche.sinkhorn import (
     pairwise_sqdist_block,
+    sinkhorn_ot_marginal_error_block,
     sinkhorn_ot_block,
     sinkhorn_self_cost_batch,
 )
-from spatial_ot.cli import _parse_int_list
+from spatial_ot.cli import _add_pairwise_niche_args, _parse_int_list
 
 
 def _toy_cohort(n_per_sample: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -53,6 +57,30 @@ def _toy_cohort(n_per_sample: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarr
     coords = np.vstack([coords_a, coords_b]).astype(np.float32)
     samples = np.asarray(["A"] * n_per_sample + ["B"] * n_per_sample, dtype=object)
     return features, coords, samples
+
+
+def test_default_neighbor_radius_is_50um() -> None:
+    assert PairwiseNicheConfig(
+        feature_obsm_key="X",
+        spatial_x_key="x",
+        spatial_y_key="y",
+    ).radius_um == 50.0
+
+    parser = argparse.ArgumentParser()
+    _add_pairwise_niche_args(parser)
+    args = parser.parse_args(
+        [
+            "--input-h5ad",
+            "input.h5ad",
+            "--output-dir",
+            "out",
+            "--spatial-x-key",
+            "x",
+            "--spatial-y-key",
+            "y",
+        ]
+    )
+    assert args.radius_um == 50.0
 
 
 def test_pairwise_sqdist_block_matches_broadcasted_cost() -> None:
@@ -120,6 +148,23 @@ def test_sinkhorn_ignores_zero_weight_padding() -> None:
         n_iters=8,
     )
     torch.testing.assert_close(padded, active, atol=1e-6, rtol=1e-6)
+
+
+def test_sinkhorn_marginal_error_block_reports_small_error() -> None:
+    generator = torch.Generator().manual_seed(456)
+    tokens = torch.randn(3, 4, 2, generator=generator)
+    weights = torch.rand(3, 4, generator=generator)
+    errors = sinkhorn_ot_marginal_error_block(
+        tokens,
+        weights,
+        tokens,
+        weights,
+        epsilon=0.5,
+        n_iters=120,
+    )
+    assert errors.shape == (3, 3)
+    assert torch.isfinite(errors).all()
+    assert float(errors.max()) < 1e-3
 
 
 def test_fgw_ignores_zero_weight_padding() -> None:
@@ -454,6 +499,8 @@ def test_pairwise_ot_matrix_is_symmetric_with_zero_diagonal() -> None:
     )
     assert metadata["distance_mode"] == "debiased_entropic_transport"
     assert metadata["returns_plan_transport_cost_only"]
+    assert metadata["sinkhorn_diagnostics"]["sampled_pairs"] > 0
+    assert np.isfinite(metadata["sinkhorn_diagnostics"]["max_marginal_error"])
     assert distance.shape == (8, 8)
     np.testing.assert_allclose(distance, distance.T, atol=1e-5)
     np.testing.assert_allclose(np.diag(distance), 0.0)
@@ -887,6 +934,7 @@ def test_pairwise_niche_h5ad_end_to_end(tmp_path) -> None:
     assert (output_dir / "pairwise_niche_model" / "cluster_medoids.json").exists()
     assert summary["reference_model_bundle"]["transform_command_available"] is False
     assert summary["batch_embedding"]["batch_correction_applied_by_pairwise_niche"] is False
+    assert "does not perform batch correction" in summary["batch_embedding"]["warning"]
     assert summary["method_semantics"]["anchor_expression_enters_twice"] is False
     assert summary["clustering"]["model_selection"]["selected_n_clusters"] in {2, 3}
     np.testing.assert_allclose(out.obsp["cell_ot_dissimilarity"], out.obsp["cell_ot_dissimilarity"].T)

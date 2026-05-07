@@ -13,11 +13,40 @@ def _log_normalized_weights(weights: torch.Tensor) -> torch.Tensor:
     """Return log normalized weights while preserving exact zero mass."""
 
     normalized = _normalize_weights(weights)
+    return _log_from_normalized_weights(normalized)
+
+
+def _log_from_normalized_weights(normalized: torch.Tensor) -> torch.Tensor:
     return torch.where(
         normalized > 0,
         torch.log(normalized.clamp_min(1e-45)),
         torch.full_like(normalized, -torch.inf),
     )
+
+
+def _sinkhorn_plan_and_weights(
+    cost: torch.Tensor,
+    source_weights: torch.Tensor,
+    target_weights: torch.Tensor,
+    *,
+    epsilon: float = 0.05,
+    n_iters: int = 50,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if cost.ndim != 3:
+        raise ValueError("cost must have shape (batch, n_source, n_target).")
+    eps = max(float(epsilon), 1e-6)
+    a = _normalize_weights(source_weights.to(device=cost.device, dtype=cost.dtype))
+    b = _normalize_weights(target_weights.to(device=cost.device, dtype=cost.dtype))
+    log_a = _log_from_normalized_weights(a)
+    log_b = _log_from_normalized_weights(b)
+    log_k = -cost / eps
+    log_u = torch.zeros_like(log_a)
+    log_v = torch.zeros_like(log_b)
+    for _ in range(max(int(n_iters), 1)):
+        log_u = log_a - torch.logsumexp(log_k + log_v[:, None, :], dim=2)
+        log_v = log_b - torch.logsumexp(log_k.transpose(1, 2) + log_u[:, None, :], dim=2)
+    plan = torch.exp(log_u[:, :, None] + log_k + log_v[:, None, :])
+    return plan, a, b
 
 
 def batched_sinkhorn_cost(
@@ -30,19 +59,36 @@ def batched_sinkhorn_cost(
 ) -> torch.Tensor:
     """Return transport costs under entropy-regularized Sinkhorn plans."""
 
-    if cost.ndim != 3:
-        raise ValueError("cost must have shape (batch, n_source, n_target).")
-    eps = max(float(epsilon), 1e-6)
-    log_a = _log_normalized_weights(source_weights.to(device=cost.device, dtype=cost.dtype))
-    log_b = _log_normalized_weights(target_weights.to(device=cost.device, dtype=cost.dtype))
-    log_k = -cost / eps
-    log_u = torch.zeros_like(log_a)
-    log_v = torch.zeros_like(log_b)
-    for _ in range(max(int(n_iters), 1)):
-        log_u = log_a - torch.logsumexp(log_k + log_v[:, None, :], dim=2)
-        log_v = log_b - torch.logsumexp(log_k.transpose(1, 2) + log_u[:, None, :], dim=2)
-    plan = torch.exp(log_u[:, :, None] + log_k + log_v[:, None, :])
+    plan, _, _ = _sinkhorn_plan_and_weights(
+        cost,
+        source_weights,
+        target_weights,
+        epsilon=epsilon,
+        n_iters=n_iters,
+    )
     return torch.sum(plan * cost, dim=(1, 2))
+
+
+def _batched_sinkhorn_marginal_error(
+    cost: torch.Tensor,
+    source_weights: torch.Tensor,
+    target_weights: torch.Tensor,
+    *,
+    epsilon: float = 0.05,
+    n_iters: int = 50,
+) -> torch.Tensor:
+    """Return per-plan max marginal errors for sampled Sinkhorn diagnostics."""
+
+    plan, a, b = _sinkhorn_plan_and_weights(
+        cost,
+        source_weights,
+        target_weights,
+        epsilon=epsilon,
+        n_iters=n_iters,
+    )
+    row_error = torch.amax(torch.abs(plan.sum(dim=2) - a), dim=1)
+    col_error = torch.amax(torch.abs(plan.sum(dim=1) - b), dim=1)
+    return torch.maximum(row_error, col_error)
 
 
 def pairwise_sqdist_block(tokens_a: torch.Tensor, tokens_b: torch.Tensor) -> torch.Tensor:
@@ -96,6 +142,22 @@ def sinkhorn_ot_block(
 ) -> torch.Tensor:
     """Compute an A x B block of balanced Sinkhorn OT costs."""
 
+    cost, a, b, a_count, b_count = _pairwise_problem(
+        tokens_a,
+        weights_a,
+        tokens_b,
+        weights_b,
+    )
+    out = batched_sinkhorn_cost(cost, a, b, epsilon=epsilon, n_iters=n_iters)
+    return out.reshape(a_count, b_count)
+
+
+def _pairwise_problem(
+    tokens_a: torch.Tensor,
+    weights_a: torch.Tensor,
+    tokens_b: torch.Tensor,
+    weights_b: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
     if tokens_a.ndim != 3 or tokens_b.ndim != 3:
         raise ValueError("tokens_a and tokens_b must have shape (batch, support, dim).")
     a_count, support_a, _ = tokens_a.shape
@@ -111,5 +173,31 @@ def sinkhorn_ot_block(
     b = weights_b[None, :, :].expand(a_count, b_count, support_b).reshape(
         a_count * b_count, support_b
     )
-    out = batched_sinkhorn_cost(cost, a, b, epsilon=epsilon, n_iters=n_iters)
+    return cost, a, b, int(a_count), int(b_count)
+
+
+def sinkhorn_ot_marginal_error_block(
+    tokens_a: torch.Tensor,
+    weights_a: torch.Tensor,
+    tokens_b: torch.Tensor,
+    weights_b: torch.Tensor,
+    *,
+    epsilon: float = 0.05,
+    n_iters: int = 50,
+) -> torch.Tensor:
+    """Compute sampled A x B Sinkhorn marginal errors for diagnostics."""
+
+    cost, a, b, a_count, b_count = _pairwise_problem(
+        tokens_a,
+        weights_a,
+        tokens_b,
+        weights_b,
+    )
+    out = _batched_sinkhorn_marginal_error(
+        cost,
+        a,
+        b,
+        epsilon=epsilon,
+        n_iters=n_iters,
+    )
     return out.reshape(a_count, b_count)

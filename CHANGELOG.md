@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.0.13
+
+- Add sampled Sinkhorn marginal-error diagnostics to pairwise OT distance metadata.
+- Warn multi-sample PCA/SVD runs that pairwise-niche records batch keys but does not perform batch correction.
+- Make the CLI `--radius-um` help explicitly state the 50 µm default.
+- Add regression tests for Sinkhorn diagnostics, batch-correction warnings, and the 50 µm default neighbor radius.
+
 ## 3.0.12
 
 - Use adaptive exact-run block size before debiased Sinkhorn self-cost computation so `--block-size 0` does not fall back to one-cell self-cost batches.
