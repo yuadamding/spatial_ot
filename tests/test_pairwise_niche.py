@@ -20,7 +20,12 @@ from spatial_ot.pairwise_niche import (
     run_pairwise_niche_on_h5ad,
     save_expression_embedding_state,
 )
-from spatial_ot.pairwise_niche.cluster import ot_knn_affinity, ot_knn_distance_graph
+from spatial_ot.pairwise_niche.cluster import (
+    _sampled_positive_distance_scale,
+    ot_knn_affinity,
+    ot_knn_distance_graph,
+)
+import spatial_ot.pairwise_niche.distance_matrix as distance_matrix_module
 from spatial_ot.pairwise_niche.fgw import fused_gromov_wasserstein_block
 from spatial_ot.pairwise_niche.local_measure import _cap_neighbors
 from spatial_ot.pairwise_niche.sinkhorn import (
@@ -243,7 +248,6 @@ def test_local_measures_can_skip_structure_matrices_for_sinkhorn_mode() -> None:
         radius_um=3.0,
         max_neighbors=2,
         include_anchor=True,
-        build_structure_matrices=False,
     )
     assert measures.structure_matrices is None
     assert measures.metadata["structure_matrices_built"] is False
@@ -308,6 +312,7 @@ def test_local_measure_fgw_structure_modes_are_recorded() -> None:
         max_neighbors=3,
         include_anchor=True,
         fgw_structure_mode="complete_euclidean",
+        build_structure_matrices=True,
     )
     topology = build_local_measures(
         expression_embedding=features,
@@ -318,6 +323,7 @@ def test_local_measure_fgw_structure_modes_are_recorded() -> None:
         include_anchor=True,
         fgw_structure_mode="local_knn_shortest_path",
         fgw_structure_knn=1,
+        build_structure_matrices=True,
     )
     assert complete.metadata["uses_graph_topology_structure"] is False
     assert topology.metadata["uses_graph_topology_structure"] is True
@@ -332,6 +338,7 @@ def test_local_measure_fgw_structure_modes_are_recorded() -> None:
         max_neighbors=3,
         include_anchor=True,
         fgw_structure_mode="adjacency",
+        build_structure_matrices=True,
     )
     assert edge_distance.metadata["fgw_structure_requested_mode"] == "adjacency"
     assert edge_distance.metadata["fgw_structure_mode"] == "binary_edge_distance"
@@ -359,6 +366,7 @@ def test_local_measure_reports_disconnected_shortest_path_structures() -> None:
         include_anchor=True,
         fgw_structure_mode="radius_graph_shortest_path",
         fgw_structure_radius_fraction=0.2,
+        build_structure_matrices=True,
     )
     assert measures.metadata["fgw_structure_mode"] == "radius_graph_shortest_path"
     assert measures.metadata["fgw_structure_inf_fill_policy"] == "2x_max_finite_path"
@@ -433,6 +441,7 @@ def test_pairwise_ot_matrix_is_symmetric_with_zero_diagonal() -> None:
         max_neighbors=2,
         include_anchor=True,
         seed=13,
+        build_structure_matrices=True,
     )
     distance, metadata = compute_pairwise_ot_distance_matrix(
         measures=measures,
@@ -462,6 +471,7 @@ def test_local_measure_structure_matrix_and_fgw_distance() -> None:
         max_neighbors=2,
         include_anchor=True,
         seed=13,
+        build_structure_matrices=True,
     )
     assert measures.structure_matrices is not None
     assert measures.structure_matrices.shape == (8, 3, 3)
@@ -505,6 +515,7 @@ def test_pairwise_fgw_matrix_uses_graph_structure_and_scaled_features() -> None:
         max_neighbors=2,
         include_anchor=True,
         seed=13,
+        build_structure_matrices=True,
     )
     distance, metadata = compute_pairwise_ot_distance_matrix(
         measures=measures,
@@ -565,6 +576,39 @@ def test_pairwise_distance_uses_adaptive_block_size_metadata() -> None:
     assert distance.shape == (6, 6)
 
 
+def test_adaptive_block_size_is_used_for_self_cost_batches(monkeypatch) -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=3)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=2)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+    )
+    observed_block_sizes: list[int] = []
+    original = distance_matrix_module._self_sinkhorn_costs
+
+    def wrapped_self_costs(*args, **kwargs):
+        observed_block_sizes.append(int(kwargs["block_size"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(distance_matrix_module, "_self_sinkhorn_costs", wrapped_self_costs)
+    _, metadata = compute_pairwise_ot_distance_matrix(
+        measures=measures,
+        anchor_embedding=embedding.values,
+        block_size=0,
+        target_block_memory_gib=0.000001,
+        device="cpu",
+        n_iters=3,
+        max_exact_cells=20,
+    )
+    assert observed_block_sizes == [int(metadata["block_size"])]
+    assert int(metadata["self_cost_block_size"]) == int(metadata["block_size"])
+    assert int(metadata["self_cost_block_size"]) > 1
+
+
 def test_pairwise_ot_rejects_unbounded_or_unknown_distance_modes() -> None:
     features, coords, samples = _toy_cohort(n_per_sample=3)
     embedding = fit_expression_embedding(features, method="pca", embedding_dim=2)
@@ -596,9 +640,18 @@ def test_pairwise_ot_rejects_unbounded_or_unknown_distance_modes() -> None:
             max_exact_cells=20,
             max_ot_work_units=1.0,
         )
+    fgw_measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+        build_structure_matrices=True,
+    )
     with pytest.raises(ValueError, match="FGW work estimate"):
         compute_pairwise_ot_distance_matrix(
-            measures=measures,
+            measures=fgw_measures,
             anchor_embedding=embedding.values,
             distance_mode="fused_gromov_wasserstein",
             max_exact_cells=20,
@@ -664,6 +717,26 @@ def test_clustering_uses_precomputed_distance_not_kmeans() -> None:
     global_affinity = ot_knn_affinity(distance, k=1, scaling="global")
     np.testing.assert_allclose(affinity.toarray(), affinity.toarray().T)
     np.testing.assert_allclose(global_affinity.toarray(), global_affinity.toarray().T)
+
+
+def test_ot_knn_scale_estimation_samples_rows_for_large_distances() -> None:
+    class RowOnlyDistance:
+        shape = (600, 600)
+
+        def __init__(self) -> None:
+            self.rows: list[int] = []
+
+        def __getitem__(self, row):
+            assert isinstance(row, (int, np.integer))
+            self.rows.append(int(row))
+            values = np.linspace(0.1, 2.0, self.shape[1], dtype=np.float32)
+            values[int(row)] = 0.0
+            return values
+
+    distance = RowOnlyDistance()
+    scale = _sampled_positive_distance_scale(distance, max_rows=7, seed=11)
+    assert scale > 0
+    assert len(distance.rows) == 7
 
 
 def test_cluster_model_selection_chooses_candidate_k() -> None:

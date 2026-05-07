@@ -325,10 +325,16 @@ def compute_pairwise_ot_distance_matrix(
             measures.metadata,
             mode=str(fgw_node_feature_mode),
         )
+    bs, block_metadata = choose_pairwise_block_size(
+        support_size=int(tokens.shape[1]),
+        requested_block_size=int(block_size),
+        target_memory_gib=target_block_memory_gib,
+        use_fgw=bool(use_fgw),
+    )
     self_costs = (
         _self_sinkhorn_costs(
             measures,
-            block_size=max(int(block_size), 1),
+            block_size=int(bs),
             device=resolved_device,
             epsilon=float(epsilon),
             n_iters=int(n_iters),
@@ -348,13 +354,6 @@ def compute_pairwise_ot_distance_matrix(
             seed=int(measures.metadata.get("seed", 1337)),
         )
         structures = structures / np.float32(np.sqrt(max(fgw_structure_scale, 1e-8)))
-
-    bs, block_metadata = choose_pairwise_block_size(
-        support_size=int(tokens.shape[1]),
-        requested_block_size=int(block_size),
-        target_memory_gib=target_block_memory_gib,
-        use_fgw=bool(use_fgw),
-    )
     for a_start in range(0, n, bs):
         a_stop = min(a_start + bs, n)
         width_a = int(np.max(active_counts[a_start:a_stop]))
@@ -519,6 +518,7 @@ def compute_pairwise_ot_distance_matrix(
         else None,
         "fgw_structure_cost_scale": float(fgw_structure_scale) if use_fgw else None,
         "block_size": int(bs),
+        "self_cost_block_size": int(bs) if debiased and not use_fgw else None,
         **block_metadata,
         "device": str(resolved_device),
         "n_cells": int(n),

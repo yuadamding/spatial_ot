@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.0.12
+
+- Use adaptive exact-run block size before debiased Sinkhorn self-cost computation so `--block-size 0` does not fall back to one-cell self-cost batches.
+- Default direct `build_local_measures()` calls to lazy structure-matrix construction; H5AD FGW runs still opt in explicitly.
+- Estimate OT-kNN positive distance scale from sampled rows for large matrices instead of materializing all finite positive entries.
+- Add regression tests for adaptive self-cost batching and sampled OT-kNN scale estimation.
+
 ## 3.0.11
 
 - Replace broadcasted OT/FGW feature-cost tensors with Gram-style squared-distance blocks to reduce exact full-matrix peak memory.

@@ -493,20 +493,43 @@ def _knn_orders(distance: np.ndarray, *, k: int) -> list[np.ndarray]:
     return [_ordered_neighbors(distance, row, neighbors) for row in range(n)]
 
 
+def _sampled_positive_distance_scale(
+    distance: np.ndarray,
+    *,
+    max_rows: int = 512,
+    seed: int = 1337,
+) -> float:
+    n = int(distance.shape[0])
+    if n == 0:
+        return 1.0
+    if n <= int(max_rows):
+        finite = np.asarray(distance, dtype=np.float32)
+        finite = finite[np.isfinite(finite) & (finite > 0)]
+        return max(float(np.median(finite)) if finite.size else 1.0, 1e-8)
+    rng = np.random.default_rng(int(seed))
+    rows = rng.choice(n, size=min(int(max_rows), n), replace=False)
+    medians: list[float] = []
+    for row in rows:
+        values = np.asarray(distance[int(row)], dtype=np.float32)
+        values = values[np.isfinite(values) & (values > 0)]
+        if values.size:
+            medians.append(float(np.median(values)))
+    return max(float(np.median(medians)) if medians else 1.0, 1e-8)
+
+
 def ot_knn_affinity(
     distance: np.ndarray,
     *,
     k: int = 30,
     scaling: str = "local",
 ) -> sparse.csr_matrix:
-    d = np.asarray(distance, dtype=np.float32)
+    d = np.asarray(distance)
     n = int(d.shape[0])
     orders = _knn_orders(d, k=int(k))
     rows: list[int] = []
     cols: list[int] = []
     data: list[float] = []
-    finite = d[np.isfinite(d) & (d > 0)]
-    global_sigma = max(float(np.median(finite)) if finite.size else 1.0, 1e-8)
+    global_sigma = _sampled_positive_distance_scale(d)
     requested_scaling = str(scaling or "local").strip().lower()
     if requested_scaling not in {"local", "global"}:
         raise ValueError("ot_affinity_scaling must be local or global.")
@@ -536,7 +559,7 @@ def ot_knn_affinity(
 
 
 def ot_knn_distance_graph(distance: np.ndarray, *, k: int = 30) -> sparse.csr_matrix:
-    d = np.asarray(distance, dtype=np.float32)
+    d = np.asarray(distance)
     n = int(d.shape[0])
     rows: list[int] = []
     cols: list[int] = []

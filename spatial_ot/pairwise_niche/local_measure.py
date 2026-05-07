@@ -352,7 +352,7 @@ def build_local_measures(
     fgw_structure_mode: str = "local_knn_shortest_path",
     fgw_structure_knn: int = 6,
     fgw_structure_radius_fraction: float = 0.5,
-    build_structure_matrices: bool = True,
+    build_structure_matrices: bool = False,
     expression_weight: float = 1.0,
     spatial_weight: float = 0.25,
     distance_weight: float = 0.10,
