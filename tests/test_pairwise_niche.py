@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import anndata as ad
 import pytest
+import torch
 
 from spatial_ot.pairwise_niche import (
     assign_high_contrast_colors,
@@ -22,6 +23,11 @@ from spatial_ot.pairwise_niche import (
 from spatial_ot.pairwise_niche.cluster import ot_knn_affinity, ot_knn_distance_graph
 from spatial_ot.pairwise_niche.fgw import fused_gromov_wasserstein_block
 from spatial_ot.pairwise_niche.local_measure import _cap_neighbors
+from spatial_ot.pairwise_niche.sinkhorn import (
+    pairwise_sqdist_block,
+    sinkhorn_ot_block,
+    sinkhorn_self_cost_batch,
+)
 from spatial_ot.cli import _parse_int_list
 
 
@@ -42,6 +48,128 @@ def _toy_cohort(n_per_sample: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarr
     coords = np.vstack([coords_a, coords_b]).astype(np.float32)
     samples = np.asarray(["A"] * n_per_sample + ["B"] * n_per_sample, dtype=object)
     return features, coords, samples
+
+
+def test_pairwise_sqdist_block_matches_broadcasted_cost() -> None:
+    generator = torch.Generator().manual_seed(123)
+    tokens_a = torch.randn(3, 4, 5, generator=generator)
+    tokens_b = torch.randn(2, 6, 5, generator=generator)
+    expected = (
+        tokens_a[:, None, :, None, :] - tokens_b[None, :, None, :, :]
+    ).pow(2).sum(dim=-1)
+    observed = pairwise_sqdist_block(tokens_a, tokens_b)
+    assert observed.shape == (3, 2, 4, 6)
+    torch.testing.assert_close(observed, expected, atol=1e-6, rtol=1e-6)
+
+
+def test_sinkhorn_self_cost_batch_matches_scalar_loop() -> None:
+    generator = torch.Generator().manual_seed(321)
+    tokens = torch.randn(4, 5, 3, generator=generator)
+    weights = torch.rand(4, 5, generator=generator)
+    observed = sinkhorn_self_cost_batch(tokens, weights, epsilon=0.1, n_iters=5)
+    expected = torch.stack(
+        [
+            sinkhorn_ot_block(
+                tokens[row : row + 1],
+                weights[row : row + 1],
+                tokens[row : row + 1],
+                weights[row : row + 1],
+                epsilon=0.1,
+                n_iters=5,
+            ).reshape(())
+            for row in range(tokens.shape[0])
+        ]
+    )
+    torch.testing.assert_close(observed, expected, atol=1e-6, rtol=1e-6)
+
+
+def test_sinkhorn_ignores_zero_weight_padding() -> None:
+    active_a = torch.tensor([[[0.0, 0.0], [1.0, 0.0]]], dtype=torch.float32)
+    active_b = torch.tensor([[[0.0, 1.0], [1.0, 1.0], [2.0, 1.0]]], dtype=torch.float32)
+    weights_a = torch.tensor([[0.4, 0.6]], dtype=torch.float32)
+    weights_b = torch.tensor([[0.2, 0.3, 0.5]], dtype=torch.float32)
+    padded_a = torch.cat(
+        [active_a, torch.full((1, 2, 2), 1000.0, dtype=torch.float32)],
+        dim=1,
+    )
+    padded_b = torch.cat(
+        [active_b, torch.full((1, 1, 2), -1000.0, dtype=torch.float32)],
+        dim=1,
+    )
+    padded_weights_a = torch.tensor([[0.4, 0.6, 0.0, 0.0]], dtype=torch.float32)
+    padded_weights_b = torch.tensor([[0.2, 0.3, 0.5, 0.0]], dtype=torch.float32)
+    active = sinkhorn_ot_block(
+        active_a,
+        weights_a,
+        active_b,
+        weights_b,
+        epsilon=0.1,
+        n_iters=8,
+    )
+    padded = sinkhorn_ot_block(
+        padded_a,
+        padded_weights_a,
+        padded_b,
+        padded_weights_b,
+        epsilon=0.1,
+        n_iters=8,
+    )
+    torch.testing.assert_close(padded, active, atol=1e-6, rtol=1e-6)
+
+
+def test_fgw_ignores_zero_weight_padding() -> None:
+    features_a = torch.tensor([[[0.0, 0.0], [1.0, 0.0]]], dtype=torch.float32)
+    features_b = torch.tensor([[[0.0, 1.0], [1.0, 1.0], [2.0, 1.0]]], dtype=torch.float32)
+    structures_a = torch.tensor([[[0.0, 1.0], [1.0, 0.0]]], dtype=torch.float32)
+    structures_b = torch.tensor(
+        [[[0.0, 1.0, 2.0], [1.0, 0.0, 1.0], [2.0, 1.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    weights_a = torch.tensor([[0.4, 0.6]], dtype=torch.float32)
+    weights_b = torch.tensor([[0.2, 0.3, 0.5]], dtype=torch.float32)
+    padded_features_a = torch.cat(
+        [features_a, torch.full((1, 2, 2), 1000.0, dtype=torch.float32)],
+        dim=1,
+    )
+    padded_features_b = torch.cat(
+        [features_b, torch.full((1, 1, 2), -1000.0, dtype=torch.float32)],
+        dim=1,
+    )
+    padded_structures_a = torch.zeros(1, 4, 4, dtype=torch.float32)
+    padded_structures_b = torch.zeros(1, 4, 4, dtype=torch.float32)
+    padded_structures_a[:, :2, :2] = structures_a
+    padded_structures_b[:, :3, :3] = structures_b
+    padded_structures_a[:, 2:, :] = 999.0
+    padded_structures_a[:, :, 2:] = 999.0
+    padded_structures_b[:, 3:, :] = 999.0
+    padded_structures_b[:, :, 3:] = 999.0
+    padded_weights_a = torch.tensor([[0.4, 0.6, 0.0, 0.0]], dtype=torch.float32)
+    padded_weights_b = torch.tensor([[0.2, 0.3, 0.5, 0.0]], dtype=torch.float32)
+    active = fused_gromov_wasserstein_block(
+        features_a,
+        structures_a,
+        weights_a,
+        features_b,
+        structures_b,
+        weights_b,
+        alpha=0.3,
+        epsilon=0.1,
+        sinkhorn_iters=5,
+        fgw_iters=2,
+    )
+    padded = fused_gromov_wasserstein_block(
+        padded_features_a,
+        padded_structures_a,
+        padded_weights_a,
+        padded_features_b,
+        padded_structures_b,
+        padded_weights_b,
+        alpha=0.3,
+        epsilon=0.1,
+        sinkhorn_iters=5,
+        fgw_iters=2,
+    )
+    torch.testing.assert_close(padded, active, atol=1e-6, rtol=1e-6)
 
 
 def test_expression_embedding_does_not_use_spatial_coordinates() -> None:
@@ -103,6 +231,33 @@ def test_local_measures_do_not_cross_samples_and_preserve_rare_state() -> None:
     for row, ids in enumerate(measures.neighbor_indices):
         valid = ids[ids >= 0]
         assert set(samples[valid]) == {samples[row]}
+
+
+def test_local_measures_can_skip_structure_matrices_for_sinkhorn_mode() -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=4)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+        build_structure_matrices=False,
+    )
+    assert measures.structure_matrices is None
+    assert measures.metadata["structure_matrices_built"] is False
+    distance, metadata = compute_pairwise_ot_distance_matrix(
+        measures=measures,
+        anchor_embedding=embedding.values,
+        block_size=2,
+        device="cpu",
+        n_iters=3,
+        max_exact_cells=20,
+    )
+    assert metadata["distance_mode"] == "debiased_entropic_transport"
+    assert distance.shape == (8, 8)
+    np.testing.assert_allclose(distance, distance.T, atol=1e-5)
 
 
 def test_radial_shell_state_cap_samples_high_mass_strata_when_overfull() -> None:

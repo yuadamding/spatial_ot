@@ -26,7 +26,13 @@ from .local_measure import (
     build_instance_neighbor_indices,
     build_local_measures,
 )
-from .sinkhorn import batched_sinkhorn_cost, sinkhorn_ot_block
+from .sinkhorn import (
+    batched_sinkhorn_cost,
+    pairwise_sqdist_block,
+    pairwise_sqdist_self,
+    sinkhorn_ot_block,
+    sinkhorn_self_cost_batch,
+)
 
 __all__ = [
     "ClusterResult",
@@ -49,7 +55,10 @@ __all__ = [
     "fused_gromov_wasserstein_block",
     "load_expression_embedding_state",
     "ot_knn_distance_graph",
+    "pairwise_sqdist_block",
+    "pairwise_sqdist_self",
     "run_pairwise_niche_on_h5ad",
     "save_expression_embedding_state",
     "sinkhorn_ot_block",
+    "sinkhorn_self_cost_batch",
 ]

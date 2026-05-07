@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import torch
 
+from .sinkhorn import _log_normalized_weights, pairwise_sqdist_block
+
 
 def _normalize_weights(weights: torch.Tensor) -> torch.Tensor:
     w = weights.clamp_min(0.0)
@@ -18,10 +20,8 @@ def _sinkhorn_plan(
     n_iters: int,
 ) -> torch.Tensor:
     eps = max(float(epsilon), 1e-6)
-    a = _normalize_weights(source_weights.to(device=cost.device, dtype=cost.dtype))
-    b = _normalize_weights(target_weights.to(device=cost.device, dtype=cost.dtype))
-    log_a = torch.log(a.clamp_min(1e-12))
-    log_b = torch.log(b.clamp_min(1e-12))
+    log_a = _log_normalized_weights(source_weights.to(device=cost.device, dtype=cost.dtype))
+    log_b = _log_normalized_weights(target_weights.to(device=cost.device, dtype=cost.dtype))
     log_k = -cost / eps
     log_u = torch.zeros_like(log_a)
     log_v = torch.zeros_like(log_b)
@@ -32,8 +32,7 @@ def _sinkhorn_plan(
 
 
 def _pairwise_feature_cost(features_a: torch.Tensor, features_b: torch.Tensor) -> torch.Tensor:
-    diff = features_a[:, None, :, None, :] - features_b[None, :, None, :, :]
-    return diff.pow(2).sum(dim=-1)
+    return pairwise_sqdist_block(features_a, features_b)
 
 
 def _structure_cost(

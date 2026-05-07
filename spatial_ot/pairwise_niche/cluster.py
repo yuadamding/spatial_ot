@@ -474,9 +474,17 @@ def _select_fixed_k_model(
 
 
 def _ordered_neighbors(distance: np.ndarray, row: int, limit: int | None = None) -> np.ndarray:
-    order = np.argsort(distance[row], kind="stable")
-    order = order[order != row]
-    return order if limit is None else order[:limit]
+    values = np.asarray(distance[row], dtype=np.float32)
+    if values.size <= 1:
+        return np.empty(0, dtype=np.int64)
+    if limit is None:
+        order = np.argsort(values, kind="stable")
+        return order[order != row]
+    neighbors = min(max(int(limit), 1), values.size - 1)
+    sortable = values.copy()
+    sortable[row] = np.inf
+    candidates = np.argpartition(sortable, kth=neighbors - 1)[:neighbors]
+    return candidates[np.argsort(sortable[candidates], kind="stable")]
 
 
 def _knn_orders(distance: np.ndarray, *, k: int) -> list[np.ndarray]:
@@ -504,11 +512,10 @@ def ot_knn_affinity(
         raise ValueError("ot_affinity_scaling must be local or global.")
     local_sigma = np.full(n, global_sigma, dtype=np.float32)
     if requested_scaling == "local" and n > 1:
-        for row in range(n):
-            ordered = _ordered_neighbors(d, row)
-            positive = d[row, ordered][d[row, ordered] > 0]
+        for row, order in enumerate(orders):
+            positive = d[row, order][d[row, order] > 0]
             if positive.size:
-                local_sigma[row] = float(positive[min(positive.size - 1, orders[row].size - 1)])
+                local_sigma[row] = float(positive[-1])
     for row, order in enumerate(orders):
         rows.extend([row] * int(order.size))
         cols.extend(int(col) for col in order)

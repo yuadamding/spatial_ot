@@ -7,7 +7,7 @@ import torch
 
 from .local_measure import LocalMeasureSet
 from .fgw import fused_gromov_wasserstein_block
-from .sinkhorn import sinkhorn_ot_block
+from .sinkhorn import sinkhorn_ot_block, sinkhorn_self_cost_batch
 
 
 def _resolve_device(device: str) -> torch.device:
@@ -186,22 +186,32 @@ def _self_sinkhorn_costs(
 ) -> np.ndarray:
     n = int(measures.tokens.shape[0])
     out = np.zeros(n, dtype=np.float32)
+    active_counts = np.maximum(np.asarray(measures.mask, dtype=bool).sum(axis=1), 1)
     for start in range(0, n, max(int(block_size), 1)):
         stop = min(start + max(int(block_size), 1), n)
-        tokens = torch.as_tensor(measures.tokens[start:stop], dtype=torch.float32, device=device)
-        weights = torch.as_tensor(measures.weights[start:stop], dtype=torch.float32, device=device)
-        values = []
-        for idx in range(stop - start):
-            value = sinkhorn_ot_block(
-                tokens[idx : idx + 1],
-                weights[idx : idx + 1],
-                tokens[idx : idx + 1],
-                weights[idx : idx + 1],
+        width = int(np.max(active_counts[start:stop]))
+        tokens = torch.as_tensor(
+            measures.tokens[start:stop, :width],
+            dtype=torch.float32,
+            device=device,
+        )
+        weights = torch.as_tensor(
+            measures.weights[start:stop, :width],
+            dtype=torch.float32,
+            device=device,
+        )
+        out[start:stop] = (
+            sinkhorn_self_cost_batch(
+                tokens,
+                weights,
                 epsilon=epsilon,
                 n_iters=n_iters,
             )
-            values.append(value.reshape(()))
-        out[start:stop] = torch.stack(values).detach().cpu().numpy().astype(np.float32)
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+        )
     return out
 
 
@@ -232,6 +242,7 @@ def compute_pairwise_ot_distance_matrix(
     tokens = np.asarray(measures.tokens, dtype=np.float32)
     weights = np.asarray(measures.weights, dtype=np.float32)
     anchors = np.asarray(anchor_embedding, dtype=np.float32)
+    active_counts = np.maximum(np.asarray(measures.mask, dtype=bool).sum(axis=1), 1)
     n = int(tokens.shape[0])
     if anchors.shape[0] != n:
         raise ValueError("anchor_embedding must have one row per local measure.")
@@ -346,22 +357,40 @@ def compute_pairwise_ot_distance_matrix(
     )
     for a_start in range(0, n, bs):
         a_stop = min(a_start + bs, n)
-        tok_a = torch.as_tensor(tokens[a_start:a_stop], dtype=torch.float32, device=resolved_device)
-        w_a = torch.as_tensor(weights[a_start:a_stop], dtype=torch.float32, device=resolved_device)
+        width_a = int(np.max(active_counts[a_start:a_stop]))
+        tok_a = torch.as_tensor(
+            tokens[a_start:a_stop, :width_a],
+            dtype=torch.float32,
+            device=resolved_device,
+        )
+        w_a = torch.as_tensor(
+            weights[a_start:a_stop, :width_a],
+            dtype=torch.float32,
+            device=resolved_device,
+        )
         anchor_a = anchors[a_start:a_stop]
         for b_start in range(a_start, n, bs):
             b_stop = min(b_start + bs, n)
-            tok_b = torch.as_tensor(tokens[b_start:b_stop], dtype=torch.float32, device=resolved_device)
-            w_b = torch.as_tensor(weights[b_start:b_stop], dtype=torch.float32, device=resolved_device)
+            width_b = int(np.max(active_counts[b_start:b_stop]))
+            tok_b = torch.as_tensor(
+                tokens[b_start:b_stop, :width_b],
+                dtype=torch.float32,
+                device=resolved_device,
+            )
+            w_b = torch.as_tensor(
+                weights[b_start:b_stop, :width_b],
+                dtype=torch.float32,
+                device=resolved_device,
+            )
             if use_fgw:
                 assert structures is not None
                 struct_a = torch.as_tensor(
-                    structures[a_start:a_stop],
+                    structures[a_start:a_stop, :width_a, :width_a],
                     dtype=torch.float32,
                     device=resolved_device,
                 )
                 struct_b = torch.as_tensor(
-                    structures[b_start:b_stop],
+                    structures[b_start:b_stop, :width_b, :width_b],
                     dtype=torch.float32,
                     device=resolved_device,
                 )

@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.0.11
+
+- Replace broadcasted OT/FGW feature-cost tensors with Gram-style squared-distance blocks to reduce exact full-matrix peak memory.
+- Preserve exact zero mass for padded support points in Sinkhorn and FGW kernels.
+- Vectorize debiased Sinkhorn self-cost computation and trim each distance block to its active support width.
+- Let Sinkhorn-only H5AD runs skip local FGW structure-matrix allocation.
+- Use argpartition for OT-kNN neighbor extraction instead of full row sorts.
+- Add a representative-only Visium HD full-cohort graph export mode for exactly 100,000 representative cell graphs without materializing dense all-pairs FGW.
+- Add regression tests for Gram costs, batched self-costs, zero-weight padding, and lazy structure construction.
+
 ## 3.0.10
 
 - Avoid full-matrix dense symmetrization for memmap distance outputs by symmetrizing diagonal blocks during blockwise writes.

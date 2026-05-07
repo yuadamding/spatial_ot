@@ -50,6 +50,7 @@ def _rough_cluster_per_sample(
     full_neighbor_counts: np.ndarray,
     sample_ids: np.ndarray,
     rough_clusters_per_sample: int,
+    rough_batch_size: int | None,
     rough_spatial_weight: float,
     rough_density_weight: float,
     seed: int,
@@ -77,18 +78,23 @@ def _rough_cluster_per_sample(
             copy=False,
         )
         k = min(max(int(rough_clusters_per_sample), 1), int(idx.size))
+        batch_size = min(max(4096, k * 64), int(idx.size))
+        if rough_batch_size is not None and int(rough_batch_size) > 0:
+            batch_size = min(int(rough_batch_size), int(idx.size))
         model = MiniBatchKMeans(
             n_clusters=k,
-            batch_size=min(max(4096, k * 64), int(idx.size)),
+            batch_size=batch_size,
             n_init=3,
             random_state=int(seed) + sample_pos,
         )
         local_labels = np.asarray(model.fit_predict(rough_features), dtype=np.int32)
         centers = np.asarray(model.cluster_centers_, dtype=np.float32)
         sample_reps: list[int] = []
+        empty_local_clusters: list[int] = []
         for local_cluster in range(k):
             members_local = np.flatnonzero(local_labels == int(local_cluster))
             if members_local.size == 0:
+                empty_local_clusters.append(int(local_cluster))
                 continue
             center = centers[int(local_cluster)]
             distances = np.sum((rough_features[members_local] - center) ** 2, axis=1)
@@ -105,13 +111,41 @@ def _rough_cluster_per_sample(
                     "sample_rough_cluster_id": int(local_cluster),
                     "n_cells": int(global_members.size),
                     "representative_index": int(rep),
+                    "filler_representative": False,
                 }
             )
             next_id += 1
+        if empty_local_clusters:
+            rng = np.random.default_rng(int(seed) + sample_pos + 1000003)
+            used = np.asarray(sample_reps, dtype=np.int64)
+            candidate_pool = np.setdiff1d(idx, used, assume_unique=False)
+            if candidate_pool.size == 0:
+                candidate_pool = idx
+            extra = rng.choice(
+                candidate_pool,
+                size=len(empty_local_clusters),
+                replace=candidate_pool.size < len(empty_local_clusters),
+            )
+            for local_cluster, rep in zip(empty_local_clusters, extra, strict=False):
+                global_cluster = next_id
+                representative_indices.append(int(rep))
+                sample_reps.append(int(rep))
+                rows.append(
+                    {
+                        "rough_cluster_id": int(global_cluster),
+                        "sample_id": str(sample),
+                        "sample_rough_cluster_id": int(local_cluster),
+                        "n_cells": 0,
+                        "representative_index": int(rep),
+                        "filler_representative": True,
+                    }
+                )
+                next_id += 1
         _log(
             log_path,
             f"  {sample}: rough_clusters={len(sample_reps):,}, cells={idx.size:,}, "
-            f"median_cells_per_rough={float(np.median([row['n_cells'] for row in rows if row['sample_id'] == sample])):.1f}",
+            f"median_cells_per_rough={float(np.median([row['n_cells'] for row in rows if row['sample_id'] == sample])):.1f}, "
+            f"filler_representatives={len(empty_local_clusters):,}",
         )
     if np.any(rough_id < 0):
         raise RuntimeError("Internal error: some cells were not assigned to a rough sample cluster.")
@@ -218,6 +252,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         full_neighbor_counts=measures.full_neighbor_counts,
         sample_ids=sample_ids,
         rough_clusters_per_sample=int(args.rough_clusters_per_sample),
+        rough_batch_size=int(args.rough_batch_size) if args.rough_batch_size else None,
         rough_spatial_weight=float(args.rough_spatial_weight),
         rough_density_weight=float(args.rough_density_weight),
         seed=int(args.seed),
@@ -225,8 +260,85 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     np.save(out_dir / "rough_sample_cluster_id.npy", rough_id)
     np.save(out_dir / "rough_representative_indices.npy", representative_indices)
+    rough_table["representative_obs_name"] = adata.obs_names[representative_indices].to_numpy()
     rough_table.to_csv(out_dir / "rough_sample_clusters.csv", index=False)
     _log(log_path, f"  total_rough_clusters={representative_indices.size:,}")
+
+    rep_graph_path = out_dir / "rough_representative_cell_graphs.npz"
+    np.savez(
+        rep_graph_path,
+        representative_indices=representative_indices,
+        representative_obs_names=adata.obs_names[representative_indices].to_numpy(dtype=str),
+        sample_id=sample_ids[representative_indices].astype(str),
+        rough_cluster_id=np.arange(representative_indices.size, dtype=np.int32),
+        features=features[representative_indices],
+        structures=structures[representative_indices],
+        weights=weights[representative_indices],
+        mask=measures.mask[representative_indices],
+        full_neighbor_counts=measures.full_neighbor_counts[representative_indices],
+        retained_neighbor_counts=measures.retained_neighbor_counts[representative_indices],
+    )
+    _log(log_path, f"  representative_graph_bundle={rep_graph_path}")
+    if bool(args.representative_only):
+        summary = {
+            "active_path": "pairwise-niche-sample-rough-representative-graph-export-umap3d",
+            "input_h5ad": str(args.input_h5ad),
+            "output_dir": str(out_dir),
+            "n_cells": int(adata.n_obs),
+            "feature_obsm_key": str(args.umap_key),
+            "sample_counts": {
+                str(k): int(v)
+                for k, v in adata.obs[str(args.sample_obs_key)].astype(str).value_counts().items()
+            },
+            "cell_feature_space": {
+                "method": "precomputed_3d_umap",
+                "standardized_for_fgw": not bool(args.no_standardize_umap),
+                "allow_umap_as_feature": True,
+                "uses_spatial_coordinates": False,
+                "warning": "UMAP is used as requested for this exploratory run; it is not generally metric-preserving.",
+            },
+            "local_graph": measures.metadata,
+            "rough_clustering_summary": {
+                "method": "per_sample_minibatch_kmeans",
+                "rough_feature_space": "standardized_umap3d_plus_within_sample_xy_plus_log1p_neighbor_count",
+                "rough_clusters_per_sample": int(args.rough_clusters_per_sample),
+                "rough_spatial_weight": float(args.rough_spatial_weight),
+                "rough_density_weight": float(args.rough_density_weight),
+                "n_rough_clusters": int(representative_indices.size),
+                "representative_rule": "closest_cell_to_rough_cluster_centroid",
+                "rough_cluster_table": str(out_dir / "rough_sample_clusters.csv"),
+            },
+            "representative_graphs": {
+                "n_representative_cell_graphs": int(representative_indices.size),
+                "radius_um": float(args.radius_um),
+                "max_neighbors": int(args.max_neighbors),
+                "feature_shape": list(features[representative_indices].shape),
+                "structure_shape": list(structures[representative_indices].shape),
+                "weight_shape": list(weights[representative_indices].shape),
+                "mask_shape": list(measures.mask[representative_indices].shape),
+                "fgw_structure_mode": str(measures.metadata.get("fgw_structure_mode")),
+                **structure_norm,
+            },
+            "outputs": {
+                "summary": str(out_dir / "summary.json"),
+                "representative_graphs": str(rep_graph_path),
+                "representative_indices": str(out_dir / "rough_representative_indices.npy"),
+                "rough_cluster_ids": str(out_dir / "rough_sample_cluster_id.npy"),
+                "rough_cluster_table": str(out_dir / "rough_sample_clusters.csv"),
+                "cell_umap_3d": str(out_dir / "X_cell_umap_3d.npy"),
+                "cell_umap_3d_raw": str(out_dir / "X_cell_umap_3d_raw.npy"),
+            },
+            "dense_pairwise_fgw_skipped": True,
+            "skip_reason": "representative_only requested; 100,000 representative all-pairs FGW would require a dense 100000 x 100000 matrix and billions of pair solves.",
+            "runtime_seconds": float(time.time() - t0),
+            "seed": int(args.seed),
+        }
+        (out_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True, default=_json_default)
+        )
+        _log(log_path, "[5/9] Representative-only requested; skipping dense fine FGW.")
+        _log(log_path, f"Finished seconds: {time.time() - t0:.1f}")
+        return summary
 
     _log(log_path, "[5/9] Computing FGW matrix among all rough-cluster representative cell graphs...")
     rep_features = features[representative_indices]
@@ -283,7 +395,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     rough_table["fine_niche_int"] = rep_fine_labels
     rough_table["fine_niche"] = [f"ON{int(value)}" for value in rep_fine_labels]
-    rough_table["representative_obs_name"] = adata.obs_names[representative_indices].to_numpy()
     rough_table.to_csv(out_dir / "rough_sample_clusters.csv", index=False)
     _log(log_path, json.dumps(cluster.metadata["model_selection"], indent=2, default=_json_default)[:5000])
 
@@ -465,6 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--radius-um", type=float, default=50.0)
     parser.add_argument("--max-neighbors", type=int, default=100)
     parser.add_argument("--rough-clusters-per-sample", type=int, default=200)
+    parser.add_argument("--rough-batch-size", type=int, default=0)
     parser.add_argument("--rough-spatial-weight", type=float, default=0.25)
     parser.add_argument("--rough-density-weight", type=float, default=0.10)
     parser.add_argument("--cap-state-clusters", type=int, default=16)
@@ -497,6 +609,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--no-standardize-umap", action="store_true")
+    parser.add_argument(
+        "--representative-only",
+        action="store_true",
+        help="Export rough representative cell graphs and skip dense representative FGW/clustering.",
+    )
     return parser
 
 

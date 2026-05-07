@@ -330,6 +330,7 @@ def run_pairwise_niche_on_h5ad(
         standardize_precomputed=bool(standardize_precomputed),
         random_state=int(seed),
     )
+    requested_distance_mode = str(distance_mode or "debiased_entropic_transport").strip().lower()
     measures = build_local_measures(
         expression_embedding=embedding.values,
         coords_um=coords_um,
@@ -348,6 +349,7 @@ def run_pairwise_niche_on_h5ad(
         fgw_structure_mode=str(fgw_structure_mode),
         fgw_structure_knn=int(fgw_structure_knn),
         fgw_structure_radius_fraction=float(fgw_structure_radius_fraction),
+        build_structure_matrices=requested_distance_mode in {"fgw", "fused_gromov_wasserstein"},
         ground_cost_normalization=str(ground_cost_normalization),
         ground_cost_sample_pairs=int(ground_cost_sample_pairs),
         seed=int(seed),

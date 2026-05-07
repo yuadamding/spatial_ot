@@ -352,6 +352,7 @@ def build_local_measures(
     fgw_structure_mode: str = "local_knn_shortest_path",
     fgw_structure_knn: int = 6,
     fgw_structure_radius_fraction: float = 0.5,
+    build_structure_matrices: bool = True,
     expression_weight: float = 1.0,
     spatial_weight: float = 0.25,
     distance_weight: float = 0.10,
@@ -379,7 +380,11 @@ def build_local_measures(
     neighbor_indices = np.full((n, support), -1, dtype=np.int64)
     full_counts = np.zeros(n, dtype=np.int32)
     retained_counts = np.zeros(n, dtype=np.int32)
-    structure = np.zeros((n, support, support), dtype=np.float32)
+    structure = (
+        np.zeros((n, support, support), dtype=np.float32)
+        if bool(build_structure_matrices)
+        else None
+    )
     structure_disconnected = np.zeros(n, dtype=bool)
     requested_structure_mode = str(fgw_structure_mode)
     canonical_structure_mode = _canonical_fgw_structure_mode(requested_structure_mode)
@@ -471,15 +476,16 @@ def build_local_measures(
             weights[anchor, :count] = w_arr
             mask[anchor, :count] = True
             neighbor_indices[anchor, :count] = ids_arr
-            rel_graph = (xy[ids_arr] - xy[anchor]) / max(radius, 1e-8)
-            graph_dist, disconnected, _ = _local_structure_matrix_with_diagnostics(
-                rel_graph,
-                mode=canonical_structure_mode,
-                knn=int(fgw_structure_knn),
-                radius_fraction=float(fgw_structure_radius_fraction),
-            )
-            structure_disconnected[anchor] = bool(disconnected)
-            structure[anchor, :count, :count] = graph_dist
+            if structure is not None:
+                rel_graph = (xy[ids_arr] - xy[anchor]) / max(radius, 1e-8)
+                graph_dist, disconnected, _ = _local_structure_matrix_with_diagnostics(
+                    rel_graph,
+                    mode=canonical_structure_mode,
+                    knn=int(fgw_structure_knn),
+                    radius_fraction=float(fgw_structure_radius_fraction),
+                )
+                structure_disconnected[anchor] = bool(disconnected)
+                structure[anchor, :count, :count] = graph_dist
 
     slices = _component_slices(z.shape[1])
     scales = _fit_ground_cost_scales(
@@ -517,12 +523,13 @@ def build_local_measures(
         "fgw_structure_requested_mode": str(requested_structure_mode),
         "fgw_structure_knn": int(fgw_structure_knn),
         "fgw_structure_radius_fraction": float(fgw_structure_radius_fraction),
+        "structure_matrices_built": bool(build_structure_matrices),
         **_fgw_structure_disconnected_metadata(
             structure_disconnected,
             mode=canonical_structure_mode,
         ),
-        "uses_graph_topology_structure": str(canonical_structure_mode)
-        != "complete_euclidean",
+        "uses_graph_topology_structure": bool(build_structure_matrices)
+        and str(canonical_structure_mode) != "complete_euclidean",
         "expression_weight": float(expression_weight),
         "spatial_weight": float(spatial_weight),
         "distance_weight": float(distance_weight),
