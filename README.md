@@ -6,7 +6,7 @@ The primary method is:
 
 ```text
 cohort gene-expression embedding
-  -> same-sample cell-centered local measures or graphs
+  -> same-sample cell-centered local measures and optional structure matrices
   -> pairwise OT/FGW neighborhood dissimilarity matrix
   -> distance-based niche clustering
 ```
@@ -73,7 +73,7 @@ spatial-ot pairwise-niche fit \
   --radius-um 50 \
   --max-neighbors 32 \
   --include-anchor \
-  --anchor-weight 0.25 \
+  --anchor-weight 0 \
   --expression-weight 1.0 \
   --spatial-weight 0.25 \
   --distance-weight 0.10 \
@@ -87,7 +87,7 @@ spatial-ot pairwise-niche fit \
   --max-ot-work-units 5e11 \
   --cluster-method agglomerative \
   --candidate-n-clusters 5:30 \
-  --model-selection-metrics silhouette,calinski_harabasz,davies_bouldin,dunn
+  --model-selection-metrics silhouette,pseudo_calinski_harabasz,medoid_davies_bouldin,percentile_dunn
 ```
 
 For exploratory runs that intentionally use a precomputed 3D UMAP as the cell feature
@@ -104,7 +104,7 @@ spatial-ot pairwise-niche fit \
 UMAP is accepted only with this opt-in because it is useful for quick visual/debug
 runs but is not generally metric-preserving enough for claim-grade OT distances.
 
-Use `--distance-mode fused_gromov_wasserstein` to compare full local graph topology. In that mode, each cell graph is bounded by both `--radius-um` and `--max-neighbors`; the graph structure matrix stores pairwise spatial distances among the retained support nodes.
+Use `--distance-mode fused_gromov_wasserstein` to compare local graph structure. In that mode, each cell graph is bounded by both `--radius-um` and `--max-neighbors`. The default `--fgw-structure-mode local_knn_shortest_path` builds a retained-support kNN graph and stores shortest-path distances; `complete_euclidean`, `radius_graph_shortest_path`, and `adjacency` are also available. The default `--fgw-node-feature-mode expression_only` keeps relative spatial geometry out of the node-feature cost so FGW does not double-count it. The structure term is normalized with `--fgw-structure-normalization sampled_median` before `--fgw-alpha` is applied.
 
 Exact all-pairs OT/FGW is quadratic in the number of cells. The command intentionally refuses oversized dense exact jobs unless `--max-exact-cells` is raised, and it also guards against excessive Sinkhorn work with `--max-ot-work-units`. For full Visium HD cohorts with hundreds of thousands of cells, use sampled/landmark subsets until the approximate sparse mode is added.
 
@@ -144,34 +144,24 @@ M_i = sum_j a_ij delta([z_j, relative_x/r, relative_y/r, distance/r])
 
 The ground cost compares expression location and relative spatial organization. Clustering is performed from the precomputed OT dissimilarity matrix using agglomerative clustering, k-medoids, or Leiden on an OT-kNN affinity graph. KMeans is intentionally not used because it does not accept a precomputed dissimilarity matrix.
 
-For agglomerative or k-medoids runs, pass `--candidate-n-clusters 5:30` to select the cluster count across every K from 5 through 30. If `--n-clusters` is omitted and no candidate list is supplied, this 5:30 range is used by default. Candidates are ranked by a model-selection ensemble over precomputed-distance silhouette, distance-based Calinski-Harabasz, medoid Davies-Bouldin, and Dunn scores; customize the set with `--model-selection-metrics`. For Leiden runs, pass `--candidate-resolutions 0.4,0.6,0.8,1.0,1.2` to select a resolution with the same metric ensemble. The selected model and all candidate scores/ranks are written to `summary.json` and `adata.uns["pairwise_niche_clustering_summary"]`.
+For agglomerative or k-medoids runs, pass `--candidate-n-clusters 5:30` to select the cluster count across every K from 5 through 30. If `--n-clusters` is omitted and no candidate list is supplied, this 5:30 range is used by default. Candidates are ranked by a model-selection ensemble over precomputed-distance silhouette, pseudo-Calinski-Harabasz, medoid Davies-Bouldin, and percentile-Dunn scores; customize the set with `--model-selection-metrics`. For Leiden runs, pass `--candidate-resolutions 0.4,0.6,0.8,1.0,1.2` to select a resolution with the same metric ensemble. The selected model and all candidate scores/ranks are written to `summary.json` and `adata.uns["pairwise_niche_clustering_summary"]`.
 
 Niche colors are deterministic and high contrast. They are stored in `ot_niche_colors.json`, `adata.uns["pairwise_niche_color_map"]`, and `adata.uns["ot_niche_colors"]`; `ON12` is kept bright orange (`#ff7f00`).
 
-For graph-topology runs, `--distance-mode fused_gromov_wasserstein` compares:
+For FGW runs, `--distance-mode fused_gromov_wasserstein` compares:
 
 ```text
 node feature cost: ||z_a - z_b||^2
-graph structure cost: (C_i[a,a'] - C_k[b,b'])^2
+local structure cost: (C_i[a,a'] - C_k[b,b'])^2
 ```
 
-where `C_i` is the pairwise spatial-distance matrix inside anchor cell `i`'s retained local graph. `--fgw-alpha` controls the topology weight.
+where `C_i` is the retained local structure matrix for anchor cell `i`. By default this is a kNN shortest-path matrix over retained support nodes. Use `--fgw-structure-mode complete_euclidean` for the older complete spatial-distance structure, or `radius_graph_shortest_path` / `adjacency` for explicit radius graph structure. `--fgw-alpha` controls the normalized structure weight.
 
 By default, expression, relative-xy, and radial-distance cost contributions are normalized by sampled median component costs before user weights are applied. This keeps a 32-dimensional expression embedding from automatically overwhelming the lower-dimensional spatial terms.
 
 The default debiased distance is recorded as `debiased_entropic_transport`. It subtracts self transport costs from the entropic-plan transport cost. Metadata records that this is the plan transport cost only and does not include the entropy objective term.
 
-If `--include-anchor` and `--anchor-weight > 0` are both used, anchor expression contributes inside the local measure and as a direct anchor penalty. Set `--anchor-weight 0` for a more context-only niche run.
-
-## Baseline And QC Path
-
-The descriptor/DeepSHE command is retained as a baseline and QC workflow:
-
-```bash
-spatial-ot cell-niche fit ...
-```
-
-It writes `spatial_niche` labels from descriptor or neural embeddings. The primary method for new analyses is `pairwise-niche`, where OT dissimilarity is computed before clustering and is the clustering input.
+If `--include-anchor` and `--anchor-weight > 0` are both used, anchor expression contributes inside the local measure and as a direct anchor penalty. The default `--anchor-weight 0` is the context-first setting.
 
 ## Pool And Prepare Inputs
 
@@ -202,7 +192,6 @@ spatial-ot prepare-inputs \
 ```text
 spatial_ot/
   pairwise_niche/  # primary pairwise OT distance-matrix method
-  cell_niche/      # descriptor/DeepSHE baseline and QC workflow
   feature_source.py
   pooling.py
   cli.py
@@ -218,11 +207,12 @@ Implemented:
 - sample-isolated local spatial measures
 - shell/state-aware neighbor caps
 - exact blockwise balanced Sinkhorn OT
-- debiased Sinkhorn divergence option
-- graph-topology fused Gromov-Wasserstein distance mode
+- debiased entropic transport option
+- fused Gromov-Wasserstein distance mode over kNN, radius-graph, adjacency, or complete local structures
 - dense or memmap OT distance output
 - distance-based clustering from the precomputed OT matrix
 - connected cell-level niche instances
+- expression embedding state save/load helpers
 
 Still planned:
 

@@ -21,7 +21,7 @@ class PairwiseNicheConfig:
     radius_um: float = 50.0
     max_neighbors: int = 32
     include_anchor: bool = True
-    isolated_policy: Literal["zero_dummy", "anchor_fallback"] = "zero_dummy"
+    isolated_policy: Literal["zero_dummy", "anchor_fallback"] = "anchor_fallback"
     graph_kernel: Literal["gaussian", "uniform", "inverse_distance"] = "gaussian"
     cap_mode: Literal["radial_shell", "radial_shell_state"] = "radial_shell_state"
     cap_state_clusters: int = 16
@@ -34,7 +34,7 @@ class PairwiseNicheConfig:
         "sampled_median"
     )
     ground_cost_sample_pairs: int = 10000
-    anchor_weight: float = 0.25
+    anchor_weight: float = 0.0
 
     sinkhorn_epsilon: float = 0.05
     sinkhorn_iters: int = 50
@@ -44,13 +44,29 @@ class PairwiseNicheConfig:
         "sinkhorn_divergence",
         "fused_gromov_wasserstein",
     ] = "debiased_entropic_transport"
-    fgw_alpha: float = 0.5
+    fgw_alpha: float = 0.25
     fgw_iters: int = 5
+    fgw_node_feature_mode: Literal[
+        "expression_only",
+        "expression_plus_radial",
+        "full_token",
+    ] = "expression_only"
+    fgw_structure_mode: Literal[
+        "complete_euclidean",
+        "local_knn_shortest_path",
+        "radius_graph_shortest_path",
+        "adjacency",
+    ] = "local_knn_shortest_path"
+    fgw_structure_knn: int = 6
+    fgw_structure_radius_fraction: float = 0.5
+    fgw_structure_normalization: Literal["none", "sampled_median"] = "sampled_median"
+    fgw_structure_sample_pairs: int = 10000
     pairwise_mode: Literal["exact", "exact_blockwise"] = "exact_blockwise"
     block_size: int = 64
     device: str = "auto"
     max_exact_cells: int = 5000
     max_ot_work_units: float = 5e11
+    max_fgw_work_units: float = 1e12
     force_large_exact_ot: bool = False
     distance_store: Literal["auto", "h5ad", "npy_memmap"] = "auto"
 
@@ -58,9 +74,20 @@ class PairwiseNicheConfig:
     n_clusters: int | None = None
     candidate_n_clusters: tuple[int, ...] | None = None
     model_selection_metrics: tuple[
-        Literal["silhouette", "calinski_harabasz", "davies_bouldin", "dunn"],
+        Literal[
+            "silhouette",
+            "pseudo_calinski_harabasz",
+            "medoid_davies_bouldin",
+            "percentile_dunn",
+            "minimum_dunn",
+        ],
         ...,
-    ] = ("silhouette", "calinski_harabasz", "davies_bouldin", "dunn")
+    ] = (
+        "silhouette",
+        "pseudo_calinski_harabasz",
+        "medoid_davies_bouldin",
+        "percentile_dunn",
+    )
     ot_knn: int = 30
     ot_affinity_scaling: Literal["local", "global"] = "local"
     leiden_resolution: float = 1.0

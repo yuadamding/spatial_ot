@@ -11,12 +11,16 @@ from spatial_ot.pairwise_niche import (
     build_local_measures,
     cluster_from_distance,
     compute_pairwise_ot_distance_matrix,
+    estimate_pairwise_fgw_work,
     estimate_pairwise_ot_work,
     fit_expression_embedding,
+    load_expression_embedding_state,
     run_pairwise_niche_on_h5ad,
+    save_expression_embedding_state,
 )
 from spatial_ot.pairwise_niche.cluster import ot_knn_affinity
 from spatial_ot.pairwise_niche.fgw import fused_gromov_wasserstein_block
+from spatial_ot.pairwise_niche.local_measure import _cap_neighbors
 from spatial_ot.cli import _parse_int_list
 
 
@@ -47,6 +51,15 @@ def test_expression_embedding_does_not_use_spatial_coordinates() -> None:
     assert not bool(first.metadata["uses_spatial_coordinates"])
     np.testing.assert_allclose(first.values, second.values)
     np.testing.assert_allclose(first.state.transform(features), first.values, atol=1e-5)
+
+
+def test_expression_embedding_state_save_load_round_trip(tmp_path) -> None:
+    features, _, _ = _toy_cohort()
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=3, random_state=7)
+    path = tmp_path / "expression_state.npz"
+    save_expression_embedding_state(embedding.state, path)
+    loaded = load_expression_embedding_state(path)
+    np.testing.assert_allclose(loaded.transform(features), embedding.values, atol=1e-5)
 
 
 def test_precomputed_embedding_standardization_can_be_disabled() -> None:
@@ -91,6 +104,71 @@ def test_local_measures_do_not_cross_samples_and_preserve_rare_state() -> None:
         assert set(samples[valid]) == {samples[row]}
 
 
+def test_radial_shell_state_cap_samples_high_mass_strata_when_overfull() -> None:
+    local_indices = np.arange(12, dtype=np.int64)
+    distances = np.linspace(0.1, 0.9, 12, dtype=np.float32)
+    weights = np.ones(12, dtype=np.float32)
+    weights[-1] = 1000.0
+    state_labels = np.arange(12, dtype=np.int32)
+    chosen = _cap_neighbors(
+        local_indices=local_indices,
+        distances=distances,
+        weights=weights,
+        state_labels=state_labels,
+        radius_um=1.0,
+        max_neighbors=3,
+        radial_shells=1,
+        cap_mode="radial_shell_state",
+        rng=np.random.default_rng(1337),
+    )
+    assert 11 in local_indices[chosen]
+
+
+def test_local_measure_fgw_structure_modes_are_recorded() -> None:
+    features = np.asarray(
+        [
+            [1.0, 0.0],
+            [0.8, 0.2],
+            [0.0, 1.0],
+            [0.2, 0.8],
+        ],
+        dtype=np.float32,
+    )
+    coords = np.asarray(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    samples = np.asarray(["A", "A", "A", "A"], dtype=object)
+    complete = build_local_measures(
+        expression_embedding=features,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=2.0,
+        max_neighbors=3,
+        include_anchor=True,
+        fgw_structure_mode="complete_euclidean",
+    )
+    topology = build_local_measures(
+        expression_embedding=features,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=2.0,
+        max_neighbors=3,
+        include_anchor=True,
+        fgw_structure_mode="local_knn_shortest_path",
+        fgw_structure_knn=1,
+    )
+    assert complete.metadata["uses_graph_topology_structure"] is False
+    assert topology.metadata["uses_graph_topology_structure"] is True
+    assert topology.metadata["fgw_structure_mode"] == "local_knn_shortest_path"
+    assert not np.allclose(complete.structure_matrices, topology.structure_matrices)
+
+
 def test_local_measure_rejects_invalid_radius_and_neighbor_cap() -> None:
     features, coords, samples = _toy_cohort(n_per_sample=2)
     with pytest.raises(ValueError, match="radius_um"):
@@ -120,6 +198,7 @@ def test_isolated_no_anchor_uses_zero_dummy_not_anchor_expression() -> None:
         radius_um=1.0,
         max_neighbors=1,
         include_anchor=False,
+        isolated_policy="zero_dummy",
         seed=19,
     )
     assert np.all(measures.full_neighbor_counts == 0)
@@ -214,7 +293,7 @@ def test_local_measure_structure_matrix_and_fgw_distance() -> None:
     assert torch.isfinite(d).all()
 
 
-def test_pairwise_fgw_matrix_uses_graph_topology() -> None:
+def test_pairwise_fgw_matrix_uses_graph_structure_and_scaled_features() -> None:
     features, coords, samples = _toy_cohort(n_per_sample=4)
     embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
     measures = build_local_measures(
@@ -240,6 +319,12 @@ def test_pairwise_fgw_matrix_uses_graph_topology() -> None:
     )
     assert metadata["distance_mode"] == "fused_gromov_wasserstein"
     assert metadata["uses_graph_topology"] is True
+    assert metadata["uses_complete_spatial_structure"] is False
+    assert metadata["fgw_structure_mode"] == "local_knn_shortest_path"
+    assert metadata["fgw_node_feature_mode"] == "expression_only"
+    assert metadata["fgw_node_feature_dim"] == 3
+    assert metadata["fgw_structure_normalization"] == "sampled_median"
+    assert float(metadata["fgw_structure_cost_scale"]) > 0.0
     assert metadata["fgw_alpha"] == 0.6
     assert distance.shape == (8, 8)
     np.testing.assert_allclose(distance, distance.T, atol=1e-5)
@@ -278,9 +363,26 @@ def test_pairwise_ot_rejects_unbounded_or_unknown_distance_modes() -> None:
             max_exact_cells=20,
             max_ot_work_units=1.0,
         )
+    with pytest.raises(ValueError, match="FGW work estimate"):
+        compute_pairwise_ot_distance_matrix(
+            measures=measures,
+            anchor_embedding=embedding.values,
+            distance_mode="fused_gromov_wasserstein",
+            max_exact_cells=20,
+            max_ot_work_units=1e12,
+            max_fgw_work_units=1.0,
+        )
     estimate = estimate_pairwise_ot_work(n_cells=6, support_size=3, sinkhorn_iters=5)
     assert estimate["n_pairs"] == 21.0
     assert estimate["work_units"] == 21.0 * 3.0 * 3.0 * 5.0
+    fgw_estimate = estimate_pairwise_fgw_work(
+        n_cells=6,
+        support_size=3,
+        sinkhorn_iters=5,
+        fgw_iters=2,
+    )
+    assert fgw_estimate["fgw_structure_units"] == 21.0 * 2.0 * 27.0
+    assert fgw_estimate["fgw_sinkhorn_units"] == 21.0 * 2.0 * 9.0 * 5.0
 
 
 def test_clustering_uses_precomputed_distance_not_kmeans() -> None:
@@ -323,25 +425,48 @@ def test_cluster_model_selection_chooses_candidate_k() -> None:
     assert result.metadata["model_selection"]["criterion"] == "rank_ensemble"
     assert result.metadata["model_selection"]["metrics"] == [
         "silhouette",
-        "calinski_harabasz",
-        "davies_bouldin",
-        "dunn",
+        "pseudo_calinski_harabasz",
+        "medoid_davies_bouldin",
+        "percentile_dunn",
     ]
     first_result = result.metadata["model_selection"]["results"][0]
     assert set(first_result["scores"]) == {
         "silhouette",
-        "calinski_harabasz",
-        "davies_bouldin",
-        "dunn",
+        "pseudo_calinski_harabasz",
+        "medoid_davies_bouldin",
+        "percentile_dunn",
     }
     assert set(first_result["ranks"]) == {
         "silhouette",
-        "calinski_harabasz",
-        "davies_bouldin",
-        "dunn",
+        "pseudo_calinski_harabasz",
+        "medoid_davies_bouldin",
+        "percentile_dunn",
     }
+    assert first_result["cluster_size_summary"]["min_cluster_size"] >= 2
+    assert first_result["within_between_distance_ratio"] is not None
     assert result.metadata["candidate_n_clusters"] == [2, 3]
+    assert result.metadata["within_between_distance_ratio"] is not None
     assert int(np.unique(result.labels).size) == 2
+
+
+def test_singleton_cluster_assignment_score_is_zero() -> None:
+    distance = np.asarray(
+        [
+            [0.0, 0.1, 5.0],
+            [0.1, 0.0, 5.1],
+            [5.0, 5.1, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    result = cluster_from_distance(distance, method="agglomerative", n_clusters=2)
+    singleton_labels = [
+        int(label)
+        for label in np.unique(result.labels)
+        if np.sum(result.labels == int(label)) == 1
+    ]
+    assert singleton_labels
+    singleton_rows = result.labels == singleton_labels[0]
+    assert np.all(result.assignment_score[singleton_rows] == 0.0)
 
 
 def test_candidate_cluster_range_parser_is_inclusive() -> None:
@@ -405,7 +530,7 @@ def test_pairwise_niche_h5ad_end_to_end(tmp_path) -> None:
     assert "neighbor_retention_fraction_r3" in out.obs
     assert (output_dir / "pairwise_niche_model" / "expression_embedding_state.npz").exists()
     assert summary["batch_embedding"]["batch_correction_applied_by_pairwise_niche"] is False
-    assert summary["method_semantics"]["anchor_expression_enters_twice"] is True
+    assert summary["method_semantics"]["anchor_expression_enters_twice"] is False
     assert summary["clustering"]["model_selection"]["selected_n_clusters"] in {2, 3}
     np.testing.assert_allclose(out.obsp["cell_ot_dissimilarity"], out.obsp["cell_ot_dissimilarity"].T)
 

@@ -113,7 +113,7 @@ def run_pairwise_niche_on_h5ad(
     radius_um: float = 50.0,
     max_neighbors: int = 32,
     include_anchor: bool = True,
-    isolated_policy: str = "zero_dummy",
+    isolated_policy: str = "anchor_fallback",
     graph_kernel: str = "gaussian",
     cap_mode: str = "radial_shell_state",
     cap_state_clusters: int = 16,
@@ -123,17 +123,24 @@ def run_pairwise_niche_on_h5ad(
     distance_weight: float = 0.10,
     ground_cost_normalization: str = "sampled_median",
     ground_cost_sample_pairs: int = 10000,
-    anchor_weight: float = 0.25,
+    anchor_weight: float = 0.0,
     sinkhorn_epsilon: float = 0.05,
     sinkhorn_iters: int = 50,
     distance_mode: str = "debiased_entropic_transport",
-    fgw_alpha: float = 0.5,
+    fgw_alpha: float = 0.25,
     fgw_iters: int = 5,
+    fgw_node_feature_mode: str = "expression_only",
+    fgw_structure_mode: str = "local_knn_shortest_path",
+    fgw_structure_knn: int = 6,
+    fgw_structure_radius_fraction: float = 0.5,
+    fgw_structure_normalization: str = "sampled_median",
+    fgw_structure_sample_pairs: int = 10000,
     pairwise_mode: str = "exact_blockwise",
     block_size: int = 64,
     device: str = "auto",
     max_exact_cells: int = 5000,
     max_ot_work_units: float = 5e11,
+    max_fgw_work_units: float = 1e12,
     force_large_exact_ot: bool = False,
     distance_store: str = "auto",
     cluster_method: str = "agglomerative",
@@ -217,11 +224,18 @@ def run_pairwise_niche_on_h5ad(
         distance_mode=str(distance_mode),  # type: ignore[arg-type]
         fgw_alpha=float(fgw_alpha),
         fgw_iters=int(fgw_iters),
+        fgw_node_feature_mode=str(fgw_node_feature_mode),  # type: ignore[arg-type]
+        fgw_structure_mode=str(fgw_structure_mode),  # type: ignore[arg-type]
+        fgw_structure_knn=int(fgw_structure_knn),
+        fgw_structure_radius_fraction=float(fgw_structure_radius_fraction),
+        fgw_structure_normalization=str(fgw_structure_normalization),  # type: ignore[arg-type]
+        fgw_structure_sample_pairs=int(fgw_structure_sample_pairs),
         pairwise_mode=requested_pairwise,  # type: ignore[arg-type]
         block_size=int(block_size),
         device=str(device),
         max_exact_cells=int(max_exact_cells),
         max_ot_work_units=float(max_ot_work_units),
+        max_fgw_work_units=float(max_fgw_work_units),
         force_large_exact_ot=bool(force_large_exact_ot),
         distance_store=str(distance_store),  # type: ignore[arg-type]
         cluster_method=requested_cluster_method,  # type: ignore[arg-type]
@@ -231,7 +245,12 @@ def run_pairwise_niche_on_h5ad(
         else None,
         model_selection_metrics=tuple(str(value) for value in model_selection_metrics)
         if model_selection_metrics
-        else ("silhouette", "calinski_harabasz", "davies_bouldin", "dunn"),
+        else (
+            "silhouette",
+            "pseudo_calinski_harabasz",
+            "medoid_davies_bouldin",
+            "percentile_dunn",
+        ),
         ot_knn=int(ot_knn),
         ot_affinity_scaling=str(ot_affinity_scaling),  # type: ignore[arg-type]
         leiden_resolution=float(leiden_resolution),
@@ -265,6 +284,9 @@ def run_pairwise_niche_on_h5ad(
         expression_weight=float(expression_weight),
         spatial_weight=float(spatial_weight),
         distance_weight=float(distance_weight),
+        fgw_structure_mode=str(fgw_structure_mode),
+        fgw_structure_knn=int(fgw_structure_knn),
+        fgw_structure_radius_fraction=float(fgw_structure_radius_fraction),
         ground_cost_normalization=str(ground_cost_normalization),
         ground_cost_sample_pairs=int(ground_cost_sample_pairs),
         seed=int(seed),
@@ -286,8 +308,12 @@ def run_pairwise_niche_on_h5ad(
         anchor_weight=float(anchor_weight),
         fgw_alpha=float(fgw_alpha),
         fgw_iters=int(fgw_iters),
+        fgw_node_feature_mode=str(fgw_node_feature_mode),
+        fgw_structure_normalization=str(fgw_structure_normalization),
+        fgw_structure_sample_pairs=int(fgw_structure_sample_pairs),
         max_exact_cells=int(max_exact_cells),
         max_ot_work_units=float(max_ot_work_units),
+        max_fgw_work_units=float(max_fgw_work_units),
         force_large_exact_ot=bool(force_large_exact_ot),
     )
     distance_array = np.asarray(distance, dtype=np.float32)

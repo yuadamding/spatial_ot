@@ -11,11 +11,21 @@ from sklearn.metrics import silhouette_score
 DEFAULT_CANDIDATE_N_CLUSTERS = tuple(range(5, 31))
 DEFAULT_MODEL_SELECTION_METRICS = (
     "silhouette",
-    "calinski_harabasz",
-    "davies_bouldin",
-    "dunn",
+    "pseudo_calinski_harabasz",
+    "medoid_davies_bouldin",
+    "percentile_dunn",
 )
-_MODEL_SELECTION_METRICS = frozenset(DEFAULT_MODEL_SELECTION_METRICS)
+_METRIC_ALIASES = {
+    "calinski_harabasz": "pseudo_calinski_harabasz",
+    "pseudo_ch": "pseudo_calinski_harabasz",
+    "davies_bouldin": "medoid_davies_bouldin",
+    "medoid_db": "medoid_davies_bouldin",
+    "dunn": "percentile_dunn",
+    "percentile_dunn_05_95": "percentile_dunn",
+}
+_MODEL_SELECTION_METRICS = frozenset(
+    (*DEFAULT_MODEL_SELECTION_METRICS, "minimum_dunn")
+)
 
 
 @dataclass(frozen=True)
@@ -35,7 +45,10 @@ def _cluster_assignment_score(distance: np.ndarray, labels: np.ndarray) -> np.nd
     for idx in range(y.shape[0]):
         same = y == y[idx]
         same[idx] = False
-        same_mean = float(np.mean(d[idx, same])) if np.any(same) else 0.0
+        if not np.any(same):
+            out[idx] = 0.0
+            continue
+        same_mean = float(np.mean(d[idx, same]))
         other_means = [
             float(np.mean(d[idx, y == label]))
             for label in unique
@@ -128,6 +141,7 @@ def _sanitize_model_selection_metrics(
     out: list[str] = []
     for value in values:
         metric = str(value).strip().lower().replace("-", "_")
+        metric = _METRIC_ALIASES.get(metric, metric)
         if not metric:
             continue
         if metric not in _MODEL_SELECTION_METRICS:
@@ -244,6 +258,89 @@ def _distance_dunn(distance: np.ndarray, labels: np.ndarray) -> float:
     return float(min_inter / max(max_diameter, 1e-12))
 
 
+def _distance_percentile_dunn(
+    distance: np.ndarray,
+    labels: np.ndarray,
+    *,
+    q_inter: float = 5.0,
+    q_intra: float = 95.0,
+) -> float:
+    d = np.asarray(distance, dtype=np.float32)
+    y = np.asarray(labels, dtype=np.int32)
+    unique = np.unique(y)
+    if unique.size < 2 or unique.size >= y.size:
+        return float("-inf")
+    within: list[np.ndarray] = []
+    between: list[np.ndarray] = []
+    for pos, left in enumerate(unique):
+        left_members = np.flatnonzero(y == int(left))
+        if left_members.size > 1:
+            block = d[np.ix_(left_members, left_members)]
+            upper = block[np.triu_indices(left_members.size, k=1)]
+            if upper.size:
+                within.append(upper)
+        for right in unique[pos + 1 :]:
+            right_members = np.flatnonzero(y == int(right))
+            if left_members.size and right_members.size:
+                between.append(d[np.ix_(left_members, right_members)].reshape(-1))
+    if not within or not between:
+        return float("-inf")
+    within_values = np.concatenate(within)
+    between_values = np.concatenate(between)
+    within_values = within_values[np.isfinite(within_values)]
+    between_values = between_values[np.isfinite(between_values)]
+    if within_values.size == 0 or between_values.size == 0:
+        return float("-inf")
+    intra = float(np.percentile(within_values, float(q_intra)))
+    inter = float(np.percentile(between_values, float(q_inter)))
+    return float(inter / max(intra, 1e-12))
+
+
+def _cluster_size_metadata(labels: np.ndarray) -> dict[str, object]:
+    y = np.asarray(labels, dtype=np.int32)
+    _, counts = np.unique(y, return_counts=True)
+    n = int(y.size)
+    small_threshold = max(2, int(np.ceil(0.005 * max(n, 1))))
+    return {
+        "min_cluster_size": int(np.min(counts)) if counts.size else 0,
+        "max_cluster_size": int(np.max(counts)) if counts.size else 0,
+        "singleton_cluster_count": int(np.sum(counts == 1)),
+        "singleton_fraction": float(np.sum(counts == 1) / max(counts.size, 1)),
+        "small_cluster_threshold": int(small_threshold),
+        "small_cluster_count": int(np.sum(counts < small_threshold)),
+        "small_cluster_fraction": float(np.sum(counts < small_threshold) / max(counts.size, 1)),
+        "cluster_sizes": [int(value) for value in counts.tolist()],
+    }
+
+
+def _within_between_distance_ratio(distance: np.ndarray, labels: np.ndarray) -> float | None:
+    d = np.asarray(distance, dtype=np.float32)
+    y = np.asarray(labels, dtype=np.int32)
+    within: list[np.ndarray] = []
+    between: list[np.ndarray] = []
+    unique = np.unique(y)
+    for pos, left in enumerate(unique):
+        left_members = np.flatnonzero(y == int(left))
+        if left_members.size > 1:
+            block = d[np.ix_(left_members, left_members)]
+            upper = block[np.triu_indices(left_members.size, k=1)]
+            if upper.size:
+                within.append(upper)
+        for right in unique[pos + 1 :]:
+            right_members = np.flatnonzero(y == int(right))
+            if left_members.size and right_members.size:
+                between.append(d[np.ix_(left_members, right_members)].reshape(-1))
+    if not within or not between:
+        return None
+    within_values = np.concatenate(within)
+    between_values = np.concatenate(between)
+    within_values = within_values[np.isfinite(within_values)]
+    between_values = between_values[np.isfinite(between_values) & (between_values > 0)]
+    if within_values.size == 0 or between_values.size == 0:
+        return None
+    return float(np.mean(within_values) / max(float(np.mean(between_values)), 1e-12))
+
+
 def _model_selection_scores(
     distance: np.ndarray,
     labels: np.ndarray,
@@ -254,11 +351,13 @@ def _model_selection_scores(
     for metric in metrics:
         if metric == "silhouette":
             scores[metric] = _distance_silhouette(distance, labels)
-        elif metric == "calinski_harabasz":
+        elif metric == "pseudo_calinski_harabasz":
             scores[metric] = _distance_calinski_harabasz(distance, labels)
-        elif metric == "davies_bouldin":
+        elif metric == "medoid_davies_bouldin":
             scores[metric] = _distance_davies_bouldin(distance, labels)
-        elif metric == "dunn":
+        elif metric == "percentile_dunn":
+            scores[metric] = _distance_percentile_dunn(distance, labels)
+        elif metric == "minimum_dunn":
             scores[metric] = _distance_dunn(distance, labels)
         else:  # pragma: no cover - protected by sanitizer.
             raise ValueError(f"Unknown model-selection metric: {metric}")
@@ -347,6 +446,11 @@ def _select_fixed_k_model(
                 "n_clusters": int(k),
                 "scores": {metric: _finite_score(value) for metric, value in scores.items()},
                 "n_observed_clusters": int(np.unique(labels).size),
+                "cluster_size_summary": _cluster_size_metadata(labels),
+                "within_between_distance_ratio": _within_between_distance_ratio(
+                    distance,
+                    labels,
+                ),
             }
         )
     best_idx = _rank_model_selection_results(
@@ -529,6 +633,11 @@ def cluster_from_distance(
                             metric: _finite_score(value) for metric, value in scores.items()
                         },
                         "n_observed_clusters": observed,
+                        "cluster_size_summary": _cluster_size_metadata(labels_for_resolution),
+                        "within_between_distance_ratio": _within_between_distance_ratio(
+                            d,
+                            labels_for_resolution,
+                        ),
                     }
                 )
             best_idx = _rank_model_selection_results(
@@ -564,6 +673,8 @@ def cluster_from_distance(
         "method": requested,
         "n_clusters": int(np.unique(labels).size),
         "assignment_score_type": "precomputed_distance_margin",
+        "cluster_size_summary": _cluster_size_metadata(labels),
+        "within_between_distance_ratio": _within_between_distance_ratio(d, labels),
     }
     if n_clusters is not None:
         metadata["requested_n_clusters"] = int(n_clusters)

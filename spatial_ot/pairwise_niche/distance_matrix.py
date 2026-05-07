@@ -38,6 +38,112 @@ def estimate_pairwise_ot_work(
     }
 
 
+def estimate_pairwise_fgw_work(
+    *,
+    n_cells: int,
+    support_size: int,
+    sinkhorn_iters: int,
+    fgw_iters: int,
+) -> dict[str, float]:
+    n_pairs = int(n_cells) * (int(n_cells) + 1) // 2
+    structure_units = (
+        float(n_pairs) * float(fgw_iters) * float(support_size) ** 3
+    )
+    sinkhorn_units = (
+        float(n_pairs)
+        * float(fgw_iters)
+        * float(support_size) ** 2
+        * float(sinkhorn_iters)
+    )
+    return {
+        "n_pairs": float(n_pairs),
+        "support_size": float(support_size),
+        "sinkhorn_iters": float(sinkhorn_iters),
+        "fgw_iters": float(fgw_iters),
+        "fgw_structure_units": float(structure_units),
+        "fgw_sinkhorn_units": float(sinkhorn_units),
+        "fgw_total_units": float(structure_units + sinkhorn_units),
+        "matrix_gib": float(_estimate_dense_bytes(int(n_cells)) / 1024**3),
+    }
+
+
+def _fgw_node_feature_array(
+    tokens: np.ndarray,
+    metadata: dict[str, object],
+    *,
+    mode: str,
+) -> tuple[np.ndarray, dict[str, object]]:
+    requested = str(mode or "expression_only").strip().lower()
+    slices = metadata.get("ground_cost_component_slices", {})
+    if not isinstance(slices, dict) or "expression" not in slices:
+        raise ValueError("FGW node feature selection requires local-measure component slices.")
+
+    def component(name: str) -> np.ndarray:
+        raw_slice = slices.get(name)
+        if not isinstance(raw_slice, (list, tuple)) or len(raw_slice) != 2:
+            raise ValueError(f"Missing local-measure component slice for {name!r}.")
+        start, stop = int(raw_slice[0]), int(raw_slice[1])
+        return tokens[:, :, start:stop]
+
+    if requested == "expression_only":
+        features = component("expression")
+    elif requested == "expression_plus_radial":
+        features = np.concatenate(
+            [component("expression"), component("relative_distance")],
+            axis=2,
+        )
+    elif requested == "full_token":
+        features = tokens
+    else:
+        raise ValueError(
+            "fgw_node_feature_mode must be expression_only, expression_plus_radial, or full_token."
+        )
+    return features.astype(np.float32, copy=False), {
+        "fgw_node_feature_mode": requested,
+        "fgw_node_feature_dim": int(features.shape[2]),
+    }
+
+
+def _fit_fgw_structure_scale(
+    structures: np.ndarray,
+    mask: np.ndarray,
+    *,
+    normalization: str,
+    n_pairs: int,
+    seed: int,
+) -> float:
+    requested = str(normalization or "sampled_median").strip().lower()
+    if requested == "none":
+        return 1.0
+    if requested != "sampled_median":
+        raise ValueError("fgw_structure_normalization must be none or sampled_median.")
+    values: list[np.ndarray] = []
+    active_mask = np.asarray(mask, dtype=bool)
+    for row in range(structures.shape[0]):
+        count = int(np.sum(active_mask[row]))
+        if count <= 1:
+            continue
+        block = np.asarray(structures[row, :count, :count], dtype=np.float32)
+        upper = block[np.triu_indices(count, k=1)]
+        upper = upper[np.isfinite(upper)]
+        if upper.size:
+            values.append(upper)
+    if not values:
+        return 1.0
+    observed = np.concatenate(values).astype(np.float32, copy=False)
+    if observed.size <= 1:
+        return 1.0
+    rng = np.random.default_rng(int(seed))
+    count = min(max(int(n_pairs), 1), max(int(observed.size) ** 2, 1))
+    left = rng.integers(0, observed.size, size=count)
+    right = rng.integers(0, observed.size, size=count)
+    costs = (observed[left] - observed[right]) ** 2
+    costs = costs[np.isfinite(costs) & (costs > 0)]
+    if costs.size == 0:
+        return 1.0
+    return float(max(np.median(costs), 1e-8))
+
+
 def _self_sinkhorn_costs(
     measures: LocalMeasureSet,
     *,
@@ -77,11 +183,15 @@ def compute_pairwise_ot_distance_matrix(
     epsilon: float = 0.05,
     n_iters: int = 50,
     distance_mode: str = "debiased_entropic_transport",
-    anchor_weight: float = 0.25,
-    fgw_alpha: float = 0.5,
+    anchor_weight: float = 0.0,
+    fgw_alpha: float = 0.25,
     fgw_iters: int = 5,
+    fgw_node_feature_mode: str = "expression_only",
+    fgw_structure_normalization: str = "sampled_median",
+    fgw_structure_sample_pairs: int = 10000,
     max_exact_cells: int = 5000,
     max_ot_work_units: float = 5e11,
+    max_fgw_work_units: float = 1e12,
     force_large_exact_ot: bool = False,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Compute a dense exact pairwise OT matrix, optionally backed by a .npy memmap."""
@@ -134,7 +244,8 @@ def compute_pairwise_ot_distance_matrix(
     }
     if requested_mode not in valid_modes:
         raise ValueError(
-            "distance_mode must be sinkhorn or debiased_entropic_transport."
+            "distance_mode must be sinkhorn, debiased_entropic_transport, "
+            "or fused_gromov_wasserstein."
         )
     debiased = requested_mode in {
         "sinkhorn_divergence",
@@ -145,6 +256,31 @@ def compute_pairwise_ot_distance_matrix(
     use_fgw = requested_mode in {"fgw", "fused_gromov_wasserstein"}
     if use_fgw and measures.structure_matrices is None:
         raise ValueError("fused_gromov_wasserstein requires local graph structure matrices.")
+    fgw_feature_metadata: dict[str, object] = {}
+    fgw_work_estimate: dict[str, float] | None = None
+    if use_fgw:
+        fgw_work_estimate = estimate_pairwise_fgw_work(
+            n_cells=n,
+            support_size=int(tokens.shape[1]),
+            sinkhorn_iters=int(n_iters),
+            fgw_iters=int(fgw_iters),
+        )
+        if (
+            fgw_work_estimate["fgw_total_units"] > float(max_fgw_work_units)
+            and not bool(force_large_exact_ot)
+        ):
+            raise ValueError(
+                "Exact all-pairs FGW work estimate is too large: "
+                f"{fgw_work_estimate['fgw_total_units']:.3g} work units for {n} cells, "
+                f"support size {tokens.shape[1]}, {int(fgw_iters)} FGW iterations, "
+                f"and {int(n_iters)} Sinkhorn iterations. Increase --max-fgw-work-units "
+                "or use --force-large-exact-ot only if this exact dense computation is intentional."
+            )
+        tokens, fgw_feature_metadata = _fgw_node_feature_array(
+            tokens,
+            measures.metadata,
+            mode=str(fgw_node_feature_mode),
+        )
     self_costs = (
         _self_sinkhorn_costs(
             measures,
@@ -156,11 +292,18 @@ def compute_pairwise_ot_distance_matrix(
         if debiased and not use_fgw
         else np.zeros(n, dtype=np.float32)
     )
-    structures = (
-        np.asarray(measures.structure_matrices, dtype=np.float32)
-        if use_fgw
-        else None
-    )
+    structures = None
+    fgw_structure_scale = 1.0
+    if use_fgw:
+        structures = np.asarray(measures.structure_matrices, dtype=np.float32)
+        fgw_structure_scale = _fit_fgw_structure_scale(
+            structures,
+            measures.mask,
+            normalization=str(fgw_structure_normalization),
+            n_pairs=int(fgw_structure_sample_pairs),
+            seed=int(measures.metadata.get("seed", 1337)),
+        )
+        structures = structures / np.float32(np.sqrt(max(fgw_structure_scale, 1e-8)))
 
     bs = max(int(block_size), 1)
     for a_start in range(0, n, bs):
@@ -252,20 +395,50 @@ def compute_pairwise_ot_distance_matrix(
         "anchor_weight": float(anchor_weight),
         "fgw_alpha": float(fgw_alpha) if use_fgw else None,
         "fgw_iters": int(fgw_iters) if use_fgw else None,
-        "uses_graph_topology": bool(use_fgw),
+        "uses_graph_topology": bool(
+            use_fgw
+            and str(measures.metadata.get("fgw_structure_mode", "complete_euclidean"))
+            != "complete_euclidean"
+        ),
+        "uses_complete_spatial_structure": bool(
+            use_fgw
+            and str(measures.metadata.get("fgw_structure_mode", "complete_euclidean"))
+            == "complete_euclidean"
+        ),
+        "fgw_structure_mode": measures.metadata.get("fgw_structure_mode")
+        if use_fgw
+        else None,
+        "fgw_structure_semantics": (
+            None
+            if not use_fgw
+            else "complete pairwise spatial-distance structure, not adjacency/shortest-path topology"
+            if str(measures.metadata.get("fgw_structure_mode")) == "complete_euclidean"
+            else "explicit graph-derived structure"
+        ),
+        "fgw_structure_normalization": str(fgw_structure_normalization)
+        if use_fgw
+        else None,
+        "fgw_structure_sample_pairs": int(fgw_structure_sample_pairs)
+        if use_fgw
+        else None,
+        "fgw_structure_cost_scale": float(fgw_structure_scale) if use_fgw else None,
         "block_size": int(bs),
         "device": str(resolved_device),
         "n_cells": int(n),
         "matrix_bytes": int(_estimate_dense_bytes(n)),
         "work_estimate": work_estimate,
+        "fgw_work_estimate": fgw_work_estimate,
         "max_ot_work_units": float(max_ot_work_units),
+        "max_fgw_work_units": float(max_fgw_work_units),
         "force_large_exact_ot": bool(force_large_exact_ot),
         "output_path": None if output_path is None else str(output_path),
+        **fgw_feature_metadata,
     }
     return out, metadata
 
 
 __all__ = [
     "compute_pairwise_ot_distance_matrix",
+    "estimate_pairwise_fgw_work",
     "estimate_pairwise_ot_work",
 ]

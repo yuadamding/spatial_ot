@@ -63,10 +63,10 @@ def batched_fused_gromov_wasserstein_cost(
     sinkhorn_iters: int = 30,
     fgw_iters: int = 5,
 ) -> torch.Tensor:
-    """Batched entropic fused Gromov-Wasserstein cost for fixed-size local graphs.
+    """Batched entropic fused Gromov-Wasserstein cost for fixed-size structures.
 
     The feature term compares node attributes; the structure term compares
-    intra-neighborhood graph distance matrices through the transport plan.
+    intra-neighborhood structure matrices through the transport plan.
     """
 
     if feature_cost.ndim != 3:
@@ -109,7 +109,7 @@ def fused_gromov_wasserstein_block(
     sinkhorn_iters: int = 30,
     fgw_iters: int = 5,
 ) -> torch.Tensor:
-    """Compute an A x B block of graph-topology FGW distances."""
+    """Compute an A x B block of FGW distances over local structure matrices."""
 
     if features_a.ndim != 3 or features_b.ndim != 3:
         raise ValueError("features_a and features_b must have shape (batch, support, dim).")

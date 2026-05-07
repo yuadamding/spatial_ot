@@ -183,9 +183,35 @@ def save_expression_embedding_state(
     np.savez_compressed(path, **arrays)
 
 
+def load_expression_embedding_state(path) -> ExpressionEmbeddingState:
+    arrays = np.load(path, allow_pickle=False)
+    method = str(np.asarray(arrays["method"]).item())
+    has_reducer = bool(np.asarray(arrays["has_reducer"]).item())
+    reducer_components = (
+        np.asarray(arrays["reducer_components"], dtype=np.float32)
+        if has_reducer and "reducer_components" in arrays
+        else None
+    )
+    reducer_mean = (
+        np.asarray(arrays["reducer_mean"], dtype=np.float32)
+        if "reducer_mean" in arrays
+        else None
+    )
+    return ExpressionEmbeddingState(
+        method=method,
+        feature_mean=np.asarray(arrays["feature_mean"], dtype=np.float32),
+        feature_scale=np.asarray(arrays["feature_scale"], dtype=np.float32),
+        reducer_components=reducer_components,
+        reducer_mean=reducer_mean,
+        embedding_mean=np.asarray(arrays["embedding_mean"], dtype=np.float32),
+        embedding_scale=np.asarray(arrays["embedding_scale"], dtype=np.float32),
+    )
+
+
 __all__ = [
     "ExpressionEmbedding",
     "ExpressionEmbeddingState",
     "fit_expression_embedding",
+    "load_expression_embedding_state",
     "save_expression_embedding_state",
 ]

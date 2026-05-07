@@ -23,6 +23,7 @@ from run_visium_hd_umap3d_landmark_fgw import (  # noqa: E402
     _json_default,
     _load_per_sample_umap,
     _log,
+    _normalize_fgw_structures,
     _plot_outputs,
 )
 from spatial_ot.pairwise_niche.cluster import cluster_from_distance  # noqa: E402
@@ -188,6 +189,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         cap_state_clusters=int(args.cap_state_clusters),
         radial_shells=int(args.radial_shells),
         isolated_policy="anchor_fallback",
+        fgw_structure_mode=str(args.fgw_structure_mode),
+        fgw_structure_knn=int(args.fgw_structure_knn),
+        fgw_structure_radius_fraction=float(args.fgw_structure_radius_fraction),
         expression_weight=float(args.expression_weight),
         spatial_weight=float(args.spatial_weight),
         distance_weight=float(args.distance_weight),
@@ -198,7 +202,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     _log(log_path, json.dumps(measures.metadata, indent=2, default=_json_default))
     feature_width = z.shape[1]
     features = measures.tokens[:, :, :feature_width].astype(np.float32, copy=False)
-    structures = np.asarray(measures.structure_matrices, dtype=np.float32)
+    structures, structure_norm = _normalize_fgw_structures(
+        np.asarray(measures.structure_matrices, dtype=np.float32),
+        measures.mask,
+        normalization=str(args.fgw_structure_normalization),
+        n_pairs=int(args.fgw_structure_sample_pairs),
+        seed=int(args.seed),
+    )
     weights = measures.weights.astype(np.float32, copy=False)
 
     _log(log_path, "[4/9] Rough clustering independently inside each sample...")
@@ -255,7 +265,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         representative_distance,
         method="agglomerative",
         candidate_n_clusters=tuple(range(5, 31)),
-        model_selection_metrics=("silhouette", "calinski_harabasz", "davies_bouldin", "dunn"),
+        model_selection_metrics=(
+            "silhouette",
+            "pseudo_calinski_harabasz",
+            "medoid_davies_bouldin",
+            "percentile_dunn",
+        ),
     )
     rep_fine_labels = cluster.labels.astype(np.int32, copy=False)
     full_labels = rep_fine_labels[rough_id].astype(np.int32, copy=False)
@@ -283,11 +298,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         categories=[f"RC{int(value)}" for value in range(representative_indices.size)],
     )
     adata.obs["ot_niche"] = pd.Categorical(label_names, categories=categories)
-    adata.obs["spatial_niche"] = pd.Categorical(label_names, categories=categories)
     adata.obs["ot_niche_int"] = full_labels
-    adata.obs["spatial_niche_int"] = full_labels
     adata.obs["ot_niche_assignment_score"] = full_scores
-    adata.obs["spatial_niche_assignment_score"] = full_scores
     suffix = f"r{float(args.radius_um):g}".replace(".", "p")
     area = np.pi * float(args.radius_um) ** 2
     adata.obs[f"n_neighbors_full_{suffix}"] = measures.full_neighbor_counts
@@ -311,9 +323,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         log_path=log_path,
     )
     adata.obs["ot_niche_instance"] = pd.Categorical(instance_names)
-    adata.obs["spatial_niche_instance"] = pd.Categorical(instance_names)
     adata.obs["ot_niche_instance_int"] = instance_ids.astype(np.int32)
-    adata.obs["spatial_niche_instance_int"] = instance_ids.astype(np.int32)
     cluster_counts = {cat: int(np.sum(label_names == cat)) for cat in categories}
     summary = {
         "active_path": "pairwise-niche-sample-rough-full-cohort-fine-fgw-umap3d",
@@ -345,7 +355,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         },
         "distance_summary": {
             "mode": "representative_fused_gromov_wasserstein_after_sample_rough_clustering",
-            "uses_graph_topology": True,
+            "uses_graph_topology": bool(
+                measures.metadata.get("fgw_structure_mode") != "complete_euclidean"
+            ),
+            "uses_complete_spatial_structure": bool(
+                measures.metadata.get("fgw_structure_mode") == "complete_euclidean"
+            ),
             "all_cell_pairs_materialized": False,
             "n_representative_cell_graphs": int(representative_indices.size),
             "radius_um": float(args.radius_um),
@@ -355,7 +370,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "fgw_sinkhorn_iters": int(args.fgw_sinkhorn_iters),
             "fgw_iters": int(args.fgw_iters),
             "node_feature_term": "standardized_3d_umap_only",
-            "graph_structure_term": "pairwise_support_spatial_distances_normalized_by_radius",
+            "graph_structure_term": str(measures.metadata.get("fgw_structure_mode")),
+            **structure_norm,
             "representative_distance_shape": list(representative_distance.shape),
             "representative_distance_min": float(np.min(representative_distance)),
             "representative_distance_max": float(np.max(representative_distance)),
@@ -363,7 +379,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "clustering_summary": {
             "method": "agglomerative_full_cohort_representative_model_selection",
             "candidate_n_clusters": list(range(5, 31)),
-            "model_selection_metrics": ["silhouette", "calinski_harabasz", "davies_bouldin", "dunn"],
+            "model_selection_metrics": [
+                "silhouette",
+                "pseudo_calinski_harabasz",
+                "medoid_davies_bouldin",
+                "percentile_dunn",
+            ],
             "n_clusters": int(len(categories)),
             "cluster_counts": cluster_counts,
             "assignment_score_type": "rough_representative_full_cohort_pairwise_distance_margin",
@@ -393,7 +414,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "max_neighbors": int(args.max_neighbors),
             "rough_clusters_per_sample": int(args.rough_clusters_per_sample),
             "candidate_n_clusters": list(range(5, 31)),
-            "model_selection_metrics": ["silhouette", "calinski_harabasz", "davies_bouldin", "dunn"],
+            "model_selection_metrics": [
+                "silhouette",
+                "pseudo_calinski_harabasz",
+                "medoid_davies_bouldin",
+                "percentile_dunn",
+            ],
         }
     )
     adata.uns["pairwise_niche_rough_clustering_summary"] = _sanitize(
@@ -448,7 +474,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--distance-weight", type=float, default=0.10)
     parser.add_argument("--ground-cost-normalization", default="sampled_median")
     parser.add_argument("--ground-cost-sample-pairs", type=int, default=10000)
-    parser.add_argument("--fgw-alpha", type=float, default=0.5)
+    parser.add_argument("--fgw-alpha", type=float, default=0.25)
+    parser.add_argument(
+        "--fgw-structure-mode",
+        default="local_knn_shortest_path",
+        choices=[
+            "complete_euclidean",
+            "local_knn_shortest_path",
+            "radius_graph_shortest_path",
+            "adjacency",
+        ],
+    )
+    parser.add_argument("--fgw-structure-knn", type=int, default=6)
+    parser.add_argument("--fgw-structure-radius-fraction", type=float, default=0.5)
+    parser.add_argument("--fgw-structure-normalization", default="sampled_median")
+    parser.add_argument("--fgw-structure-sample-pairs", type=int, default=10000)
     parser.add_argument("--fgw-epsilon", type=float, default=0.05)
     parser.add_argument("--fgw-sinkhorn-iters", type=int, default=8)
     parser.add_argument("--fgw-iters", type=int, default=2)

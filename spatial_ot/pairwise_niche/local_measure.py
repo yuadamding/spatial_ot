@@ -82,27 +82,42 @@ def _cap_neighbors(
     else:
         strata = [(int(shell), 0) for shell in shell_idx]
 
-    selected: list[int] = []
-    unique = sorted(set(strata))
-    base = max(int(max_neighbors) // max(len(unique), 1), 1)
-    for pos, stratum in enumerate(unique):
-        remaining_slots = int(max_neighbors) - len(selected)
-        if remaining_slots <= 0:
-            break
-        same = np.asarray(
+    by_stratum: dict[tuple[int, int], np.ndarray] = {}
+    for stratum in dict.fromkeys(strata):
+        by_stratum[stratum] = np.asarray(
             [idx for idx, value in enumerate(strata) if value == stratum],
             dtype=np.int64,
         )
-        quota = min(
-            base + (1 if pos < int(max_neighbors) % max(len(unique), 1) else 0),
-            remaining_slots,
-        )
-        if same.size <= quota:
-            selected.extend(int(idx) for idx in same)
-            continue
+
+    unique = list(by_stratum)
+    masses = np.asarray(
+        [
+            np.sum(np.asarray(weights[by_stratum[stratum]], dtype=np.float64))
+            for stratum in unique
+        ],
+        dtype=np.float64,
+    )
+    masses = np.where(np.isfinite(masses) & (masses > 0), masses, 1.0)
+    stratum_p = masses / masses.sum()
+    if len(unique) > int(max_neighbors):
+        chosen_strata = [
+            unique[int(idx)]
+            for idx in rng.choice(
+                len(unique),
+                size=int(max_neighbors),
+                replace=False,
+                p=stratum_p,
+            )
+        ]
+    else:
+        chosen_strata = unique
+
+    selected: list[int] = []
+    for stratum in chosen_strata:
+        same = by_stratum[stratum]
         p = np.asarray(weights[same], dtype=np.float64)
         p = p / p.sum() if np.isfinite(p).all() and p.sum() > 0 else None
-        selected.extend(int(idx) for idx in rng.choice(same, size=quota, replace=False, p=p))
+        selected.append(int(rng.choice(same, size=1, replace=False, p=p)[0]))
     if len(selected) < int(max_neighbors):
         remaining = np.setdiff1d(
             np.arange(local_indices.size),
@@ -116,6 +131,70 @@ def _cap_neighbors(
             selected.extend(int(idx) for idx in rng.choice(remaining, size=need, replace=False, p=p))
     chosen = np.asarray(selected[: int(max_neighbors)], dtype=np.int64)
     return chosen[np.argsort(distances[chosen], kind="stable")]
+
+
+def _pairwise_spatial_distance(values: np.ndarray) -> np.ndarray:
+    coords = np.asarray(values, dtype=np.float32)
+    if coords.size == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    return np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=2).astype(
+        np.float32
+    )
+
+
+def _all_pairs_shortest_path(graph: np.ndarray) -> np.ndarray:
+    path = np.asarray(graph, dtype=np.float32).copy()
+    for mid in range(path.shape[0]):
+        path = np.minimum(path, path[:, mid, None] + path[None, mid, :])
+    finite = path[np.isfinite(path)]
+    fill = float(np.max(finite)) * 2.0 if finite.size else 1.0
+    path[~np.isfinite(path)] = max(fill, 1.0)
+    np.fill_diagonal(path, 0.0)
+    return path.astype(np.float32, copy=False)
+
+
+def _local_structure_matrix(
+    relative_coords: np.ndarray,
+    *,
+    mode: str,
+    knn: int,
+    radius_fraction: float,
+) -> np.ndarray:
+    rel = np.asarray(relative_coords, dtype=np.float32)
+    count = int(rel.shape[0])
+    if count <= 1:
+        return np.zeros((count, count), dtype=np.float32)
+    pairwise = _pairwise_spatial_distance(rel)
+    requested = str(mode or "local_knn_shortest_path").strip().lower()
+    if requested == "complete_euclidean":
+        return pairwise
+
+    graph = np.full((count, count), np.inf, dtype=np.float32)
+    np.fill_diagonal(graph, 0.0)
+    if requested == "local_knn_shortest_path":
+        k = min(max(int(knn), 1), count - 1)
+        for row in range(count):
+            order = np.argsort(pairwise[row], kind="stable")
+            order = order[order != row][:k]
+            graph[row, order] = pairwise[row, order]
+        graph = np.minimum(graph, graph.T)
+        return _all_pairs_shortest_path(graph)
+
+    if requested in {"radius_graph_shortest_path", "adjacency"}:
+        edge_radius = max(float(radius_fraction), 1e-8)
+        edge = (pairwise <= edge_radius) & (pairwise > 0)
+        if requested == "adjacency":
+            graph[edge] = 1.0
+            graph[~edge & ~np.eye(count, dtype=bool)] = 2.0
+            return graph.astype(np.float32, copy=False)
+        graph[edge] = pairwise[edge]
+        graph = np.minimum(graph, graph.T)
+        return _all_pairs_shortest_path(graph)
+
+    raise ValueError(
+        "fgw_structure_mode must be complete_euclidean, local_knn_shortest_path, "
+        "radius_graph_shortest_path, or adjacency."
+    )
 
 
 def _median_component_cost(
@@ -223,7 +302,10 @@ def build_local_measures(
     cap_mode: str = "radial_shell_state",
     cap_state_clusters: int = 16,
     radial_shells: int = 3,
-    isolated_policy: str = "zero_dummy",
+    isolated_policy: str = "anchor_fallback",
+    fgw_structure_mode: str = "local_knn_shortest_path",
+    fgw_structure_knn: int = 6,
+    fgw_structure_radius_fraction: float = 0.5,
     expression_weight: float = 1.0,
     spatial_weight: float = 0.25,
     distance_weight: float = 0.10,
@@ -341,10 +423,12 @@ def build_local_measures(
             mask[anchor, :count] = True
             neighbor_indices[anchor, :count] = ids_arr
             rel_graph = (xy[ids_arr] - xy[anchor]) / max(radius, 1e-8)
-            graph_dist = np.linalg.norm(
-                rel_graph[:, None, :] - rel_graph[None, :, :],
-                axis=2,
-            ).astype(np.float32)
+            graph_dist = _local_structure_matrix(
+                rel_graph,
+                mode=str(fgw_structure_mode),
+                knn=int(fgw_structure_knn),
+                radius_fraction=float(fgw_structure_radius_fraction),
+            )
             structure[anchor, :count, :count] = graph_dist
 
     slices = _component_slices(z.shape[1])
@@ -379,6 +463,11 @@ def build_local_measures(
         "cap_state_clusters": int(cap_state_clusters),
         "radial_shells": int(radial_shells),
         "isolated_policy": str(isolated_policy),
+        "fgw_structure_mode": str(fgw_structure_mode),
+        "fgw_structure_knn": int(fgw_structure_knn),
+        "fgw_structure_radius_fraction": float(fgw_structure_radius_fraction),
+        "uses_graph_topology_structure": str(fgw_structure_mode)
+        != "complete_euclidean",
         "expression_weight": float(expression_weight),
         "spatial_weight": float(spatial_weight),
         "distance_weight": float(distance_weight),
@@ -398,6 +487,7 @@ def build_local_measures(
         "samples": {
             str(sample): int(np.sum(samples == sample)) for sample in sample_order
         },
+        "seed": int(seed),
     }
     return LocalMeasureSet(
         tokens=tokens,

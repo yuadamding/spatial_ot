@@ -26,6 +26,7 @@ from spatial_ot.pairwise_niche.expression_embedding import (
     fit_expression_embedding,
     save_expression_embedding_state,
 )
+from spatial_ot.pairwise_niche.distance_matrix import _fit_fgw_structure_scale
 from spatial_ot.pairwise_niche.fgw import (
     batched_fused_gromov_wasserstein_cost,
     fused_gromov_wasserstein_block,
@@ -35,6 +36,7 @@ from spatial_ot.pairwise_niche.local_measure import (
     _fit_ground_cost_scales,
     _fit_state_labels,
     _kernel_weights,
+    _local_structure_matrix,
 )
 
 
@@ -48,6 +50,31 @@ def _json_default(value):
     if isinstance(value, Path):
         return str(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _normalize_fgw_structures(
+    structures: np.ndarray,
+    mask: np.ndarray,
+    *,
+    normalization: str,
+    n_pairs: int,
+    seed: int,
+) -> tuple[np.ndarray, dict[str, object]]:
+    scale = _fit_fgw_structure_scale(
+        np.asarray(structures, dtype=np.float32),
+        np.asarray(mask, dtype=bool),
+        normalization=str(normalization),
+        n_pairs=int(n_pairs),
+        seed=int(seed),
+    )
+    normalized = np.asarray(structures, dtype=np.float32) / np.float32(
+        np.sqrt(max(float(scale), 1e-8))
+    )
+    return normalized, {
+        "fgw_structure_normalization": str(normalization),
+        "fgw_structure_sample_pairs": int(n_pairs),
+        "fgw_structure_cost_scale": float(scale),
+    }
 
 
 def _log(log_path: Path, message: str) -> None:
@@ -98,6 +125,9 @@ def _build_compact_local_measures(
     cap_state_clusters: int,
     radial_shells: int,
     isolated_policy: str,
+    fgw_structure_mode: str,
+    fgw_structure_knn: int,
+    fgw_structure_radius_fraction: float,
     expression_weight: float,
     spatial_weight: float,
     distance_weight: float,
@@ -207,11 +237,12 @@ def _build_compact_local_measures(
             mask[row, pos] = True
             pos += 1
         coords = np.vstack(rel_coords).astype(np.float32, copy=False)
-        if coords.shape[0] > 1:
-            diff = coords[:, None, :] - coords[None, :, :]
-            structure[row, : coords.shape[0], : coords.shape[0]] = np.sqrt(
-                np.sum(diff * diff, axis=2)
-            ).astype(np.float32)
+        structure[row, : coords.shape[0], : coords.shape[0]] = _local_structure_matrix(
+            coords,
+            mode=str(fgw_structure_mode),
+            knn=int(fgw_structure_knn),
+            radius_fraction=float(fgw_structure_radius_fraction),
+        )
     scales = _fit_ground_cost_scales(
         tokens,
         mask,
@@ -240,6 +271,10 @@ def _build_compact_local_measures(
         "cap_state_clusters": int(cap_state_clusters),
         "radial_shells": int(radial_shells),
         "isolated_policy": str(isolated_policy),
+        "fgw_structure_mode": str(fgw_structure_mode),
+        "fgw_structure_knn": int(fgw_structure_knn),
+        "fgw_structure_radius_fraction": float(fgw_structure_radius_fraction),
+        "uses_graph_topology_structure": str(fgw_structure_mode) != "complete_euclidean",
         "expression_weight": float(expression_weight),
         "spatial_weight": float(spatial_weight),
         "distance_weight": float(distance_weight),
@@ -527,7 +562,7 @@ def _plot_outputs(
     plot_prefix: str,
 ) -> None:
     plots = out_dir / "plots"
-    spatial_dir = plots / "spatial_niche_by_sample"
+    spatial_dir = plots / "ot_niche_by_sample"
     umap_dir = plots / "cell_umap3d_by_sample"
     spatial_dir.mkdir(parents=True, exist_ok=True)
     umap_dir.mkdir(parents=True, exist_ok=True)
@@ -618,7 +653,7 @@ def _plot_outputs(
         ax.set_title(f"{sample} spatial OT niches")
         ax.legend(markerscale=8, frameon=False, loc="best", fontsize=6, ncol=2)
         fig.tight_layout()
-        fig.savefig(spatial_dir / f"{sample}_spatial_niche_{plot_prefix}.png")
+        fig.savefig(spatial_dir / f"{sample}_ot_niche_{plot_prefix}.png")
         plt.close(fig)
 
         fig = plt.figure(figsize=(8, 7), dpi=220)
@@ -707,6 +742,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         cap_state_clusters=int(args.cap_state_clusters),
         radial_shells=int(args.radial_shells),
         isolated_policy="anchor_fallback",
+        fgw_structure_mode=str(args.fgw_structure_mode),
+        fgw_structure_knn=int(args.fgw_structure_knn),
+        fgw_structure_radius_fraction=float(args.fgw_structure_radius_fraction),
         expression_weight=float(args.expression_weight),
         spatial_weight=float(args.spatial_weight),
         distance_weight=float(args.distance_weight),
@@ -717,7 +755,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     _log(log_path, json.dumps(measures.metadata, indent=2, default=_json_default))
     feature_width = z.shape[1]
     features = measures.tokens[:, :, :feature_width].astype(np.float32, copy=False)
-    structures = np.asarray(measures.structure_matrices, dtype=np.float32)
+    structures, structure_norm = _normalize_fgw_structures(
+        np.asarray(measures.structure_matrices, dtype=np.float32),
+        measures.mask,
+        normalization=str(args.fgw_structure_normalization),
+        n_pairs=int(args.fgw_structure_sample_pairs),
+        seed=int(args.seed),
+    )
     weights = measures.weights.astype(np.float32, copy=False)
 
     _log(log_path, "[4/9] Selecting sample-balanced UMAP landmarks...")
@@ -763,7 +807,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         landmark_distance,
         method="agglomerative",
         candidate_n_clusters=tuple(range(5, 31)),
-        model_selection_metrics=("silhouette", "calinski_harabasz", "davies_bouldin", "dunn"),
+        model_selection_metrics=(
+            "silhouette",
+            "pseudo_calinski_harabasz",
+            "medoid_davies_bouldin",
+            "percentile_dunn",
+        ),
     )
     landmark_labels = cluster.labels.astype(np.int32)
     np.save(out_dir / "landmark_labels_model_selected.npy", landmark_labels)
@@ -805,11 +854,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     # lean and store only the standardized FGW input embedding.
     adata.obsm["X_cell_umap_3d"] = z.astype(np.float32, copy=False)
     adata.obs["ot_niche"] = pd.Categorical(label_names, categories=categories)
-    adata.obs["spatial_niche"] = pd.Categorical(label_names, categories=categories)
     adata.obs["ot_niche_int"] = full_labels
-    adata.obs["spatial_niche_int"] = full_labels
     adata.obs["ot_niche_assignment_score"] = assignment_score
-    adata.obs["spatial_niche_assignment_score"] = assignment_score
     adata.obs["assignment_landmark_index"] = assigned_landmark
     adata.obs["assignment_fgw_distance"] = assigned_distance
     suffix = f"r{float(args.radius_um):g}".replace(".", "p")
@@ -831,9 +877,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         log_path=log_path,
     )
     adata.obs["ot_niche_instance"] = pd.Categorical(instance_names)
-    adata.obs["spatial_niche_instance"] = pd.Categorical(instance_names)
     adata.obs["ot_niche_instance_int"] = instance_ids.astype(np.int32)
-    adata.obs["spatial_niche_instance_int"] = instance_ids.astype(np.int32)
     adata.uns["pairwise_niche_color_map"] = colors
     adata.uns["ot_niche_colors"] = [colors[cat] for cat in categories]
     cluster_counts = {
@@ -860,7 +904,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "local_graph": measures.metadata,
         "distance_summary": {
             "mode": "landmark_fused_gromov_wasserstein_assignment",
-            "uses_graph_topology": True,
+            "uses_graph_topology": bool(
+                measures.metadata.get("fgw_structure_mode") != "complete_euclidean"
+            ),
+            "uses_complete_spatial_structure": bool(
+                measures.metadata.get("fgw_structure_mode") == "complete_euclidean"
+            ),
             "all_pairs_dense_distance_matrix_materialized": False,
             "n_landmarks": int(landmark_indices.size),
             "candidate_landmarks": int(args.candidate_landmarks),
@@ -873,7 +922,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "assignment_sinkhorn_iters": int(args.assignment_sinkhorn_iters),
             "assignment_fgw_iters": int(args.assignment_fgw_iters),
             "node_feature_term": "standardized_3d_umap_only",
-            "graph_structure_term": "pairwise_support_spatial_distances_normalized_by_radius",
+            "graph_structure_term": str(measures.metadata.get("fgw_structure_mode")),
+            **structure_norm,
             "landmark_distance_shape": list(landmark_distance.shape),
             "landmark_distance_min": float(np.min(landmark_distance)),
             "landmark_distance_max": float(np.max(landmark_distance)),
@@ -904,7 +954,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "radius_um": float(args.radius_um),
         "max_neighbors": int(args.max_neighbors),
         "candidate_n_clusters": list(range(5, 31)),
-        "model_selection_metrics": ["silhouette", "calinski_harabasz", "davies_bouldin", "dunn"],
+        "model_selection_metrics": [
+            "silhouette",
+            "pseudo_calinski_harabasz",
+            "medoid_davies_bouldin",
+            "percentile_dunn",
+        ],
     }
     adata.uns["pairwise_niche_clustering_summary"] = summary["clustering_summary"]
     adata.uns["pairwise_niche_distance_summary"] = summary["distance_summary"]
@@ -946,7 +1001,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--distance-weight", type=float, default=0.10)
     parser.add_argument("--ground-cost-normalization", default="sampled_median")
     parser.add_argument("--ground-cost-sample-pairs", type=int, default=10000)
-    parser.add_argument("--fgw-alpha", type=float, default=0.5)
+    parser.add_argument("--fgw-alpha", type=float, default=0.25)
+    parser.add_argument(
+        "--fgw-structure-mode",
+        default="local_knn_shortest_path",
+        choices=[
+            "complete_euclidean",
+            "local_knn_shortest_path",
+            "radius_graph_shortest_path",
+            "adjacency",
+        ],
+    )
+    parser.add_argument("--fgw-structure-knn", type=int, default=6)
+    parser.add_argument("--fgw-structure-radius-fraction", type=float, default=0.5)
+    parser.add_argument("--fgw-structure-normalization", default="sampled_median")
+    parser.add_argument("--fgw-structure-sample-pairs", type=int, default=10000)
     parser.add_argument("--fgw-epsilon", type=float, default=0.05)
     parser.add_argument("--fgw-sinkhorn-iters", type=int, default=8)
     parser.add_argument("--fgw-iters", type=int, default=2)

@@ -17,7 +17,7 @@ def batched_sinkhorn_cost(
     epsilon: float = 0.05,
     n_iters: int = 50,
 ) -> torch.Tensor:
-    """Balanced entropic OT objective for a batch of cost matrices."""
+    """Return transport costs under entropy-regularized Sinkhorn plans."""
 
     if cost.ndim != 3:
         raise ValueError("cost must have shape (batch, n_source, n_target).")

@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 
 from .feature_source import prepare_h5ad_feature_cache
-from .cell_niche import run_cell_niche_on_h5ad
 from .pairwise_niche import run_pairwise_niche_on_h5ad
 from .pooling import distribute_pooled_feature_cache_to_inputs, pool_h5ads_in_directory
 
@@ -58,151 +57,6 @@ def _parse_string_list(value: str | None) -> tuple[str, ...] | None:
     if value is None or str(value).strip() == "":
         return None
     return tuple(item.strip() for item in str(value).split(",") if item.strip())
-
-
-def _add_cell_niche_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "action",
-        nargs="?",
-        default="fit",
-        choices=["fit"],
-        help="Action to run. 'fit' is the current cell-niche action.",
-    )
-    parser.add_argument("--input-h5ad", required=True, help="Input cell-level H5AD.")
-    parser.add_argument(
-        "--output-dir",
-        required=True,
-        help="Output directory for cell-niche artifacts.",
-    )
-    parser.add_argument(
-        "--feature-obsm-key",
-        required=True,
-        help="Feature source for cell-centered descriptors. Use an obsm key or 'X'.",
-    )
-    parser.add_argument("--spatial-x-key", required=True, help="obs key for x.")
-    parser.add_argument("--spatial-y-key", required=True, help="obs key for y.")
-    parser.add_argument(
-        "--sample-obs-key",
-        default="sample_id",
-        help="obs key storing sample IDs. Neighborhood graphs never cross samples.",
-    )
-    parser.add_argument(
-        "--spatial-scale",
-        type=float,
-        default=1.0,
-        help="Multiplier converting coordinates into microns.",
-    )
-    parser.add_argument(
-        "--radii-um",
-        default="20,50,100",
-        help="Comma-separated physical radii in microns. Use '' with --knn-values.",
-    )
-    parser.add_argument(
-        "--knn-values",
-        default=None,
-        help="Optional comma-separated kNN neighborhood sizes.",
-    )
-    parser.add_argument(
-        "--max-neighbors",
-        type=int,
-        default=256,
-        help="Maximum retained neighbors per cell per graph.",
-    )
-    parser.add_argument(
-        "--graph-kernel",
-        default="gaussian",
-        choices=["gaussian", "uniform", "inverse_distance", "binary", "inverse"],
-    )
-    parser.add_argument("--density-correction", type=float, default=0.5)
-    parser.add_argument("--state-codebook-size", type=int, default=64)
-    parser.add_argument("--state-codebook-sample-size", type=int, default=50000)
-    parser.add_argument("--feature-pca-dim", type=int, default=128)
-    parser.add_argument(
-        "--descriptor-blocks",
-        default="composition,diversity,moments,radial,pair,covariance,gradient",
-        help="Comma-separated blocks: composition,diversity,moments,radial,pair,covariance,gradient.",
-    )
-    parser.add_argument("--radial-shells", type=int, default=3)
-    parser.add_argument(
-        "--pair-mode",
-        default="anchor_neighbor",
-        choices=["anchor_neighbor", "none", "disabled"],
-    )
-    parser.add_argument("--pair-top-states", type=int, default=16)
-    parser.add_argument("--covariance-dims", type=int, default=8)
-    parser.add_argument(
-        "--encoder",
-        default="descriptor",
-        choices=["descriptor", "deepsets", "attention_deepsets", "ot_deepshe"],
-    )
-    parser.add_argument("--max-neighbors-per-radius", type=int, default=None)
-    parser.add_argument("--token-dim", type=int, default=128)
-    parser.add_argument("--hidden-dim", type=int, default=256)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=1024)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--device", default="auto")
-    parser.add_argument(
-        "--use-ot-prototypes",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable the experimental Sinkhorn prototype head for DeepSHE runs.",
-    )
-    parser.add_argument("--n-ot-prototypes", type=int, default=20)
-    parser.add_argument("--prototype-support-size", type=int, default=32)
-    parser.add_argument("--ot-epsilon", type=float, default=0.05)
-    parser.add_argument("--ot-temperature", type=float, default=0.25)
-    parser.add_argument("--ot-distance-feature-weight", type=float, default=1.0)
-    parser.add_argument("--context-reconstruction-weight", type=float, default=1.0)
-    parser.add_argument("--ot-prototype-weight", type=float, default=0.5)
-    parser.add_argument("--prototype-balance-weight", type=float, default=0.05)
-    parser.add_argument("--variance-weight", type=float, default=0.02)
-    parser.add_argument("--decorrelation-weight", type=float, default=0.005)
-    parser.add_argument(
-        "--embedding-method",
-        default="descriptor_pca",
-        choices=["descriptor_pca", "none"],
-    )
-    parser.add_argument("--embedding-dim", type=int, default=64)
-    parser.add_argument(
-        "--cluster-method",
-        default="kmeans",
-        choices=["kmeans", "leiden"],
-    )
-    parser.add_argument(
-        "--n-clusters",
-        type=int,
-        default=None,
-        help="Required for KMeans fixed-K cell-niche runs.",
-    )
-    parser.add_argument("--resolution", type=float, default=1.0)
-    parser.add_argument("--candidate-resolutions", default=None)
-    parser.add_argument("--embedding-neighbors", type=int, default=15)
-    parser.add_argument("--self-weight", "--include-self-weight", type=float, default=0.25)
-    parser.add_argument("--composition-weight", type=float, default=0.25)
-    parser.add_argument("--diversity-weight", type=float, default=0.25)
-    parser.add_argument("--moments-weight", type=float, default=0.15)
-    parser.add_argument("--radial-weight", type=float, default=0.15)
-    parser.add_argument("--pair-weight", type=float, default=0.15)
-    parser.add_argument("--covariance-weight", type=float, default=0.15)
-    parser.add_argument("--gradient-weight", type=float, default=0.10)
-    parser.add_argument(
-        "--allow-umap-as-feature",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    parser.add_argument(
-        "--run-null-checks",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    parser.add_argument(
-        "--run-ablation-report",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    parser.add_argument("--seed", type=int, default=1337)
 
 
 def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
@@ -279,7 +133,7 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--isolated-policy",
-        default="zero_dummy",
+        default="anchor_fallback",
         choices=["zero_dummy", "anchor_fallback"],
         help="How to represent no-neighbor cells when the anchor is not included.",
     )
@@ -306,7 +160,7 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         help="Normalize expression/spatial/radial cost contributions before weighting.",
     )
     parser.add_argument("--ground-cost-sample-pairs", type=int, default=10000)
-    parser.add_argument("--anchor-weight", type=float, default=0.25)
+    parser.add_argument("--anchor-weight", type=float, default=0.0)
     parser.add_argument("--sinkhorn-epsilon", type=float, default=0.05)
     parser.add_argument("--sinkhorn-iters", type=int, default=50)
     parser.add_argument(
@@ -322,14 +176,55 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--fgw-alpha",
         type=float,
-        default=0.5,
-        help="Structure/topology weight for fused Gromov-Wasserstein graph distance.",
+        default=0.25,
+        help="Local structure weight for fused Gromov-Wasserstein.",
     )
     parser.add_argument(
         "--fgw-iters",
         type=int,
         default=5,
         help="Outer FGW coupling-refinement iterations.",
+    )
+    parser.add_argument(
+        "--fgw-node-feature-mode",
+        default="expression_only",
+        choices=["expression_only", "expression_plus_radial", "full_token"],
+        help="Node features used in FGW. expression_only avoids double-counting spatial geometry.",
+    )
+    parser.add_argument(
+        "--fgw-structure-mode",
+        default="local_knn_shortest_path",
+        choices=[
+            "complete_euclidean",
+            "local_knn_shortest_path",
+            "radius_graph_shortest_path",
+            "adjacency",
+        ],
+        help="Local structure matrix used by FGW.",
+    )
+    parser.add_argument(
+        "--fgw-structure-knn",
+        type=int,
+        default=6,
+        help="Neighbor count for local_knn_shortest_path FGW structure.",
+    )
+    parser.add_argument(
+        "--fgw-structure-radius-fraction",
+        type=float,
+        default=0.5,
+        help="Radius fraction for radius_graph_shortest_path or adjacency FGW structure.",
+    )
+    parser.add_argument(
+        "--fgw-structure-normalization",
+        default="sampled_median",
+        choices=["none", "sampled_median"],
+        help="Normalize FGW structure-cost scale before applying --fgw-alpha.",
+    )
+    parser.add_argument(
+        "--fgw-structure-sample-pairs",
+        type=int,
+        default=10000,
+        help="Sample count for FGW structure-cost normalization.",
     )
     parser.add_argument(
         "--pairwise-mode",
@@ -349,6 +244,12 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=5e11,
         help="Safety guard for exact all-pairs Sinkhorn work.",
+    )
+    parser.add_argument(
+        "--max-fgw-work-units",
+        type=float,
+        default=1e12,
+        help="Safety guard for exact all-pairs FGW structure and Sinkhorn work.",
     )
     parser.add_argument(
         "--force-large-exact-ot",
@@ -384,10 +285,11 @@ def _add_pairwise_niche_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--model-selection-metrics",
-        default="silhouette,calinski_harabasz,davies_bouldin,dunn",
+        default="silhouette,pseudo_calinski_harabasz,medoid_davies_bouldin,percentile_dunn",
         help=(
             "Comma-separated precomputed-distance model-selection metrics. Supported: "
-            "silhouette, calinski_harabasz, davies_bouldin, dunn."
+            "silhouette, pseudo_calinski_harabasz, medoid_davies_bouldin, "
+            "percentile_dunn, minimum_dunn. Legacy names are accepted as aliases."
         ),
     )
     parser.add_argument("--ot-knn", type=int, default=30)
@@ -422,12 +324,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fit spatial niches from a pairwise OT neighborhood distance matrix.",
     )
     _add_pairwise_niche_args(pairwise_niche)
-
-    cell_niche = sub.add_parser(
-        "cell-niche",
-        help="Fit the descriptor/DeepSHE baseline and QC workflow.",
-    )
-    _add_cell_niche_args(cell_niche)
 
     pool_inputs = sub.add_parser(
         "pool-inputs",
@@ -520,11 +416,18 @@ def main() -> None:
             distance_mode=args.distance_mode,
             fgw_alpha=args.fgw_alpha,
             fgw_iters=args.fgw_iters,
+            fgw_node_feature_mode=args.fgw_node_feature_mode,
+            fgw_structure_mode=args.fgw_structure_mode,
+            fgw_structure_knn=args.fgw_structure_knn,
+            fgw_structure_radius_fraction=args.fgw_structure_radius_fraction,
+            fgw_structure_normalization=args.fgw_structure_normalization,
+            fgw_structure_sample_pairs=args.fgw_structure_sample_pairs,
             pairwise_mode=args.pairwise_mode,
             block_size=args.block_size,
             device=args.device,
             max_exact_cells=args.max_exact_cells,
             max_ot_work_units=args.max_ot_work_units,
+            max_fgw_work_units=args.max_fgw_work_units,
             force_large_exact_ot=args.force_large_exact_ot,
             distance_store=args.distance_store,
             cluster_method=args.cluster_method,
@@ -537,68 +440,6 @@ def main() -> None:
             candidate_resolutions=_parse_float_list(args.candidate_resolutions),
             instance_radius_um=args.instance_radius_um,
             instance_max_neighbors=args.instance_max_neighbors,
-            seed=args.seed,
-        )
-    elif args.command == "cell-niche":
-        summary = run_cell_niche_on_h5ad(
-            input_h5ad=args.input_h5ad,
-            output_dir=args.output_dir,
-            feature_obsm_key=args.feature_obsm_key,
-            spatial_x_key=args.spatial_x_key,
-            spatial_y_key=args.spatial_y_key,
-            sample_obs_key=args.sample_obs_key,
-            spatial_scale=args.spatial_scale,
-            radii_um=args.radii_um,
-            knn_values=args.knn_values,
-            max_neighbors=args.max_neighbors,
-            graph_kernel=args.graph_kernel,
-            density_correction=args.density_correction,
-            state_codebook_size=args.state_codebook_size,
-            state_codebook_sample_size=args.state_codebook_sample_size,
-            feature_pca_dim=args.feature_pca_dim,
-            descriptor_blocks=args.descriptor_blocks,
-            radial_shells=args.radial_shells,
-            pair_mode=args.pair_mode,
-            pair_top_states=args.pair_top_states,
-            covariance_dims=args.covariance_dims,
-            encoder=args.encoder,
-            max_neighbors_per_radius=args.max_neighbors_per_radius,
-            token_dim=args.token_dim,
-            hidden_dim=args.hidden_dim,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            learning_rate=args.learning_rate,
-            weight_decay=args.weight_decay,
-            device=args.device,
-            use_ot_prototypes=args.use_ot_prototypes,
-            n_ot_prototypes=args.n_ot_prototypes,
-            prototype_support_size=args.prototype_support_size,
-            ot_epsilon=args.ot_epsilon,
-            ot_temperature=args.ot_temperature,
-            ot_distance_feature_weight=args.ot_distance_feature_weight,
-            context_reconstruction_weight=args.context_reconstruction_weight,
-            ot_prototype_weight=args.ot_prototype_weight,
-            prototype_balance_weight=args.prototype_balance_weight,
-            variance_weight=args.variance_weight,
-            decorrelation_weight=args.decorrelation_weight,
-            embedding_method=args.embedding_method,
-            embedding_dim=args.embedding_dim,
-            cluster_method=args.cluster_method,
-            n_clusters=args.n_clusters,
-            resolution=args.resolution,
-            candidate_resolutions=args.candidate_resolutions,
-            embedding_neighbors=args.embedding_neighbors,
-            self_weight=args.self_weight,
-            composition_weight=args.composition_weight,
-            diversity_weight=args.diversity_weight,
-            moments_weight=args.moments_weight,
-            radial_weight=args.radial_weight,
-            pair_weight=args.pair_weight,
-            covariance_weight=args.covariance_weight,
-            gradient_weight=args.gradient_weight,
-            allow_umap_as_feature=args.allow_umap_as_feature,
-            run_null_checks=args.run_null_checks,
-            run_ablation_report=args.run_ablation_report,
             seed=args.seed,
         )
     elif args.command == "pool-inputs":

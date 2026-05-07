@@ -14,5 +14,3 @@ Run pairwise OT niches with:
 ```bash
 spatial-ot pairwise-niche fit ...
 ```
-
-The `cell-niche` command remains available as a descriptor/DeepSHE baseline and QC path.

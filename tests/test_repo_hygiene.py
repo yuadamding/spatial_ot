@@ -88,7 +88,7 @@ def test_cli_exposes_only_current_workflow() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     cli_text = (repo_root / "spatial_ot" / "cli.py").read_text()
     assert "pairwise-niche" in cli_text
-    assert "cell-niche" in cli_text
+    assert "cell-niche" not in cli_text
     assert ("multi" + "level-ot") not in cli_text
     assert ("optimal" + "-search") not in cli_text
     assert "plot-sample-niches" not in cli_text
