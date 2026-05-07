@@ -5,6 +5,7 @@ from .colors import HIGH_CONTRAST_PALETTE, assign_high_contrast_colors
 from .config import PairwiseNicheConfig
 from .distance_matrix import (
     choose_pairwise_block_size,
+    compute_cross_ot_distance_matrix,
     compute_pairwise_ot_distance_matrix,
     estimate_pairwise_fgw_work,
     estimate_pairwise_ot_work,
@@ -48,6 +49,7 @@ __all__ = [
     "build_local_measures",
     "choose_pairwise_block_size",
     "cluster_from_distance",
+    "compute_cross_ot_distance_matrix",
     "compute_pairwise_ot_distance_matrix",
     "estimate_pairwise_fgw_work",
     "estimate_pairwise_ot_work",

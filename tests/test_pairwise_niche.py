@@ -9,12 +9,14 @@ import pytest
 import torch
 
 from spatial_ot.pairwise_niche import (
+    LocalMeasureSet,
     PairwiseNicheConfig,
     assign_high_contrast_colors,
     build_instance_neighbor_indices,
     build_local_measures,
     choose_pairwise_block_size,
     cluster_from_distance,
+    compute_cross_ot_distance_matrix,
     compute_pairwise_ot_distance_matrix,
     estimate_pairwise_fgw_work,
     estimate_pairwise_ot_work,
@@ -57,6 +59,22 @@ def _toy_cohort(n_per_sample: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarr
     coords = np.vstack([coords_a, coords_b]).astype(np.float32)
     samples = np.asarray(["A"] * n_per_sample + ["B"] * n_per_sample, dtype=object)
     return features, coords, samples
+
+
+def _subset_measures(measures: LocalMeasureSet, rows: np.ndarray) -> LocalMeasureSet:
+    idx = np.asarray(rows, dtype=np.int64)
+    return LocalMeasureSet(
+        tokens=measures.tokens[idx],
+        weights=measures.weights[idx],
+        mask=measures.mask[idx],
+        neighbor_indices=measures.neighbor_indices[idx],
+        full_neighbor_counts=measures.full_neighbor_counts[idx],
+        retained_neighbor_counts=measures.retained_neighbor_counts[idx],
+        metadata=dict(measures.metadata),
+        structure_matrices=None
+        if measures.structure_matrices is None
+        else measures.structure_matrices[idx],
+    )
 
 
 def test_default_neighbor_radius_is_50um() -> None:
@@ -507,6 +525,46 @@ def test_pairwise_ot_matrix_is_symmetric_with_zero_diagonal() -> None:
     assert np.isfinite(distance).all()
 
 
+def test_cross_ot_distance_matches_exact_submatrix() -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=4)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+        seed=13,
+    )
+    exact, _ = compute_pairwise_ot_distance_matrix(
+        measures=measures,
+        anchor_embedding=embedding.values,
+        block_size=1,
+        device="cpu",
+        epsilon=0.05,
+        n_iters=5,
+        anchor_weight=0.1,
+        max_exact_cells=20,
+    )
+    query = np.asarray([0, 2, 4], dtype=np.int64)
+    reference = np.asarray([5, 6, 7], dtype=np.int64)
+    cross, metadata = compute_cross_ot_distance_matrix(
+        query_measures=_subset_measures(measures, query),
+        reference_measures=_subset_measures(measures, reference),
+        query_anchor_embedding=embedding.values[query],
+        reference_anchor_embedding=embedding.values[reference],
+        block_size=2,
+        device="cpu",
+        epsilon=0.05,
+        n_iters=5,
+        anchor_weight=0.1,
+    )
+    assert metadata["cross_distance"] is True
+    assert metadata["matrix_shape"] == [3, 3]
+    np.testing.assert_allclose(cross, exact[np.ix_(query, reference)], atol=1e-5)
+
+
 def test_local_measure_structure_matrix_and_fgw_distance() -> None:
     features, coords, samples = _toy_cohort(n_per_sample=4)
     embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
@@ -549,6 +607,53 @@ def test_local_measure_structure_matrix_and_fgw_distance() -> None:
     )
     assert d.shape == (2, 2)
     assert torch.isfinite(d).all()
+
+
+def test_cross_fgw_distance_matches_exact_submatrix_with_provided_structure_scale() -> None:
+    features, coords, samples = _toy_cohort(n_per_sample=4)
+    embedding = fit_expression_embedding(features, method="pca", embedding_dim=3)
+    measures = build_local_measures(
+        expression_embedding=embedding.values,
+        coords_um=coords,
+        sample_ids=samples,
+        radius_um=3.0,
+        max_neighbors=2,
+        include_anchor=True,
+        seed=13,
+        build_structure_matrices=True,
+    )
+    exact, exact_metadata = compute_pairwise_ot_distance_matrix(
+        measures=measures,
+        anchor_embedding=embedding.values,
+        block_size=1,
+        device="cpu",
+        epsilon=0.05,
+        n_iters=3,
+        distance_mode="fused_gromov_wasserstein",
+        fgw_alpha=0.4,
+        fgw_iters=2,
+        max_exact_cells=20,
+    )
+    query = np.asarray([0, 2, 4], dtype=np.int64)
+    reference = np.asarray([5, 6, 7], dtype=np.int64)
+    cross, metadata = compute_cross_ot_distance_matrix(
+        query_measures=_subset_measures(measures, query),
+        reference_measures=_subset_measures(measures, reference),
+        query_anchor_embedding=embedding.values[query],
+        reference_anchor_embedding=embedding.values[reference],
+        block_size=2,
+        device="cpu",
+        epsilon=0.05,
+        n_iters=3,
+        distance_mode="fused_gromov_wasserstein",
+        fgw_alpha=0.4,
+        fgw_iters=2,
+        fgw_structure_cost_scale=float(exact_metadata["fgw_structure_cost_scale"]),
+    )
+    assert metadata["distance_mode"] == "fused_gromov_wasserstein"
+    assert metadata["cross_distance"] is True
+    assert metadata["fgw_structure_cost_scale_source"] == "provided"
+    np.testing.assert_allclose(cross, exact[np.ix_(query, reference)], atol=1e-5)
 
 
 def test_pairwise_fgw_matrix_uses_graph_structure_and_scaled_features() -> None:

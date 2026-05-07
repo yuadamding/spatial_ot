@@ -21,6 +21,123 @@ def _resolve_device(device: str) -> torch.device:
     return torch.device(requested)
 
 
+_DEBIASED_MODES = {
+    "sinkhorn_divergence",
+    "debiased",
+    "debiased_sinkhorn",
+    "debiased_entropic_transport",
+}
+_FGW_MODES = {"fgw", "fused_gromov_wasserstein"}
+_VALID_DISTANCE_MODES = {"sinkhorn", *_DEBIASED_MODES, *_FGW_MODES}
+
+
+def _parse_distance_mode(distance_mode: str) -> tuple[str, bool, bool]:
+    requested = str(distance_mode or "debiased_entropic_transport").strip().lower()
+    if requested not in _VALID_DISTANCE_MODES:
+        raise ValueError(
+            "distance_mode must be sinkhorn, debiased_entropic_transport, "
+            "or fused_gromov_wasserstein."
+        )
+    return requested, requested in _DEBIASED_MODES, requested in _FGW_MODES
+
+
+def _canonical_distance_mode(*, debiased: bool, use_fgw: bool) -> str:
+    if use_fgw:
+        return "fused_gromov_wasserstein"
+    return "debiased_entropic_transport" if debiased else "sinkhorn"
+
+
+def _active_counts(mask: np.ndarray) -> np.ndarray:
+    return np.maximum(np.asarray(mask, dtype=bool).sum(axis=1), 1)
+
+
+def _tensor_block(
+    values: np.ndarray,
+    start: int,
+    stop: int,
+    width: int,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    return torch.as_tensor(
+        values[start:stop, :width],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _structure_block(
+    values: np.ndarray,
+    start: int,
+    stop: int,
+    width: int,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    return torch.as_tensor(
+        values[start:stop, :width, :width],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _distance_block(
+    *,
+    tok_a: torch.Tensor,
+    w_a: torch.Tensor,
+    tok_b: torch.Tensor,
+    w_b: torch.Tensor,
+    use_fgw: bool,
+    struct_a: torch.Tensor | None = None,
+    struct_b: torch.Tensor | None = None,
+    fgw_alpha: float,
+    epsilon: float,
+    n_iters: int,
+    fgw_iters: int,
+) -> np.ndarray:
+    if use_fgw:
+        if struct_a is None or struct_b is None:
+            raise ValueError("FGW distance blocks require structure tensors.")
+        block = fused_gromov_wasserstein_block(
+            tok_a,
+            struct_a,
+            w_a,
+            tok_b,
+            struct_b,
+            w_b,
+            alpha=float(fgw_alpha),
+            epsilon=float(epsilon),
+            sinkhorn_iters=int(n_iters),
+            fgw_iters=int(fgw_iters),
+        )
+    else:
+        block = sinkhorn_ot_block(
+            tok_a,
+            w_a,
+            tok_b,
+            w_b,
+            epsilon=float(epsilon),
+            n_iters=int(n_iters),
+        )
+    return block.detach().cpu().numpy().astype(np.float32)
+
+
+def _add_anchor_cost(
+    block: np.ndarray,
+    anchor_a: np.ndarray,
+    anchor_b: np.ndarray,
+    anchor_weight: float,
+) -> np.ndarray:
+    if float(anchor_weight) <= 0.0:
+        return block
+    anchor_cost = (
+        np.sum(anchor_a * anchor_a, axis=1, keepdims=True)
+        + np.sum(anchor_b * anchor_b, axis=1, keepdims=True).T
+        - 2.0 * (anchor_a @ anchor_b.T)
+    )
+    return block + float(anchor_weight) * np.maximum(anchor_cost, 0.0).astype(np.float32)
+
+
 def _estimate_dense_bytes(n_cells: int) -> int:
     return int(n_cells) * int(n_cells) * np.dtype("float32").itemsize
 
@@ -190,20 +307,12 @@ def _self_sinkhorn_costs(
 ) -> np.ndarray:
     n = int(measures.tokens.shape[0])
     out = np.zeros(n, dtype=np.float32)
-    active_counts = np.maximum(np.asarray(measures.mask, dtype=bool).sum(axis=1), 1)
+    active_counts = _active_counts(measures.mask)
     for start in range(0, n, max(int(block_size), 1)):
         stop = min(start + max(int(block_size), 1), n)
         width = int(np.max(active_counts[start:stop]))
-        tokens = torch.as_tensor(
-            measures.tokens[start:stop, :width],
-            dtype=torch.float32,
-            device=device,
-        )
-        weights = torch.as_tensor(
-            measures.weights[start:stop, :width],
-            dtype=torch.float32,
-            device=device,
-        )
+        tokens = _tensor_block(measures.tokens, start, stop, width, device=device)
+        weights = _tensor_block(measures.weights, start, stop, width, device=device)
         out[start:stop] = (
             sinkhorn_self_cost_batch(
                 tokens,
@@ -246,7 +355,7 @@ def compute_pairwise_ot_distance_matrix(
     tokens = np.asarray(measures.tokens, dtype=np.float32)
     weights = np.asarray(measures.weights, dtype=np.float32)
     anchors = np.asarray(anchor_embedding, dtype=np.float32)
-    active_counts = np.maximum(np.asarray(measures.mask, dtype=bool).sum(axis=1), 1)
+    active_counts = _active_counts(measures.mask)
     n = int(tokens.shape[0])
     if anchors.shape[0] != n:
         raise ValueError("anchor_embedding must have one row per local measure.")
@@ -280,28 +389,7 @@ def compute_pairwise_ot_distance_matrix(
         out = np.zeros((n, n), dtype=np.float32)
 
     resolved_device = _resolve_device(device)
-    requested_mode = str(distance_mode or "debiased_entropic_transport").strip().lower()
-    valid_modes = {
-        "sinkhorn",
-        "sinkhorn_divergence",
-        "debiased",
-        "debiased_sinkhorn",
-        "debiased_entropic_transport",
-        "fgw",
-        "fused_gromov_wasserstein",
-    }
-    if requested_mode not in valid_modes:
-        raise ValueError(
-            "distance_mode must be sinkhorn, debiased_entropic_transport, "
-            "or fused_gromov_wasserstein."
-        )
-    debiased = requested_mode in {
-        "sinkhorn_divergence",
-        "debiased",
-        "debiased_sinkhorn",
-        "debiased_entropic_transport",
-    }
-    use_fgw = requested_mode in {"fgw", "fused_gromov_wasserstein"}
+    requested_mode, debiased, use_fgw = _parse_distance_mode(distance_mode)
     if use_fgw and measures.structure_matrices is None:
         raise ValueError("fused_gromov_wasserstein requires local graph structure matrices.")
     fgw_feature_metadata: dict[str, object] = {}
@@ -364,101 +452,73 @@ def compute_pairwise_ot_distance_matrix(
     for a_start in range(0, n, bs):
         a_stop = min(a_start + bs, n)
         width_a = int(np.max(active_counts[a_start:a_stop]))
-        tok_a = torch.as_tensor(
-            tokens[a_start:a_stop, :width_a],
-            dtype=torch.float32,
-            device=resolved_device,
-        )
-        w_a = torch.as_tensor(
-            weights[a_start:a_stop, :width_a],
-            dtype=torch.float32,
-            device=resolved_device,
-        )
+        tok_a = _tensor_block(tokens, a_start, a_stop, width_a, device=resolved_device)
+        w_a = _tensor_block(weights, a_start, a_stop, width_a, device=resolved_device)
         anchor_a = anchors[a_start:a_stop]
         for b_start in range(a_start, n, bs):
             b_stop = min(b_start + bs, n)
             width_b = int(np.max(active_counts[b_start:b_stop]))
-            tok_b = torch.as_tensor(
-                tokens[b_start:b_stop, :width_b],
-                dtype=torch.float32,
-                device=resolved_device,
-            )
-            w_b = torch.as_tensor(
-                weights[b_start:b_stop, :width_b],
-                dtype=torch.float32,
-                device=resolved_device,
-            )
+            tok_b = _tensor_block(tokens, b_start, b_stop, width_b, device=resolved_device)
+            w_b = _tensor_block(weights, b_start, b_stop, width_b, device=resolved_device)
             if use_fgw:
                 assert structures is not None
-                struct_a = torch.as_tensor(
-                    structures[a_start:a_stop, :width_a, :width_a],
-                    dtype=torch.float32,
+                struct_a = _structure_block(
+                    structures,
+                    a_start,
+                    a_stop,
+                    width_a,
                     device=resolved_device,
                 )
-                struct_b = torch.as_tensor(
-                    structures[b_start:b_stop, :width_b, :width_b],
-                    dtype=torch.float32,
+                struct_b = _structure_block(
+                    structures,
+                    b_start,
+                    b_stop,
+                    width_b,
                     device=resolved_device,
                 )
-                block = (
-                    fused_gromov_wasserstein_block(
-                        tok_a,
-                        struct_a,
-                        w_a,
-                        tok_b,
-                        struct_b,
-                        w_b,
-                        alpha=float(fgw_alpha),
+            else:
+                struct_a = struct_b = None
+            block = _distance_block(
+                tok_a=tok_a,
+                w_a=w_a,
+                tok_b=tok_b,
+                w_b=w_b,
+                use_fgw=use_fgw,
+                struct_a=struct_a,
+                struct_b=struct_b,
+                fgw_alpha=float(fgw_alpha),
+                epsilon=float(epsilon),
+                n_iters=int(n_iters),
+                fgw_iters=int(fgw_iters),
+            )
+            if not use_fgw and len(sinkhorn_diagnostic_errors) < sinkhorn_diagnostic_block_limit:
+                diag_a = min(int(tok_a.shape[0]), sinkhorn_diagnostic_cells_per_axis)
+                diag_b = min(int(tok_b.shape[0]), sinkhorn_diagnostic_cells_per_axis)
+                errors = (
+                    sinkhorn_ot_marginal_error_block(
+                        tok_a[:diag_a],
+                        w_a[:diag_a],
+                        tok_b[:diag_b],
+                        w_b[:diag_b],
                         epsilon=float(epsilon),
-                        sinkhorn_iters=int(n_iters),
-                        fgw_iters=int(fgw_iters),
+                        n_iters=int(n_iters),
                     )
                     .detach()
                     .cpu()
                     .numpy()
                     .astype(np.float32)
                 )
-            else:
-                block = sinkhorn_ot_block(
-                    tok_a,
-                    w_a,
-                    tok_b,
-                    w_b,
-                    epsilon=float(epsilon),
-                    n_iters=int(n_iters),
-                ).detach().cpu().numpy().astype(np.float32)
-                if len(sinkhorn_diagnostic_errors) < sinkhorn_diagnostic_block_limit:
-                    diag_a = min(int(tok_a.shape[0]), sinkhorn_diagnostic_cells_per_axis)
-                    diag_b = min(int(tok_b.shape[0]), sinkhorn_diagnostic_cells_per_axis)
-                    errors = (
-                        sinkhorn_ot_marginal_error_block(
-                            tok_a[:diag_a],
-                            w_a[:diag_a],
-                            tok_b[:diag_b],
-                            w_b[:diag_b],
-                            epsilon=float(epsilon),
-                            n_iters=int(n_iters),
-                        )
-                        .detach()
-                        .cpu()
-                        .numpy()
-                        .astype(np.float32)
-                    )
-                    sinkhorn_diagnostic_errors.append(errors.reshape(-1))
+                sinkhorn_diagnostic_errors.append(errors.reshape(-1))
             if debiased:
                 block = block - 0.5 * self_costs[a_start:a_stop, None]
                 block = block - 0.5 * self_costs[None, b_start:b_stop]
                 block = np.maximum(block, 0.0).astype(np.float32, copy=False)
-            if float(anchor_weight) > 0.0:
-                anchor_b = anchors[b_start:b_stop]
-                anchor_cost = (
-                    np.sum(anchor_a * anchor_a, axis=1, keepdims=True)
-                    + np.sum(anchor_b * anchor_b, axis=1, keepdims=True).T
-                    - 2.0 * (anchor_a @ anchor_b.T)
-                )
-                block = block + float(anchor_weight) * np.maximum(anchor_cost, 0.0).astype(
-                    np.float32
-                )
+            block = _add_anchor_cost(
+                block,
+                anchor_a,
+                anchors[b_start:b_stop],
+                float(anchor_weight),
+            )
             if b_start == a_start:
                 block = (0.5 * (block + block.T)).astype(np.float32, copy=False)
                 np.fill_diagonal(block, 0.0)
@@ -490,13 +550,7 @@ def compute_pairwise_ot_distance_matrix(
             "sinkhorn_iters": int(n_iters),
         }
     metadata = {
-        "distance_mode": (
-            "fused_gromov_wasserstein"
-            if use_fgw
-            else "debiased_entropic_transport"
-            if debiased
-            else "sinkhorn"
-        ),
+        "distance_mode": _canonical_distance_mode(debiased=debiased, use_fgw=use_fgw),
         "requested_distance_mode": str(requested_mode),
         "sinkhorn_divergence_alias_used": bool(
             requested_mode in {"sinkhorn_divergence", "debiased", "debiased_sinkhorn"}
@@ -579,8 +633,240 @@ def compute_pairwise_ot_distance_matrix(
     return out, metadata
 
 
+def compute_cross_ot_distance_matrix(
+    *,
+    query_measures: LocalMeasureSet,
+    reference_measures: LocalMeasureSet,
+    query_anchor_embedding: np.ndarray,
+    reference_anchor_embedding: np.ndarray,
+    block_size: int = 64,
+    device: str = "auto",
+    epsilon: float = 0.05,
+    n_iters: int = 50,
+    distance_mode: str = "debiased_entropic_transport",
+    anchor_weight: float = 0.0,
+    fgw_alpha: float = 0.25,
+    fgw_iters: int = 5,
+    fgw_node_feature_mode: str = "expression_only",
+    fgw_structure_normalization: str = "sampled_median",
+    fgw_structure_sample_pairs: int = 10000,
+    fgw_structure_cost_scale: float | None = None,
+    target_block_memory_gib: float | None = None,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Compute query-to-reference OT/FGW distances without an all-by-all query matrix."""
+
+    query_tokens = np.asarray(query_measures.tokens, dtype=np.float32)
+    reference_tokens = np.asarray(reference_measures.tokens, dtype=np.float32)
+    query_weights = np.asarray(query_measures.weights, dtype=np.float32)
+    reference_weights = np.asarray(reference_measures.weights, dtype=np.float32)
+    query_anchors = np.asarray(query_anchor_embedding, dtype=np.float32)
+    reference_anchors = np.asarray(reference_anchor_embedding, dtype=np.float32)
+    n_query = int(query_tokens.shape[0])
+    n_reference = int(reference_tokens.shape[0])
+    if query_anchors.shape[0] != n_query:
+        raise ValueError("query_anchor_embedding must have one row per query measure.")
+    if reference_anchors.shape[0] != n_reference:
+        raise ValueError("reference_anchor_embedding must have one row per reference measure.")
+    requested_mode, debiased, use_fgw = _parse_distance_mode(distance_mode)
+    if use_fgw and (
+        query_measures.structure_matrices is None
+        or reference_measures.structure_matrices is None
+    ):
+        raise ValueError("fused_gromov_wasserstein requires local graph structure matrices.")
+
+    resolved_device = _resolve_device(device)
+    bs, block_metadata = choose_pairwise_block_size(
+        support_size=max(int(query_tokens.shape[1]), int(reference_tokens.shape[1])),
+        requested_block_size=int(block_size),
+        target_memory_gib=target_block_memory_gib,
+        use_fgw=bool(use_fgw),
+    )
+    query_active = _active_counts(query_measures.mask)
+    reference_active = _active_counts(reference_measures.mask)
+    query_self = (
+        _self_sinkhorn_costs(
+            query_measures,
+            block_size=int(bs),
+            device=resolved_device,
+            epsilon=float(epsilon),
+            n_iters=int(n_iters),
+        )
+        if debiased and not use_fgw
+        else np.zeros(n_query, dtype=np.float32)
+    )
+    reference_self = (
+        _self_sinkhorn_costs(
+            reference_measures,
+            block_size=int(bs),
+            device=resolved_device,
+            epsilon=float(epsilon),
+            n_iters=int(n_iters),
+        )
+        if debiased and not use_fgw
+        else np.zeros(n_reference, dtype=np.float32)
+    )
+
+    fgw_feature_metadata: dict[str, object] = {}
+    query_structures = None
+    reference_structures = None
+    fgw_structure_scale = 1.0
+    if use_fgw:
+        query_tokens, fgw_feature_metadata = _fgw_node_feature_array(
+            query_tokens,
+            query_measures.metadata,
+            mode=str(fgw_node_feature_mode),
+        )
+        reference_tokens, _ = _fgw_node_feature_array(
+            reference_tokens,
+            reference_measures.metadata,
+            mode=str(fgw_node_feature_mode),
+        )
+        query_structures = np.asarray(query_measures.structure_matrices, dtype=np.float32)
+        reference_structures = np.asarray(
+            reference_measures.structure_matrices,
+            dtype=np.float32,
+        )
+        if fgw_structure_cost_scale is not None:
+            fgw_structure_scale = float(fgw_structure_cost_scale)
+            if not np.isfinite(fgw_structure_scale) or fgw_structure_scale <= 0.0:
+                raise ValueError("fgw_structure_cost_scale must be a positive finite value.")
+            fgw_structure_scale_source = "provided"
+        elif str(fgw_structure_normalization).strip().lower() == "sampled_median":
+            query_scale = _fit_fgw_structure_scale(
+                query_structures,
+                query_measures.mask,
+                normalization="sampled_median",
+                n_pairs=int(fgw_structure_sample_pairs),
+                seed=int(query_measures.metadata.get("seed", 1337)),
+            )
+            reference_scale = _fit_fgw_structure_scale(
+                reference_structures,
+                reference_measures.mask,
+                normalization="sampled_median",
+                n_pairs=int(fgw_structure_sample_pairs),
+                seed=int(reference_measures.metadata.get("seed", 1337)),
+            )
+            fgw_structure_scale = float(np.mean([query_scale, reference_scale]))
+            fgw_structure_scale_source = "query_reference_sampled_median"
+        elif str(fgw_structure_normalization).strip().lower() != "none":
+            raise ValueError("fgw_structure_normalization must be none or sampled_median.")
+        else:
+            fgw_structure_scale_source = "none"
+        query_structures = query_structures / np.float32(
+            np.sqrt(max(fgw_structure_scale, 1e-8))
+        )
+        reference_structures = reference_structures / np.float32(
+            np.sqrt(max(fgw_structure_scale, 1e-8))
+        )
+
+    out = np.zeros((n_query, n_reference), dtype=np.float32)
+    for q_start in range(0, n_query, bs):
+        q_stop = min(q_start + bs, n_query)
+        q_width = int(np.max(query_active[q_start:q_stop]))
+        q_tok = _tensor_block(
+            query_tokens,
+            q_start,
+            q_stop,
+            q_width,
+            device=resolved_device,
+        )
+        q_w = _tensor_block(
+            query_weights,
+            q_start,
+            q_stop,
+            q_width,
+            device=resolved_device,
+        )
+        for r_start in range(0, n_reference, bs):
+            r_stop = min(r_start + bs, n_reference)
+            r_width = int(np.max(reference_active[r_start:r_stop]))
+            r_tok = _tensor_block(
+                reference_tokens,
+                r_start,
+                r_stop,
+                r_width,
+                device=resolved_device,
+            )
+            r_w = _tensor_block(
+                reference_weights,
+                r_start,
+                r_stop,
+                r_width,
+                device=resolved_device,
+            )
+            if use_fgw:
+                assert query_structures is not None and reference_structures is not None
+                q_struct = _structure_block(
+                    query_structures,
+                    q_start,
+                    q_stop,
+                    q_width,
+                    device=resolved_device,
+                )
+                r_struct = _structure_block(
+                    reference_structures,
+                    r_start,
+                    r_stop,
+                    r_width,
+                    device=resolved_device,
+                )
+            else:
+                q_struct = r_struct = None
+            block = _distance_block(
+                tok_a=q_tok,
+                w_a=q_w,
+                tok_b=r_tok,
+                w_b=r_w,
+                use_fgw=use_fgw,
+                struct_a=q_struct,
+                struct_b=r_struct,
+                fgw_alpha=float(fgw_alpha),
+                epsilon=float(epsilon),
+                n_iters=int(n_iters),
+                fgw_iters=int(fgw_iters),
+            )
+            if debiased:
+                block = block - 0.5 * query_self[q_start:q_stop, None]
+                block = block - 0.5 * reference_self[None, r_start:r_stop]
+                block = np.maximum(block, 0.0).astype(np.float32, copy=False)
+            block = _add_anchor_cost(
+                block,
+                query_anchors[q_start:q_stop],
+                reference_anchors[r_start:r_stop],
+                float(anchor_weight),
+            )
+            out[q_start:q_stop, r_start:r_stop] = block
+
+    metadata = {
+        "distance_mode": _canonical_distance_mode(debiased=debiased, use_fgw=use_fgw),
+        "requested_distance_mode": str(requested_mode),
+        "cross_distance": True,
+        "n_query": int(n_query),
+        "n_reference": int(n_reference),
+        "matrix_shape": [int(n_query), int(n_reference)],
+        "epsilon": float(epsilon),
+        "sinkhorn_iters": int(n_iters),
+        "anchor_weight": float(anchor_weight),
+        "fgw_alpha": float(fgw_alpha) if use_fgw else None,
+        "fgw_iters": int(fgw_iters) if use_fgw else None,
+        "fgw_structure_normalization": str(fgw_structure_normalization)
+        if use_fgw
+        else None,
+        "fgw_structure_cost_scale": float(fgw_structure_scale) if use_fgw else None,
+        "fgw_structure_cost_scale_source": fgw_structure_scale_source
+        if use_fgw
+        else None,
+        "block_size": int(bs),
+        **block_metadata,
+        "device": str(resolved_device),
+        **fgw_feature_metadata,
+    }
+    return out, metadata
+
+
 __all__ = [
     "choose_pairwise_block_size",
+    "compute_cross_ot_distance_matrix",
     "compute_pairwise_ot_distance_matrix",
     "estimate_pairwise_fgw_work",
     "estimate_pairwise_ot_work",

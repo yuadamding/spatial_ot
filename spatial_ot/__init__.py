@@ -24,6 +24,10 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "pairwise_niche",
         "compute_pairwise_ot_distance_matrix",
     ),
+    "compute_cross_ot_distance_matrix": (
+        "pairwise_niche",
+        "compute_cross_ot_distance_matrix",
+    ),
     "distribute_pooled_feature_cache_to_inputs": (
         "pooling",
         "distribute_pooled_feature_cache_to_inputs",
@@ -50,7 +54,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "sinkhorn_ot_block": ("pairwise_niche", "sinkhorn_ot_block"),
 }
 
-__version__ = "3.0.13"
+__version__ = "3.0.14"
 __all__ = ["__version__", *_LAZY_EXPORTS]
 
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.14
+
+- Add `compute_cross_ot_distance_matrix()` for query-to-reference OT/FGW distances without building a query-by-query all-pairs matrix.
+- Reuse the exact pairwise block machinery for cross OT/FGW distance blocks, including active-support trimming, debiased Sinkhorn self-costs, anchor penalties, and adaptive block sizing.
+- Allow cross FGW runs to use a provided reference `fgw_structure_cost_scale` so transform, medoid, landmark, and refinement workflows can stay on the fitted structure-cost scale.
+- Export the cross-distance helper from `spatial_ot` and `spatial_ot.pairwise_niche`.
+- Add regression tests showing cross OT/FGW distances match exact reference submatrices when using the same orientation and fitted FGW scale.
+
 ## 3.0.13
 
 - Add sampled Sinkhorn marginal-error diagnostics to pairwise OT distance metadata.
